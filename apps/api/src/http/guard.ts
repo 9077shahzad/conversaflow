@@ -73,6 +73,9 @@ export class AccessGuard implements CanActivate {
     if (!session.activeTenantId) throw Errors.noActiveTenant();
     const actor = await loadActor(this.deps.db, session.activeTenantId, session.userId, req.ip);
     if (!actor) throw Errors.forbidden('You are no longer a member of this company.');
+    // Pilot companies: every member must have two-step sign-in set up and verified in this session, for every
+    // company request, whatever the permission (owner decision 20 Oct 2026).
+    if (actor.requiresMfa && !(session.userHasMfa && session.mfaVerified)) throw Errors.companyRequiresMfa();
     if (!actor.permissions.has(permission)) throw Errors.forbidden();
     if ((await permissionsRequiringMfa(this.deps.db)).has(permission) && !(session.userHasMfa && session.mfaVerified)) {
       throw Errors.mfaEnrollmentRequired();

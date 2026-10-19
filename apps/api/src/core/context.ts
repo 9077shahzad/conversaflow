@@ -40,5 +40,7 @@ export interface TenantActor {
   membershipId: string;
   roles: string[];
   permissions: Set<string>;
+  /** Pilot companies require two-step sign-in for every member (migration 0011). */
+  requiresMfa: boolean;
   ip?: string;
 }

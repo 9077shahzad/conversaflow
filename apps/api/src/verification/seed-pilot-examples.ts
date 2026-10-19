@@ -99,7 +99,7 @@ async function main() {
   const mailer = new MemoryMailer();
   const deps = buildDeps(config, { mailer });
   const notify = createPool(process.env.DATABASE_NOTIFY_URL!, 1);
-  // Operations (owner role) connection: used only to record each company's pilot seat allowance.
+  // Operations connection (migration owner, acting as cf_ops): used only to record each company's pilot enrolment.
   const ops = createPool(process.env.DATABASE_URL!, 1);
   const notifier = new Notifier(notify, mailer, config.APP_ORIGIN);
   const auth = new AuthService(deps);
@@ -125,10 +125,18 @@ async function main() {
       legalName: ex.legalName, slug: `${ex.slugBase}-${suffix}`.slice(0, 40), country: ex.country, timezone: ex.timezone,
       currency: ex.currency, locale: ex.locale, planCode: ex.planCode,
     });
-    // Trial caps allow 3 seats; a pilot team is larger, so the platform owner grants a recorded pilot allowance.
-    await withContext(ops, { tenantId: tenant.id, userId: null }, (tx) => tx.query(
-      "INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'seats', 10, 'Pilot seat allowance (synthetic example)')",
-      [tenant.id]));
+    // Pilot enrolment as the console records it (migration 0011): a separate 10-seat allowance for 90 days and
+    // two-step sign-in required for everyone. The standard trial cap of 3 seats is untouched. Written here as the
+    // platform-operations role because a seed has no staff session; the console uses platform_enrol_pilot.
+    await withContext(ops, { tenantId: null, userId: null }, async (tx) => {
+      await tx.query('SET LOCAL ROLE cf_ops');
+      const ovr = await tx.query<{ id: string }>(
+        "INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, granted_by, expires_at) VALUES ($1, 'seats', 10, 'Pilot seat allowance: synthetic example', $2, now() + interval '90 days') RETURNING id",
+        [tenant.id, owner.userId]);
+      await tx.query(
+        "INSERT INTO pilot_enrolments (tenant_id, seat_allowance, reason, ends_at, seat_override_id, enrolled_by) VALUES ($1, 10, 'Synthetic pilot example', now() + interval '90 days', $2, $3)",
+        [tenant.id, ovr.rows[0]!.id, owner.userId]);
+    });
     const actor = (await loadActor(deps.db, tenant.id, owner.userId))!;
     const settings = new SettingsService(deps);
     await settings.updateSettings(actor, { businessHours: ex.hours, languages: ['ar', 'en'], slaFirstResponseMinutes: ex.sla[0], slaResolutionMinutes: ex.sla[1] });

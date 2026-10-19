@@ -40,6 +40,8 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await new AutomationMetering(t.deps).recordRunOutcome({ tenantId, userId: owner.userId! }, `run-${label}`, 'completed');
   await asOwner(t, tenantId, (tx) =>
     tx.query("INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'seats', 5, 'test')", [tenantId]));
+  // A pilot enrolment through the console (migration 0011). Last, because it requires two-step sign-in from here on.
+  await staff.post(`/v1/platform/tenants/${tenantId}/pilot`, { reason: `Isolation test pilot for ${label}` }).expect(201);
 }
 
 beforeAll(async () => {
@@ -64,13 +66,13 @@ afterAll(() => t?.close());
 const ctxA = () => ({ tenantId: tenantA, userId: a.userId! });
 
 describe('database isolation between companies', () => {
-  it('covers every table that has a tenant_id column (at least the 18 known ones)', () => {
+  it('covers every table that has a tenant_id column (at least the 19 known ones)', () => {
     expect(tenantTables).toEqual(expect.arrayContaining([
       'audit_events', 'branches', 'entitlement_overrides', 'files', 'invitations', 'membership_roles', 'memberships',
       'role_permissions', 'roles', 'subscriptions', 'support_access_grants', 'team_members', 'teams', 'tenant_feature_flags',
-      'tenant_holidays', 'tenant_settings', 'usage_counters', 'usage_events',
+      'tenant_holidays', 'tenant_settings', 'usage_counters', 'usage_events', 'pilot_enrolments',
     ]));
-    expect(tenantTables.length).toBeGreaterThanOrEqual(18);
+    expect(tenantTables.length).toBeGreaterThanOrEqual(19);
   });
 
   it('company B really has data in every tenant table (so the checks below are meaningful)', async () => {

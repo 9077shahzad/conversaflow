@@ -107,6 +107,10 @@ export class FilesService {
          WHERE m.tenant_id = $1 AND m.user_id = $2 AND m.status = 'active' AND rp.permission_key = 'files.read' LIMIT 1`,
         [claims.t, session.userId]);
       if (allowed.rowCount !== 1) throw Errors.invalidLink();
+      // Pilot companies require verified two-step sign-in for downloads too (this route sits outside the guard's
+      // permission check because the link carries its own company and user).
+      const pilot = await tx.query<{ r: boolean }>('SELECT tenant_requires_mfa() AS r');
+      if (pilot.rows[0]!.r && !(session.userHasMfa && session.mfaVerified)) throw Errors.companyRequiresMfa();
       const { rows } = await tx.query<{ storage_key: string; original_name: string; content_type: string; status: string }>(
         'SELECT storage_key, original_name, content_type, status FROM files WHERE id = $1', [claims.f]);
       const file = rows[0];

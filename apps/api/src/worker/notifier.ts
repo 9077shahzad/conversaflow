@@ -2,9 +2,9 @@ import { withContext, type Db } from '@conversaflow/database';
 import { randomToken, sha256 } from '../core/crypto';
 import type { Mailer } from '../core/mailer';
 
-type Purpose = 'verify_email' | 'reset_password' | 'signup_existing';
+type Purpose = 'verify_email' | 'reset_password' | 'signup_existing' | 'mfa_enabled' | 'recovery_code_used';
 
-const TTL: Record<Exclude<Purpose, 'signup_existing'>, string> = {
+const TTL: Record<'verify_email' | 'reset_password', string> = {
   verify_email: '24 hours',
   reset_password: '1 hour',
 };
@@ -68,6 +68,19 @@ export class Notifier {
     const userId = rows[0]?.user_id;
     const to = rows[0]?.email; // the STORED address, never the one typed into the form
     if (!userId || !to) return; // no account: nothing is sent, and the API already answered the same either way
+    if (req.purpose === 'mfa_enabled' || req.purpose === 'recovery_code_used') {
+      // Security notices (mitigation M5): no token, no link that signs anyone in; the reset page is public anyway.
+      const what = req.purpose === 'mfa_enabled'
+        ? ['Two-step sign-in was turned on for your ConversaFlow account.', 'تم تفعيل التحقق بخطوتين لحسابك في ConversaFlow.']
+        : ['A recovery code was used to sign in to your ConversaFlow account.', 'تم استخدام رمز استرداد لتسجيل الدخول إلى حسابك في ConversaFlow.'];
+      await this.mailer.send({
+        to,
+        subject: req.purpose === 'mfa_enabled' ? 'Two-step sign-in turned on' : 'Recovery code used',
+        text: `${what[0]}\nIf this was not you, reset your password now at ${this.appOrigin}/forgot-password and tell your company administrator.\n\n`
+          + `${what[1]}\nإذا لم تقم بذلك، أعد تعيين كلمة المرور الآن من ${this.appOrigin}/forgot-password وأبلغ مسؤول شركتك.`,
+      });
+      return;
+    }
     const token = randomToken();
     await tx.query('SELECT auth_issue_token($1, $2, $3, $4::interval)', [userId, req.purpose, sha256(token), TTL[req.purpose]]);
     if (req.purpose === 'verify_email') {

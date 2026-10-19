@@ -43,8 +43,8 @@ export async function createSystemRoles(tx: Tx, tenantId: string): Promise<Recor
  */
 export async function loadActor(db: Db, tenantId: string, userId: string, ip?: string): Promise<TenantActor | null> {
   return withContext(db, { tenantId, userId }, async (tx) => {
-    const { rows } = await tx.query<{ membership_id: string; roles: string[] | null; permissions: string[] | null }>(
-      `SELECT m.id AS membership_id,
+    const { rows } = await tx.query<{ membership_id: string; roles: string[] | null; permissions: string[] | null; requires_mfa: boolean }>(
+      `SELECT m.id AS membership_id, tenant_requires_mfa() AS requires_mfa,
               array_agg(DISTINCT r.key) FILTER (WHERE r.key IS NOT NULL) AS roles,
               array_agg(DISTINCT rp.permission_key) FILTER (WHERE rp.permission_key IS NOT NULL) AS permissions
        FROM memberships m
@@ -59,7 +59,7 @@ export async function loadActor(db: Db, tenantId: string, userId: string, ip?: s
     if (!row) return null;
     return {
       tenantId, userId, membershipId: row.membership_id, roles: row.roles ?? [],
-      permissions: new Set(row.permissions ?? []), ip,
+      permissions: new Set(row.permissions ?? []), requiresMfa: row.requires_mfa, ip,
     };
   });
 }

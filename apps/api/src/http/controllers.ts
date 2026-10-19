@@ -333,6 +333,16 @@ export class PlatformController {
     await this.platform.setFeatureFlag(await this.platform.requireStaff(s, 'platform_owner'), id, key, body);
   }
 
+  @Post('tenants/:id/pilot') @HttpCode(201)
+  async enrolPilot(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.enrolPilot(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+
+  @Post('tenants/:id/pilot/end') @HttpCode(204)
+  async endPilot(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    await this.platform.endPilot(await this.platform.requireStaff(s, 'platform_owner'), id);
+  }
+
   @Post('support-grants') @HttpCode(201)
   async request(@CurrentSession() s: AuthSession, @Body() body: unknown) {
     return this.platform.requestSupport(await this.platform.requireStaff(s), body);

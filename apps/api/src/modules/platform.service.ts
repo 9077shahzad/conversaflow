@@ -19,6 +19,11 @@ const SupportRequest = z.object({
   minutes: z.number().int().min(5).max(240),
 });
 const FlagRequest = z.object({ enabled: z.boolean() });
+const PilotRequest = z.object({
+  seats: z.number().int().min(1).max(50).default(10),
+  days: z.number().int().min(7).max(180).default(90),
+  reason: z.string().trim().min(10, 'Say why this company is in the pilot (at least 10 characters)').max(500),
+});
 
 /**
  * Platform owner console. Uses its own database role (cf_platform):
@@ -77,6 +82,20 @@ export class PlatformService {
     const { enabled } = parse(FlagRequest, input);
     if (!isUuid(tenantId) || !/^[a-z][a-z0-9_]{1,60}$/.test(key)) throw Errors.notFound('Company or flag');
     await this.run(staff, (tx) => tx.query('SELECT platform_set_feature_flag($1, $2, $3, $4)', [staff.token, tenantId, key, enabled]));
+  }
+
+  /** Pilot enrolment: separate seat allowance (default 10) and mandatory two-step sign-in for every member. */
+  async enrolPilot(staff: StaffActor, tenantId: string, input: unknown) {
+    const body = parse(PilotRequest, input);
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    const endsAt = await this.run(staff, async (tx) => (await tx.query<{ ends: Date }>(
+      'SELECT platform_enrol_pilot($1, $2, $3, $4, $5) AS ends', [staff.token, tenantId, body.seats, body.days, body.reason])).rows[0]!.ends);
+    return { tenantId, seats: body.seats, requiresMfa: true, endsAt: new Date(endsAt).toISOString() };
+  }
+
+  async endPilot(staff: StaffActor, tenantId: string) {
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    await this.run(staff, (tx) => tx.query('SELECT platform_end_pilot($1, $2)', [staff.token, tenantId]));
   }
 
   async requestSupport(staff: StaffActor, input: unknown) {

@@ -118,3 +118,26 @@ HTML response and proves both are blocked and reported.
 
 Limit: `'strict-dynamic'` trusts scripts created by already-trusted page code; it protects against injected markup,
 not against a compromised dependency bundled into the app. Dependency auditing covers that separately.
+
+## ADR-029 — Pilot enrolment: mandatory two-step sign-in and a separate seat allowance
+
+Owner decisions (20 Oct 2026): every pilot user must use two-step sign-in; each pilot company gets a separate
+10-seat allowance; the standard trial allowance stays unchanged; company selection and invitations remain pending.
+
+Decision (migration 0011): a `pilot_enrolments` record, created and ended only by a platform owner through
+token-bound console actions (`platform_enrol_pilot`, `platform_end_pilot`), both audited. Enrolment writes a
+seat override that expires with the pilot (default 90 days, 7–180 allowed) and sets `requires_mfa`, which cannot be
+false. While enrolled, every company request (guard) and every file download (link route) is refused with
+`mfa_enrollment_required` unless the user has two-step sign-in and verified it in this session. Companies can read
+their enrolment but no login role can write it or any limit override (CI guard).
+
+This does **not** resolve ADR-027. See `docs/readiness/pilot-mfa-residual-risk.md` for the exposure that remains,
+the mitigations and the risk acceptance still required.
+
+## ADR-030 — Security notices for two-step sign-in
+
+Mitigation M5 from the pilot residual-risk note (migration 0012). When two-step sign-in is turned on, or a recovery
+code is used, the authentication function itself queues an email to the account's **stored** address. The notice
+carries no token or sign-in link. The general email request function refuses these purposes, so a login role can
+neither skip nor forge them. A test replays exposure E1 (a forged session enrolling an attacker's authenticator):
+it still succeeds, which is the accepted residual, but the real owner is told.

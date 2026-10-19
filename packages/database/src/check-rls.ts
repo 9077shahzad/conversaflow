@@ -111,6 +111,14 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       SELECT has_table_privilege('cf_app', 'subscriptions', 'UPDATE') OR has_any_column_privilege('cf_app', 'subscriptions', 'UPDATE') AS upd,
              has_table_privilege('cf_identity', 'sessions', 'INSERT') AS sess`);
     if (billing.rows[0]!.upd) problems.push('cf_app can update subscriptions (billing state)');
+    // Pilot enrolments and limit overrides are platform-owner decisions (migration 0011): no login role writes them.
+    for (const roleName of LOGIN_ROLES) {
+      const { rows } = await client.query<{ pilot: boolean; ovr: boolean }>(`
+        SELECT has_table_privilege($1, 'pilot_enrolments', 'INSERT,UPDATE,DELETE,TRUNCATE') OR has_any_column_privilege($1, 'pilot_enrolments', 'INSERT,UPDATE') AS pilot,
+               has_table_privilege($1, 'entitlement_overrides', 'INSERT,UPDATE,DELETE,TRUNCATE') OR has_any_column_privilege($1, 'entitlement_overrides', 'INSERT,UPDATE') AS ovr`, [roleName]);
+      if (rows[0]!.pilot) problems.push(`${roleName} can write pilot enrolments`);
+      if (rows[0]!.ovr) problems.push(`${roleName} can write limit overrides`);
+    }
     if (billing.rows[0]!.sess) problems.push('cf_identity can insert sessions directly; it must use auth_open_session');
     const minting = await client.query<{ who: string }>(`
       SELECT r.rolname AS who FROM pg_roles r

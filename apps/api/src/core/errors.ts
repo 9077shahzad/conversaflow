@@ -18,6 +18,8 @@ export const Errors = {
   forbidden: (message = 'You do not have permission to do this.') => new AppError(403, 'forbidden', message),
   mfaEnrollmentRequired: () =>
     new AppError(403, 'mfa_enrollment_required', 'Set up two-step verification before doing this.'),
+  companyRequiresMfa: () =>
+    new AppError(403, 'mfa_enrollment_required', 'This company requires two-step verification for everyone. Set it up to continue.'),
   emailNotVerified: () => new AppError(403, 'email_not_verified', 'Please verify your email address first.'),
   noActiveTenant: () => new AppError(403, 'no_active_company', 'Choose a company workspace first.'),
   // 404 is used for records in other companies too, so their existence is never revealed.
