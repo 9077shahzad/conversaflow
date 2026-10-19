@@ -11,6 +11,8 @@ const Schema = z.object({
   DATABASE_APP_URL: z.string().url(),
   /** Separate connection for sign-in, sessions and MFA (role cf_identity). */
   DATABASE_IDENTITY_URL: z.string().url(),
+  /** Platform owner console connection (role cf_platform). */
+  DATABASE_PLATFORM_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   FILE_URL_SIGNING_KEY: key32,
   MFA_ENCRYPTION_KEY: key32,

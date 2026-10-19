@@ -37,6 +37,8 @@ jobs:
       CF_IDENTITY_DB_PASSWORD: ci-identity-password
       DATABASE_NOTIFY_URL: postgres://cf_notify:ci-notify-password@localhost:5432/conversaflow
       CF_NOTIFY_DB_PASSWORD: ci-notify-password
+      DATABASE_PLATFORM_URL: postgres://cf_platform:ci-platform-password@localhost:5432/conversaflow
+      CF_PLATFORM_DB_PASSWORD: ci-platform-password
       SCANNER: clamd
       CLAMD_HOST: 127.0.0.1
       CLAMD_PORT: '3310'

@@ -14,6 +14,7 @@ OWNER_PW="owner-$(openssl rand -hex 12)"
 APP_PW="app-$(openssl rand -hex 12)"
 IDENTITY_PW="identity-$(openssl rand -hex 12)"
 NOTIFY_PW="notify-$(openssl rand -hex 12)"
+PLATFORM_PW="platform-$(openssl rand -hex 12)"
 
 as_pg() { if [ "$(id -u)" = "0" ]; then runuser -u postgres -- "$@"; else "$@"; fi; }
 
@@ -62,6 +63,8 @@ export DATABASE_IDENTITY_URL="postgres://cf_identity:$IDENTITY_PW@127.0.0.1:$PG_
 export CF_IDENTITY_DB_PASSWORD="$IDENTITY_PW"
 export DATABASE_NOTIFY_URL="postgres://cf_notify:$NOTIFY_PW@127.0.0.1:$PG_PORT/conversaflow"
 export CF_NOTIFY_DB_PASSWORD="$NOTIFY_PW"
+export DATABASE_PLATFORM_URL="postgres://cf_platform:$PLATFORM_PW@127.0.0.1:$PG_PORT/conversaflow"
+export CF_PLATFORM_DB_PASSWORD="$PLATFORM_PW"
 export SCANNER=clamd
 export CLAMD_HOST=127.0.0.1
 export CLAMD_PORT="$CLAMD_PORT"

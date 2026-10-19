@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { AutomationMetering } from '../src/modules/entitlements.service';
-import { addMember, asOwner, enableMfa, invite, newCompany, newUser, startApp, type Client, type TestApp } from './helpers';
+import { addMember, asOwner, enableMfa, invite, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
 let a: Client;
@@ -15,6 +15,8 @@ let b: Client;
 let tenantA: string;
 let tenantB: string;
 let tenantTables: string[];
+let staff: Client;
+let approver: Client;
 
 async function populate(owner: Client, label: string, tenantId: string) {
   await enableMfa(owner);
@@ -25,6 +27,16 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await t.deps.db.query('SELECT 1'); // warm pool
   await withContext(t.deps.db, { tenantId, userId: owner.userId! }, (tx) =>
     tx.query("INSERT INTO usage_counters (tenant_id, key, period_start, used) VALUES ($1, 'ai_credits', date_trunc('month', now())::date, 5)", [tenantId]));
+  // Settings, holidays, branches, teams and team members.
+  await owner.post('/v1/settings/holidays', { day: '2026-12-25', name: `Holiday ${label}` }).expect(201);
+  const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
+  const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
+  const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;
+  await owner.post(`/v1/teams/${team.id}/members`, { membershipId: agentId }).expect(204);
+  // A feature flag and an approved support grant, through the platform console.
+  await staff.put(`/v1/platform/tenants/${tenantId}/features/ai_agents`, { enabled: true }).expect(204);
+  const grant = (await staff.post('/v1/platform/support-grants', { tenantId, reason: `Isolation test fixture for ${label} company`, minutes: 5 }).expect(201)).body.grantId;
+  await approver.post(`/v1/platform/support-grants/${grant}/approve`).expect(201);
   await new AutomationMetering(t.deps).recordRunOutcome({ tenantId, userId: owner.userId! }, `run-${label}`, 'completed');
   await asOwner(t, tenantId, (tx) =>
     tx.query("INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'seats', 5, 'test')", [tenantId]));
@@ -32,6 +44,8 @@ async function populate(owner: Client, label: string, tenantId: string) {
 
 beforeAll(async () => {
   t = await startApp();
+  staff = await newStaff(t, 'iso-staff', 'platform_owner');
+  approver = await newStaff(t, 'iso-approver', 'platform_owner');
   a = await newUser(t, 'alpha');
   b = await newUser(t, 'bravo');
   tenantA = await newCompany(a, 'alpha');
@@ -50,12 +64,13 @@ afterAll(() => t?.close());
 const ctxA = () => ({ tenantId: tenantA, userId: a.userId! });
 
 describe('database isolation between companies', () => {
-  it('covers every table that has a tenant_id column (at least the 14 known ones)', () => {
+  it('covers every table that has a tenant_id column (at least the 18 known ones)', () => {
     expect(tenantTables).toEqual(expect.arrayContaining([
-      'audit_events', 'entitlement_overrides', 'files', 'invitations', 'membership_roles', 'memberships', 'role_permissions',
-      'roles', 'subscriptions', 'usage_counters',
+      'audit_events', 'branches', 'entitlement_overrides', 'files', 'invitations', 'membership_roles', 'memberships',
+      'role_permissions', 'roles', 'subscriptions', 'support_access_grants', 'team_members', 'teams', 'tenant_feature_flags',
+      'tenant_holidays', 'tenant_settings', 'usage_counters', 'usage_events',
     ]));
-    expect(tenantTables.length).toBeGreaterThanOrEqual(10);
+    expect(tenantTables.length).toBeGreaterThanOrEqual(18);
   });
 
   it('company B really has data in every tenant table (so the checks below are meaningful)', async () => {

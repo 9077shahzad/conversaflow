@@ -50,6 +50,7 @@ export class TenantsService {
         if ((err as { code?: string }).code === '23505') throw Errors.conflict('slug_taken', 'That workspace address is taken.');
         throw err;
       }
+      await tx.query('INSERT INTO tenant_settings (tenant_id, languages) VALUES ($1, $2)', [tenantId, [body.locale]]);
       const roleIds = await createSystemRoles(tx, tenantId);
       const m = await tx.query<{ id: string }>('INSERT INTO memberships (tenant_id, user_id) VALUES ($1, $2) RETURNING id', [
         tenantId, session.userId,

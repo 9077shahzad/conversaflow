@@ -12,6 +12,8 @@ export interface Deps {
   db: Db;
   /** cf_identity: sign-in, sessions and MFA only. */
   identityDb: Db;
+  /** cf_platform: platform owner console only. */
+  platformDb: Db;
   redis: Redis;
   rateLimiter: RateLimiter;
   mailer: Mailer;

@@ -38,6 +38,7 @@ export async function startApp(): Promise<TestApp> {
       await app.close();
       await deps.db.end();
       await deps.identityDb.end();
+      await deps.platformDb.end();
       await ownerDb.end();
       await notifyDb.end();
       deps.redis.disconnect();
@@ -146,4 +147,12 @@ export async function nextTotp(c: Client): Promise<string> {
 /** Ends the trial for a company (platform operation, owner role) so plan limits apply without trial caps. */
 export async function activateSubscription(t: TestApp, tenantId: string): Promise<void> {
   await asOwner(t, tenantId, (tx) => tx.query("UPDATE subscriptions SET status = 'active', trial_ends_at = NULL WHERE tenant_id = $1", [tenantId]));
+}
+
+/** Creates platform staff (added by the owner role, as in the operations runbook), signed in with MFA. */
+export async function newStaff(t: TestApp, label: string, role: 'platform_owner' | 'support_agent'): Promise<Client> {
+  const c = await newUser(t, label);
+  await t.ownerDb.query("INSERT INTO platform_staff (user_id, role, added_by) VALUES ($1, $2, 'test-runbook')", [c.userId, role]);
+  await enableMfa(c);
+  return c;
 }

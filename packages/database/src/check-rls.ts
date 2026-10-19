@@ -8,7 +8,7 @@
  */
 import pg from 'pg';
 
-const LOGIN_ROLES = ['cf_app', 'cf_identity', 'cf_notify'];
+const LOGIN_ROLES = ['cf_app', 'cf_identity', 'cf_notify', 'cf_platform'];
 const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests'];
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {

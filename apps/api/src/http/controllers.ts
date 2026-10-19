@@ -13,6 +13,8 @@ import { AuthService, type ClientInfo } from '../modules/auth.service';
 import { EntitlementsService } from '../modules/entitlements.service';
 import { FilesService } from '../modules/files.service';
 import { MembersService } from '../modules/members.service';
+import { PlatformService } from '../modules/platform.service';
+import { SettingsService } from '../modules/settings.service';
 import { TenantsService } from '../modules/tenants.service';
 import { AllowPendingMfa, CurrentActor, CurrentSession, Public, RequirePermission, SESSION_COOKIE, type CfRequest } from './guard';
 
@@ -243,5 +245,116 @@ export class FilesController {
   @RequirePermission('files.read') @Post(':id/link')
   link(@CurrentActor() actor: TenantActor, @Param('id') id: string) {
     return this.files.createLink(actor, id);
+  }
+}
+
+@Controller('v1')
+export class SettingsController {
+  constructor(@Inject(SettingsService) private readonly settings: SettingsService) {}
+
+  @RequirePermission('tenant.read') @Get('settings')
+  get(@CurrentActor() actor: TenantActor) {
+    return this.settings.getSettings(actor);
+  }
+
+  @RequirePermission('tenant.update') @Patch('settings')
+  update(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
+    return this.settings.updateSettings(actor, body);
+  }
+
+  @RequirePermission('tenant.update') @Post('settings/holidays') @HttpCode(201)
+  addHoliday(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
+    return this.settings.addHoliday(actor, body);
+  }
+
+  @RequirePermission('tenant.update') @Delete('settings/holidays/:id') @HttpCode(204)
+  async removeHoliday(@CurrentActor() actor: TenantActor, @Param('id') id: string) {
+    await this.settings.removeHoliday(actor, id);
+  }
+
+  @RequirePermission('members.read') @Get('branches')
+  branches(@CurrentActor() actor: TenantActor) {
+    return this.settings.listBranches(actor);
+  }
+
+  @RequirePermission('tenant.update') @Post('branches') @HttpCode(201)
+  createBranch(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
+    return this.settings.createBranch(actor, body);
+  }
+
+  @RequirePermission('members.read') @Get('teams')
+  teams(@CurrentActor() actor: TenantActor) {
+    return this.settings.listTeams(actor);
+  }
+
+  @RequirePermission('members.manage') @Post('teams') @HttpCode(201)
+  createTeam(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
+    return this.settings.createTeam(actor, body);
+  }
+
+  @RequirePermission('members.manage') @Post('teams/:id/members') @HttpCode(204)
+  async addTeamMember(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    await this.settings.addTeamMember(actor, id, body);
+  }
+
+  @RequirePermission('tenant.read') @Get('features')
+  features(@CurrentActor() actor: TenantActor) {
+    return this.settings.features(actor);
+  }
+
+  @RequirePermission('tenant.read') @Get('support-grants')
+  supportGrants(@CurrentActor() actor: TenantActor) {
+    return this.settings.supportGrants(actor);
+  }
+}
+
+/** Platform owner console. Staff only, with two-step verification; checked on every call. */
+@Controller('v1/platform')
+export class PlatformController {
+  constructor(@Inject(PlatformService) private readonly platform: PlatformService) {}
+
+  @Get('tenants')
+  async directory(@CurrentSession() s: AuthSession) {
+    return this.platform.directory(await this.platform.requireStaff(s));
+  }
+
+  @Get('plans')
+  async plans(@CurrentSession() s: AuthSession) {
+    return this.platform.plans(await this.platform.requireStaff(s));
+  }
+
+  @Post('plans/versions/:id/publish') @HttpCode(204)
+  async publish(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    await this.platform.publishPlanVersion(await this.platform.requireStaff(s, 'platform_owner'), id);
+  }
+
+  @Put('tenants/:id/features/:key') @HttpCode(204)
+  async setFlag(@CurrentSession() s: AuthSession, @Param('id') id: string, @Param('key') key: string, @Body() body: unknown) {
+    await this.platform.setFeatureFlag(await this.platform.requireStaff(s, 'platform_owner'), id, key, body);
+  }
+
+  @Post('support-grants') @HttpCode(201)
+  async request(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.requestSupport(await this.platform.requireStaff(s), body);
+  }
+
+  @Post('support-grants/:id/approve')
+  async approve(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    return this.platform.approveSupport(await this.platform.requireStaff(s, 'platform_owner'), id);
+  }
+
+  @Post('support-grants/:id/revoke') @HttpCode(204)
+  async revoke(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    await this.platform.revokeSupport(await this.platform.requireStaff(s), id);
+  }
+
+  @Get('tenants/:id/files')
+  async supportFiles(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    return this.platform.supportView(await this.platform.requireStaff(s), id, 'files');
+  }
+
+  @Get('tenants/:id/members')
+  async supportMembers(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    return this.platform.supportView(await this.platform.requireStaff(s), id, 'members');
   }
 }

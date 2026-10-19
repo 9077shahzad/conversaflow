@@ -11,7 +11,7 @@ import { RateLimiter } from './core/rate-limit';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 import {
   AuditController, AuthController, BillingController, FilesController, HealthController, MeController, MembersController,
-  TenantsController,
+  PlatformController, SettingsController, TenantsController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -21,6 +21,8 @@ import { AuthService } from './modules/auth.service';
 import { EntitlementsService } from './modules/entitlements.service';
 import { FilesService } from './modules/files.service';
 import { MembersService } from './modules/members.service';
+import { PlatformService } from './modules/platform.service';
+import { SettingsService } from './modules/settings.service';
 import { TenantsService } from './modules/tenants.service';
 
 export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps> = {}): Deps {
@@ -33,6 +35,7 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
     config,
     db: overrides.db ?? createPool(config.DATABASE_APP_URL),
     identityDb: overrides.identityDb ?? createPool(config.DATABASE_IDENTITY_URL, 5),
+    platformDb: overrides.platformDb ?? createPool(config.DATABASE_PLATFORM_URL, 3),
     redis,
     rateLimiter: overrides.rateLimiter ?? new RateLimiter(redis),
     mailer,
@@ -57,12 +60,13 @@ export class AppModule {
       module: AppModule,
       controllers: [
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
-        AuditController, FilesController,
+        AuditController, FilesController, SettingsController, PlatformController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
-        service(AuditService), service(FilesService),
+        service(AuditService), service(FilesService), service(SettingsService),
+        { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },
       ],

@@ -4,7 +4,9 @@
  *   cf_app      — API business data (companies, members, files, …). No rights over credentials.
  *   cf_identity — sign-in, sessions and MFA, through a few narrow functions.
  *   cf_notify   — the notifier worker: the only role that can issue email verification / reset tokens.
+ *   cf_platform — platform owner console: company metadata; content only under an approved support grant.
  *   cf_auth     — NOLOGIN; owns the authentication functions.
+ *   cf_ops      — NOLOGIN; owns the platform functions.
  */
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
@@ -58,6 +60,7 @@ export interface RolePasswords {
   app: string; // cf_app: API business data
   identity: string; // cf_identity: sign-in, sessions, MFA
   notify: string; // cf_notify: issues email tokens and sends account emails
+  platform: string; // cf_platform: platform owner console (metadata; content only under an approved support grant)
 }
 
 async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Promise<void> {
@@ -67,6 +70,7 @@ async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Prom
     ['cf_app', passwords.app, 'CF_APP_DB_PASSWORD'],
     ['cf_identity', passwords.identity, 'CF_IDENTITY_DB_PASSWORD'],
     ['cf_notify', passwords.notify, 'CF_NOTIFY_DB_PASSWORD'],
+    ['cf_platform', passwords.platform, 'CF_PLATFORM_DB_PASSWORD'],
   ];
   for (const [role, password, envName] of loginRoles) {
     if (!password || password.length < 12) throw new Error(`${envName} must be set (12+ characters).`);
@@ -77,14 +81,15 @@ async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Prom
     );
     await client.query(rows[0]!.sql);
   }
-  if (!(await exists('cf_auth'))) {
-    await client.query('CREATE ROLE cf_auth NOLOGIN NOSUPERUSER NOBYPASSRLS');
+  for (const owner of ['cf_auth', 'cf_ops']) {
+    // eslint-disable-next-line no-restricted-syntax
+    if (!(await exists(owner))) await client.query(`CREATE ROLE ${pg.escapeIdentifier(owner)} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   }
   // The owner must be able to hand function ownership to cf_auth.
   const { rows: me } = await client.query<{ u: string; db: string }>('SELECT current_user AS u, current_database() AS db');
   // Identifiers come from the server itself and are escaped; GRANT cannot take bind parameters.
   // eslint-disable-next-line no-restricted-syntax
-  await client.query(`GRANT cf_auth TO ${pg.escapeIdentifier(me[0]!.u)}`);
+  await client.query(`GRANT cf_auth, cf_ops TO ${pg.escapeIdentifier(me[0]!.u)}`);
   for (const [role] of loginRoles) {
     // eslint-disable-next-line no-restricted-syntax
     await client.query(`GRANT CONNECT ON DATABASE ${pg.escapeIdentifier(me[0]!.db)} TO ${pg.escapeIdentifier(role)}`);
@@ -101,6 +106,7 @@ if (require.main === module) {
     app: process.env.CF_APP_DB_PASSWORD ?? '',
     identity: process.env.CF_IDENTITY_DB_PASSWORD ?? '',
     notify: process.env.CF_NOTIFY_DB_PASSWORD ?? '',
+    platform: process.env.CF_PLATFORM_DB_PASSWORD ?? '',
   }).catch((err) => {
     console.error(err.message);
     process.exit(1);

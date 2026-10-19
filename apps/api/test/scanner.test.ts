@@ -54,7 +54,7 @@ describe('fail-closed when the scanner is unavailable', () => {
   async function appWithScanner(scanner: ClamdScanner) {
     const deps = buildDeps(loadConfig(process.env), { mailer: t.mailer, scanner });
     const app = await createApp(deps);
-    return { app, close: async () => { await app.close(); await deps.db.end(); await deps.identityDb.end(); deps.redis.disconnect(); } };
+    return { app, close: async () => { await app.close(); await deps.db.end(); await deps.identityDb.end(); await deps.platformDb.end(); deps.redis.disconnect(); } };
   }
 
   it('scanner down: upload refused with 503, no file row, nothing on disk', async () => {
