@@ -98,3 +98,23 @@ For users with MFA that session can only reach the MFA step. For users **without
 Mitigations: (1) platform staff, Owners and Admins must use MFA (already enforced for sensitive permissions);
 (2) at deployment, keep the identity credential in its own secret, readable only by the API service, never by the
 worker or console; (3) option for the owner: require MFA for every pilot user (see readiness checklist).
+
+## ADR-028 — Content Security Policy with a fresh nonce per page
+
+Context: the web app allowed inline scripts and styles (`'unsafe-inline'`), so an HTML-injection flaw anywhere would
+let injected script run with the user's session.
+
+Decision: `apps/web/middleware.ts` creates 128 random bits per page request and sends
+`script-src 'self' 'nonce-…' 'strict-dynamic'`, `style-src 'self' 'nonce-…'`, `style-src-attr 'none'`, `base-uri 'none'`,
+`object-src 'none'`, `frame-ancestors 'none'`, `form-action 'self'`. Next.js reads the policy from the request and
+stamps the nonce on its own scripts. Pages therefore render per request (no static pre-rendering). The two inline
+style attributes in the interface moved into CSS classes. Development mode adds `'unsafe-eval'` and `ws:` for hot
+reload only.
+
+Evidence: browser checks assert the header, that no `unsafe-inline`/`unsafe-eval` is present, that every script tag
+carries the response's nonce, that two loads get different nonces, and that no page in either language at any of
+the three screen sizes reports a violation. A further check injects an inline script and inline style into the real
+HTML response and proves both are blocked and reported.
+
+Limit: `'strict-dynamic'` trusts scripts created by already-trusted page code; it protects against injected markup,
+not against a compromised dependency bundled into the app. Dependency auditing covers that separately.

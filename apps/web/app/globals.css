@@ -8,3 +8,9 @@ body { background: #F8FAFC; color: #0F172A; }
 html[lang='ar'] body { line-height: 1.7; letter-spacing: 0; }
 html[lang='en'] body { line-height: 1.55; }
 :focus-visible { outline: 3px solid #0E7490; outline-offset: 2px; border-radius: 6px; }
+
+/* Brand panel glow (kept in CSS, not an inline style, so the security policy can forbid inline styles). */
+.brand-glow {
+  background: radial-gradient(60% 50% at 80% 10%, rgba(16, 185, 129, 0.35), transparent),
+    radial-gradient(50% 60% at 10% 90%, rgba(14, 116, 144, 0.55), transparent);
+}

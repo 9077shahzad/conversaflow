@@ -16,8 +16,7 @@ export function AuthLayout({ locale, children }: { locale: Locale; children: Rea
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
       <aside className="relative flex flex-col justify-between gap-10 overflow-hidden bg-navy px-6 py-8 text-white lg:w-[46%] lg:px-12 lg:py-12">
-        <div aria-hidden="true" className="pointer-events-none absolute inset-0 opacity-60"
-          style={{ background: 'radial-gradient(60% 50% at 80% 10%, rgba(16,185,129,.35), transparent), radial-gradient(50% 60% at 10% 90%, rgba(14,116,144,.55), transparent)' }} />
+        <div aria-hidden="true" className="brand-glow pointer-events-none absolute inset-0 opacity-60" />
         <div className="relative flex items-center justify-between gap-4">
           <Logo by={d.brand.by} inverse />
           <span className="lg:hidden"><LanguageSwitch locale={locale} className="border-slate-500 text-white hover:bg-white/10" /></span>

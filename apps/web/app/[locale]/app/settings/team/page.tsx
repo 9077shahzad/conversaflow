@@ -20,7 +20,7 @@ export default function Team() {
           {rows.map((m) => (
             <li key={m.id} className="rounded-xl border border-slate-200 bg-white p-4">
               <p className="text-base font-semibold text-navy"><bdi>{m.fullName}</bdi></p>
-              <p className="mt-0.5 break-all text-sm text-slate-700" dir="ltr" style={{ textAlign: locale === 'ar' ? 'right' : 'left' }}>{m.email}</p>
+              <p className={`mt-0.5 break-all text-sm text-slate-700 ${locale === 'ar' ? 'text-right' : 'text-left'}`} dir="ltr">{m.email}</p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 {m.roles.map((r) => (
                   <span key={r} className="inline-block rounded-full bg-teal-soft px-2.5 py-0.5 text-sm font-medium text-teal">{d.roles[r] ?? r}</span>

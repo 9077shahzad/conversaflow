@@ -16,9 +16,7 @@ export default {
         { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
         { key: 'X-Frame-Options', value: 'DENY' },
         { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
-        // Only this origin may serve scripts, styles, fonts and API calls; no framing, no form posts elsewhere.
-        // 'unsafe-inline' for scripts is needed by Next.js's own bootstrap; moving to per-request nonces is on the backlog.
-        { key: 'Content-Security-Policy', value: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" },
+        // The Content-Security-Policy is set per request in middleware.ts with a fresh nonce (ADR-028).
       ],
     }];
   },

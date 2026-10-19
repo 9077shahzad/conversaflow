@@ -14,8 +14,18 @@ mkdirSync(SHOTS, { recursive: true });
 
 const VIEWPORTS = { mobile: { width: 390, height: 844 }, tablet: { width: 768, height: 1024 }, desktop: { width: 1440, height: 900 } };
 
+/** Records every Content-Security-Policy violation the browser reports on any page of this context. */
+const RECORD_CSP = () => {
+  (window as unknown as { __csp: string[] }).__csp = [];
+  document.addEventListener('securitypolicyviolation', (e) => {
+    (window as unknown as { __csp: string[] }).__csp.push(`${e.violatedDirective} ${e.blockedURI}`);
+  });
+};
+
 async function checkPage(page: Page, locale: 'en' | 'ar', name: string, view: string) {
   await page.evaluate(() => document.fonts.ready);
+  // Strict security policy: nothing on the page was blocked (no inline script or style slipped in).
+  expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? null), `CSP violations on ${name} ${view}`).toEqual([]);
   // Direction and language
   expect(await page.getAttribute('html', 'dir')).toBe(locale === 'ar' ? 'rtl' : 'ltr');
   expect(await page.getAttribute('html', 'lang')).toBe(locale);
@@ -64,6 +74,7 @@ for (const locale of ['en', 'ar'] as const) {
   for (const [view, size] of Object.entries(VIEWPORTS)) {
     test(`${locale} ${view}: sign-in, dashboard, company settings, team`, async ({ browser }) => {
       const context = await browser.newContext({ viewport: size, locale: locale === 'ar' ? 'ar-SA' : 'en-GB' });
+      await context.addInitScript(RECORD_CSP);
       const page = await context.newPage();
       const { ownerEmail, password } = demo();
 
@@ -107,11 +118,43 @@ test('security headers are set and the email link pages exist in both languages'
   const csp = res!.headers()['content-security-policy'] ?? '';
   expect(csp).toContain("default-src 'self'");
   expect(csp).toContain("frame-ancestors 'none'");
+  expect(csp).not.toContain('unsafe-inline');
+  expect(csp).not.toContain('unsafe-eval');
   expect(res!.headers()['x-frame-options']).toBe('DENY');
+  // A fresh nonce on every response, and every script in the page carries this response's nonce.
+  const nonceOf = (policy: string) => /'nonce-([A-Za-z0-9+/=]+)'/.exec(policy)?.[1];
+  const nonce = nonceOf(csp);
+  expect(nonce).toBeTruthy();
+  const html = await res!.text();
+  const scripts = html.match(/<script\b[^>]*>/g) ?? [];
+  expect(scripts.length).toBeGreaterThan(0);
+  for (const tag of scripts) expect(tag, tag).toContain(`nonce="${nonce}"`);
+  const again = await page.request.get('/en/sign-in');
+  expect(nonceOf(again.headers()['content-security-policy'] ?? '')).not.toBe(nonce);
   for (const locale of ['en', 'ar']) {
     await page.goto(`/${locale}/verify-email?token=not-a-real-token`);
     await expect(page.getByRole('status')).toContainText(locale === 'ar' ? 'غير صالح' : 'invalid');
     await page.goto(`/${locale}/reset-password?token=not-a-real-token`);
     await expect(page.getByLabel(locale === 'ar' ? 'كلمة المرور الجديدة' : 'New password')).toBeVisible();
   }
+});
+
+test('injected HTML cannot run inline script or apply inline style, and both are reported', async ({ browser }) => {
+  // Simulates an HTML-injection flaw: the real response, with its real headers, plus attacker markup.
+  const context = await browser.newContext();
+  await context.addInitScript(RECORD_CSP);
+  const page = await context.newPage();
+  await page.route('**/en/sign-in', async (route) => {
+    const res = await route.fetch();
+    const body = (await res.text()).replace('</body>', '<script>window.__ran = true</script><div id="x" style="color: rgb(255, 0, 0)">x</div></body>');
+    await route.fulfill({ response: res, body });
+  });
+  await page.goto('/en/sign-in');
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as unknown as { __ran?: boolean }).__ran ?? false)).toBe(false);
+  expect(await page.evaluate(() => getComputedStyle(document.getElementById('x')!).color)).not.toBe('rgb(255, 0, 0)');
+  const violations = await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp);
+  expect(violations.some((v) => v.startsWith('script-src'))).toBe(true);
+  expect(violations.some((v) => v.startsWith('style-src'))).toBe(true);
+  await context.close();
 });
