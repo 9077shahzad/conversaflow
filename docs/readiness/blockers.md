@@ -32,7 +32,7 @@ decisions of 20 Oct:
 
 | # | Blocker | Evidence needed | Next action |
 | --- | --- | --- | --- |
-| B1 | Targeted independent review of the security changes after `6972acb` | Reviewer's verdict for the exact commit | See `docs/reports/release-manifest.md` |
+| B1 | Targeted independent review of the security changes after `6972acb` | Reviewer's verdict for the exact commit | **Done.** Reviewed at `ee77e77`; findings F1–F3 fixed and verified closed at `3966c4c`; five informational items open (closure report). See `docs/reports/release-manifest.md` |
 | B2 | GitHub CI and the clean-checkout run on GitHub | A green run for the pushed commit, with logs kept | Needs A3. The same steps already run locally from a clean checkout |
 | B3 | Malware scanning in hosting | `freshclam` installs and updates official signatures; clamd runs with `TZ=UTC`; startup reports signatures current; uploads refused when signatures are missing or outdated, or the scanner is down or slow | Needs A4 |
 | B4 | File-access revocation in hosting | Links refused after removal, role change or expiry, through the real storage | Needs A4 |

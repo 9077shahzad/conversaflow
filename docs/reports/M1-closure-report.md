@@ -122,10 +122,28 @@ to streamed metadata and fixed); own probes against every login role.
 
 | # | Finding | Severity | Fix (commit `3966c4c`) | Status |
 | --- | --- | --- | --- | --- |
-| F1 | Dependency audit passed when the audit itself could not run; proposed exceptions applied | Medium | Fails on error or empty result; only approved, in-scope exceptions pass in CI | Fixed — **awaiting independent recheck** |
-| F2 | Clean-checkout script could report success after a failed install, lint or build | Medium | No `&&` lists; every step stops the run; proven with a deliberate lint error | Fixed — **awaiting independent recheck** |
-| F3 | Some responses carried no security policy (API proxy, unanchored exclusions, prefetch) | Low | Middleware on every path with a strict fallback; API sends its own headers; tests per path | Fixed — **awaiting independent recheck** |
-| I-1 | cf_ops broader than the pilot functions need | Informational | Migration 0013 narrows to the columns used | Fixed — awaiting recheck |
-| I-2 | A company could not be enrolled again after its pilot ended | Informational | Migration 0013: one running pilot per company | Fixed — awaiting recheck |
+| F1 | Dependency audit passed when the audit itself could not run; proposed exceptions applied | Medium | Fails on error or empty result; only approved, in-scope exceptions pass in CI | **Verified closed** by the recheck of `3966c4c` |
+| F2 | Clean-checkout script could report success after a failed install, lint or build | Medium | No `&&` lists; every step stops the run; proven with a deliberate lint error | **Verified closed** by the recheck of `3966c4c` |
+| F3 | Some responses carried no security policy (API proxy, unanchored exclusions, prefetch) | Low | Middleware on every path with a strict fallback; API sends its own headers; tests per path | **Verified closed** by the recheck of `3966c4c` |
+| I-1 | cf_ops broader than the pilot functions need | Informational | Migration 0013 narrows to the columns used | **Verified closed** by the recheck of `3966c4c` |
+| I-2 | A company could not be enrolled again after its pilot ended | Informational | Migration 0013: one running pilot per company | **Verified closed** by the recheck of `3966c4c` |
 | I-3 | The static not-found page has no nonce, so its scripts are blocked | Informational | Fails safe (the page still shows); no change | Accepted |
 | I-4 | Pilot two-step rule enforced in the API, not in the database | Informational | By design (ADR-029); members without it see only their own membership | Accepted |
+
+### Recheck of the fixes at 3966c4c (20 Oct 2026)
+
+**Commit reviewed:** `3966c4c4b2a13070143a6f73fe621fdedcbfac3a` (fresh clone, frozen lockfile).
+**Reviewer's result:** 228/228 API tests; browser checks 9/9 on two consecutive runs; failure injection at every step
+of the clean-checkout script; probes of every path for the security policy; column-level grant inspection.
+**Verdict:** F1, F2, F3 and migration 0013 fixed; no new issue above Informational.
+
+Open informational items (no code change after `3966c4c`, so the tested, reviewed and packaged code stay identical):
+
+| # | Item | Planned handling |
+| --- | --- | --- |
+| R4-1 | CI's strict audit fails until the braces exception is approved | Owner decision A13 |
+| R4-2 | Anyone who can commit can mark an exception approved | Code-owner review on `docs/security/` when the GitHub organisation exists (A3) |
+| R4-3 | Two enrolments at the same instant: the second gets a 500 instead of a 409 (nothing written) | Map error 23505 to 409 in the next code change |
+| R4-4 | The operations role could extend an override's expiry (only the function's "expire now" path uses it; role cannot log in) | Tighten the policy to expiry no later than now, in the next migration |
+| R4-5 | The static not-found page's scripts are blocked (fails safe) | Make the not-found page render per request, in the next web change |
+
