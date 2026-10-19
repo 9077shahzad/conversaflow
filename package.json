@@ -17,7 +17,8 @@
     "db:check-rls": "pnpm --filter @conversaflow/database check-rls",
     "test": "pnpm db:migrate && pnpm db:check-rls && turbo run test --concurrency=1",
     "test:local": "bash scripts/with-local-services.sh pnpm test",
-    "secrets:scan": "node scripts/scan-secrets.mjs"
+    "secrets:scan": "node scripts/scan-secrets.mjs",
+    "deps:audit": "node scripts/audit-deps.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
@@ -30,7 +31,8 @@
   },
   "pnpm": {
     "overrides": {
-      "postcss": "^8.5.23"
+      "postcss": "^8.5.23",
+      "postcss-selector-parser": "^7.1.6"
     }
   }
 }

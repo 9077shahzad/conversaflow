@@ -1,0 +1,16 @@
+{
+  "_readme": "Advisories the dependency audit may pass over. Each needs a reason, an expiry date and an approver. 'proposed' entries are awaiting owner confirmation and are reported as such.",
+  "exceptions": [
+    {
+      "advisory": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "severity": "high",
+      "path": "apps/web > tailwindcss > chokidar > braces",
+      "reason": "No fixed version exists (3.0.3 is the latest release). braces is used by Tailwind's file watcher at build and development time only, on glob patterns from our own configuration. It is not in the running application and never sees user input.",
+      "review": "Remove when a fixed braces release or Tailwind 4 migration lands.",
+      "expires": "2027-01-31",
+      "status": "proposed",
+      "approvedBy": null
+    }
+  ]
+}
