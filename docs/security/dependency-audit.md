@@ -21,7 +21,7 @@ CI and the clean-checkout script both install from the frozen lockfile and run t
 | Scope | Critical | High | Moderate | Low |
 | --- | --- | --- | --- | --- |
 | Production dependencies | 0 | 0 | 0 | 0 |
-| Development and build tools | 0 | 1 (excepted) | 0 | 0 |
+| Development and build tools | 0 | 1 (proposed exception, awaiting approval) | 0 | 0 |
 
 ## Remaining advisory and proposed exception
 

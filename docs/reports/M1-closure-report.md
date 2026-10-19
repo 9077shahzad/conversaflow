@@ -104,3 +104,28 @@ New observations, none above Low:
 The harness note from the reviewer: in its sandbox the disposable database folder had to sit outside the scratch
 directory because of folder permissions. Application code, migrations and roles were unchanged.
 
+
+## Targeted independent review of the security changes after 6972acb (20 Oct 2026)
+
+**Commit reviewed:** `ee77e774c5e4f7376cdccc5abc67b150bcc74f66` (clean clone, frozen lockfile).
+**Reviewer's result:** 226/226 API tests; browser checks 9/9 on re-run (one first-run failure, `document-title`, traced
+to streamed metadata and fixed); own probes against every login role.
+
+| Scope | Reviewer's verdict at `ee77e77` |
+| --- | --- |
+| Content Security Policy with per-request nonce | Verified; one Low gap (F3) |
+| Pilot enrolment (mandatory two-step sign-in, seat allowance) | Verified; informational notes on cf_ops breadth and re-enrolment |
+| Security notices (migration 0012) | Verified; N1–N4 logic unchanged |
+| CI guard rule | Verified (limit: would not see a new definer function granted to a login role) |
+| Dependency changes and audit script | Issue F1 (Medium) |
+| Clean-checkout script and CI | Issue F2 (Medium) in the script; CI verified |
+
+| # | Finding | Severity | Fix (commit `3966c4c`) | Status |
+| --- | --- | --- | --- | --- |
+| F1 | Dependency audit passed when the audit itself could not run; proposed exceptions applied | Medium | Fails on error or empty result; only approved, in-scope exceptions pass in CI | Fixed — **awaiting independent recheck** |
+| F2 | Clean-checkout script could report success after a failed install, lint or build | Medium | No `&&` lists; every step stops the run; proven with a deliberate lint error | Fixed — **awaiting independent recheck** |
+| F3 | Some responses carried no security policy (API proxy, unanchored exclusions, prefetch) | Low | Middleware on every path with a strict fallback; API sends its own headers; tests per path | Fixed — **awaiting independent recheck** |
+| I-1 | cf_ops broader than the pilot functions need | Informational | Migration 0013 narrows to the columns used | Fixed — awaiting recheck |
+| I-2 | A company could not be enrolled again after its pilot ended | Informational | Migration 0013: one running pilot per company | Fixed — awaiting recheck |
+| I-3 | The static not-found page has no nonce, so its scripts are blocked | Informational | Fails safe (the page still shows); no change | Accepted |
+| I-4 | Pilot two-step rule enforced in the API, not in the database | Informational | By design (ADR-029); members without it see only their own membership | Accepted |

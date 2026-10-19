@@ -141,3 +141,10 @@ code is used, the authentication function itself queues an email to the account'
 carries no token or sign-in link. The general email request function refuses these purposes, so a login role can
 neither skip nor forge them. A test replays exposure E1 (a forged session enrolling an attacker's authenticator):
 it still succeeds, which is the accepted residual, but the real owner is told.
+
+Addendum to ADR-028 (targeted review of `ee77e77`, finding F3): the middleware now runs on every path. Pages get the
+nonce policy; the API proxy, built assets and the favicon get a strict fallback (`default-src 'none'`). The API sets
+its own policy, `nosniff` and `X-Frame-Options: DENY`, because Next.js drops middleware headers on proxied rewrites.
+`htmlLimitedBots: /.*/` keeps `<title>` and other metadata in the document head under per-request rendering.
+Known limit: a malformed prefetch request (prefetch header without the RSC header) makes Next.js itself return a
+500; that response now carries the full policy and no attacker content.
