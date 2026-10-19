@@ -1,51 +1,61 @@
-# Pilot readiness — consolidated blocker checklist
+# Pilot readiness — owner checklist and remaining blockers
 
 **Phase 1 status:** development complete; local checks reported passed; GitHub CI and hosted verification pending.
 Live pilot approval remains pending those checks and the conditions below.
 
-Updated 19 Oct 2026. "Owner" means Muhammad Shahzad; "Dev" means the development side (Claude). Nothing below has
-been bought, submitted, sent, connected or deployed.
+Updated 20 Oct 2026. Nothing has been bought, submitted, sent, connected or deployed. Already done on your
+decisions of 20 Oct:
 
-## A. Decisions and approvals (owner)
+- two-step sign-in is mandatory for every pilot user;
+- each pilot company has a separate 10-seat allowance, with the standard trial allowance unchanged;
+- annual pricing approval is on hold.
 
-| # | Blocker | Owner | Evidence needed | Next action |
+## A. Your decisions
+
+| # | Decision | My recommendation | Cost or consequence | What to open |
 | --- | --- | --- | --- | --- |
-| A1 | Contracting and Meta entity | Owner | Written confirmation that MERONATIC SOLUTIONS GROUP, LLC (Delaware) is the contracting and Meta entity; Certificate of Formation and EIN letter in hand | Confirm the entity and the document set listed in the prep pack (Meta section) |
-| A2 | Meta business verification submission | Owner (Dev prepares) | Owner-approved document set; submission receipt from Meta | Review the pack: confirmed requirements, partner guidance and unresolved points are marked separately. Approve before anything is submitted |
-| A3 | GitHub organisation and first push | Owner | Meronatic-owned organisation exists with 2FA required; private repo `conversaflow` created; push approved | Follow `docs/github-setup.md` (owner steps), then tell Dev to push |
-| A4 | Hosting choice and spend | Owner | Approval of AWS Frankfurt (primary) or Scaleway (alternative) and a monthly budget | Review `hosting-comparison.md`; approve a Terraform *plan* for staging (shows resources and price, creates nothing) |
-| A5 | Independent security review supplier | Owner | Approved shortlist and RFQ; signed NDA; supplier quote | Approve contacting Cure53, Doyensec and/or Cyphere with `security-review-rfq.md` |
-| A6 | Annual pricing | Owner | Approved prices after reviewing margins | Review `ConversaFlow-Annual-Pricing-Margin.xlsx`. At growth scale annual margins are about 25% (Starter) to 56% (Enterprise); at pilot scale most plans run at a loss because fixed hosting is spread over five companies |
-| A7 | Pilot companies and seat allowance | Owner | Named companies (one per sector) and agreement to a recorded 10-seat allowance each, since the 3-seat trial cap is below realistic team size | Confirm companies; invitations stay unsent until approved |
-| A8 | Arabic wording reviewer | Owner | Named native Arabic business reader; returned workbook | Confirm the reviewer and send `ConversaFlow-Arabic-Review.xlsx` (101 strings, 9 screens) |
-| A9 | Accept the remaining sign-in risk (ADR-027) | Owner | Written acceptance, or a decision to require MFA for every pilot user | Decide. The reviewer agrees the risk is accurately described, and added one Low item within it (R2-1: a holder of the sign-in database credential could lock a user out of MFA for an hour). Recommended: require MFA for all pilot users and keep that credential in a secrets manager |
-| A10 | Legal documents | Owner (legal adviser) | Approved terms of service, privacy notice, data processing agreement, acceptable use policy | Instruct counsel; Dev can supply system and data-flow facts |
+| A1 | Confirm MERONATIC SOLUTIONS GROUP, LLC (Delaware) as the contracting and Meta entity | Confirm | No cost. Until confirmed, nothing can go to Meta, and the legal documents cannot name a party | Prep pack → *Meta business verification pack*, "Before anything is submitted" |
+| A2 | Approve the Meta document set, then the submission | Hold the Certificate of Formation, the IRS EIN letter, and a bank statement or utility bill, all in the exact legal name. First check Meta's own accepted-document list in your browser (the one point still unresolved) | No fee. Verification typically takes days to weeks. It is the longest chain before the pilot | Prep pack → Meta section, "At a glance: confirmed, partner guidance, unresolved" |
+| A3 | Create the Meronatic GitHub organisation, then approve the push of `conversaflow` | Do it now: about 20 minutes | Free plan. This unlocks the first CI run and the clean-checkout run on GitHub (B2) | `docs/github-setup.md` → "You (owner)" |
+| A4 | Choose the hosting provider (selection only; purchase is a later approval) | AWS Frankfurt, with Scaleway as the lower-cost alternative | Provisional: about $442 a month for the pilot (≈ $1,306 over 90 days), about $1,574 at growth. Scaleway is about €302–352 for the pilot. The next step is a Terraform plan, which creates nothing and costs nothing | `docs/readiness/hosting-comparison.md` |
+| A5 | Approve contacting security-review suppliers for quotations | Approve sending the request to all three: Cure53, Doyensec, Cyphere | Contact is free. The review itself is estimated at 11–15 tester-days, about €8,000–22,000; a separate approval follows the quotes | `docs/readiness/security-review-rfq.md` (draft request and shortlist) |
+| A6 | Accept the remaining sign-in risk for the pilot, or ask for the stronger fix first | Sign the acceptance, with mitigations M1–M4 in place before the first invitation. M5 (security notices) is already built. Schedule M6 before general availability | Accepting adds no cost. Requiring M6 first adds about one week of development plus an independent review | `docs/readiness/pilot-mfa-residual-risk.md` → "Acceptance still required" |
+| A7 | Support offer for Starter and Growth (annual pricing stays on hold) | Starter: 15 min a month, optional $99 onboarding. Growth: 45 min a month and $199 onboarding. Extra support at $60 an hour | At $40 an hour, annual margins become Starter 24% and Growth 31% (from −17% and −16%) | `docs/readiness/pricing-support-proposal.md` and `ConversaFlow-Pricing-Support-Model.xlsx` |
+| A8 | Business plan's included support | Reduce from 3 hours to 2 hours a month | At $40 an hour, Business keeps only 10% on annual billing with 3 hours, 32% with 2 hours | Same proposal, "What this tells us" |
+| A9 | Pilot spending cap | $6,500 for three companies; $9,500 if you choose five | The expected subsidy is $5,224 or $7,837 (support time, hosting, running costs), with a review at 80% of the cap. The security review is separate | Workbook → "Pilot subsidy" |
+| A10 | Name the pilot companies (one per sector); invitations stay with you | Choose once A1, A4 and A5 are in motion | Each gets 10 seats for 90 days and mandatory two-step sign-in, set in the console when you approve | `docs/readiness/pilot-synthetic-examples.md` (profiles that fit) |
+| A11 | Name the native Arabic business reviewer | Someone who writes customer messages in Gulf business Arabic | About 2 hours of their time. Corrections come back in the same file | `ConversaFlow-Arabic-Review.xlsx` (Instructions sheet) |
+| A12 | Instruct counsel on the legal documents | Terms of service, privacy notice, data processing agreement, acceptable use policy and the pilot agreement | Counsel fees, unknown. The pilot cannot start without them | Prep pack → "Proposed pilot terms" |
+| A13 | Confirm or reject the one dependency-audit exception (braces) | Confirm until 31 Jan 2027 | If rejected, CI fails until the Tailwind 4 migration, about 1–2 days of development | `docs/security/dependency-audit.md` |
 
-## B. Verification still to run (Dev, after the approvals above)
+## B. Verification still to run (development side, after the approvals above)
 
-| # | Blocker | Owner | Evidence needed | Next action |
-| --- | --- | --- | --- | --- |
-| B1 | Independent recheck of the latest security fixes | Dev (independent reviewer) | Reviewer's post-fix verdict for the exact commit, item by item | **Done for `6972acb`:** N1–N4 verified closed, no new High or Medium findings (closure report). Later commits change documents and one build dependency only; the external review (B10) covers the final code |
-| B2 | GitHub CI | Dev | Green CI run on GitHub for the pushed commit, logs kept | Runs on first push (needs A3) |
-| B3 | Reproducibility from a clean checkout | Dev | Fresh clone, fresh database, migrations, isolation check and full tests run with the restricted roles; results saved in `docs/reports/evidence/` | Run immediately after A3 |
-| B4 | Malware scanning in hosting | Dev | `freshclam` installs and updates official signatures; clamd runs with `TZ=UTC`; startup shows signatures *current*; uploads refused with signatures missing, outdated, scanner down or timed out | Needs A4. The refusal paths are already proven locally against a fake scanner; hosted validation stays open until official signatures are installed and updating |
-| B5 | File-access revocation in hosting | Dev | Download link refused after the user is removed, the company access ends, or the link expires, through the real storage and CDN | Needs A4 |
-| B6 | Storage permissions in hosting | Dev | Bucket is private; only the application role can read/write; direct object URLs refused; encryption on | Needs A4 |
-| B7 | Session expiry in hosting | Dev | Sessions end after 60 minutes idle and 12 hours absolute, through the real load balancer and cookies | Needs A4 |
-| B8 | Backup restoration | Dev | A timed restore of the staging database to a point in time, with a record of data loss and restore duration | Needs A4 |
-| B9 | Content Security Policy nonces | Dev | Strict CSP without `unsafe-inline` for scripts, checked by browser tests | Development work, can start now |
-| B10 | External security review | Supplier | Report, fixes and retest letter | Needs A5; test 3–4 weeks before pilot access |
+| # | Blocker | Evidence needed | Next action |
+| --- | --- | --- | --- |
+| B1 | Targeted independent review of the security changes after `6972acb` | Reviewer's verdict for the exact commit | See `docs/reports/release-manifest.md` |
+| B2 | GitHub CI and the clean-checkout run on GitHub | A green run for the pushed commit, with logs kept | Needs A3. The same steps already run locally from a clean checkout |
+| B3 | Malware scanning in hosting | `freshclam` installs and updates official signatures; clamd runs with `TZ=UTC`; startup reports signatures current; uploads refused when signatures are missing or outdated, or the scanner is down or slow | Needs A4 |
+| B4 | File-access revocation in hosting | Links refused after removal, role change or expiry, through the real storage | Needs A4 |
+| B5 | Storage permissions in hosting | Private bucket, application-only access, encryption on | Needs A4 |
+| B6 | Session expiry in hosting | 60 minutes idle, 12 hours absolute, through the real load balancer | Needs A4 |
+| B7 | Backup restoration | A timed point-in-time restore of staging, with the data loss recorded | Needs A4 |
+| B8 | Sign-in risk mitigations M1–M4 | Secrets manager, private database network, connection alerts, onboarding check | With staging (A4) and onboarding |
+| B9 | External security review | Report, fixes and a retest letter | Needs A5. Test 3–4 weeks before pilot access |
 
-## C. Meta, after verification (Phase 2 dependency)
+## C. Meta, after verification
 
-| # | Blocker | Owner | Evidence needed | Next action |
-| --- | --- | --- | --- | --- |
-| C1 | Meta business verification result | Meta | Verified status in Business Manager | Wait after A2 |
-| C2 | Tech Provider setup, App Review and advanced access | Owner + Dev | Approved permissions for WhatsApp Business management and messaging | Submit after C1, with a screen recording made on staging |
-| C3 | Utility templates for the pilot | Pilot companies + Meta | Approved templates | Drafts are ready in `pilot-synthetic-examples.md`; submit per company once onboarded |
+| # | Blocker | Evidence needed | Next action |
+| --- | --- | --- | --- |
+| C1 | Business verification result | Verified status | Wait after A2 |
+| C2 | Tech Provider set-up, App Review, advanced access | Approved permissions | Screen recordings made on staging |
+| C3 | Utility templates per pilot company | Approved templates | Drafts are ready in `pilot-synthetic-examples.md` |
 
 ## Order of work
 
-A1 → A2 → C1 → C2 is the longest chain and sets the earliest pilot date. A3 unlocks B2–B3; A4 unlocks B4–B8; A5
-unlocks B10. A6–A10 can be decided in parallel. Pilot access needs every row closed, or explicitly accepted by the
-owner.
+- The longest chain is A1 → A2 → C1 → C2. It sets the earliest pilot date.
+- A3 unlocks B2.
+- A4 unlocks B3–B8.
+- A5 unlocks B9.
+- The other decisions can be made in parallel.
+
+Pilot access needs every row closed, or explicitly accepted by you.

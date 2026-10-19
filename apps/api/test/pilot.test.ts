@@ -140,6 +140,14 @@ describe('a pilot company', () => {
     expect(await platformAudit('pilot.ended', pilotTenant)).toHaveLength(1);
     await lead.post(`/v1/platform/tenants/${pilotTenant}/pilot/end`).expect(409);
   });
+
+  it('a company can be enrolled again after its pilot ended, but never has two running pilots', async () => {
+    await lead.post(`/v1/platform/tenants/${pilotTenant}/pilot`, { seats: 8, days: 30, reason: 'Second pilot round, same company' }).expect(201);
+    expect(await seats(pilotOwner)).toBe(8);
+    await lead.post(`/v1/platform/tenants/${pilotTenant}/pilot`, { reason: 'Attempt at a parallel pilot' }).expect(409);
+    await lead.post(`/v1/platform/tenants/${pilotTenant}/pilot/end`).expect(204);
+    expect(await seats(pilotOwner)).toBe(3);
+  });
 });
 
 describe('the CI guard', () => {

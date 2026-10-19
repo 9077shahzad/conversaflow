@@ -18,7 +18,8 @@
     "test": "pnpm db:migrate && pnpm db:check-rls && turbo run test --concurrency=1",
     "test:local": "bash scripts/with-local-services.sh pnpm test",
     "secrets:scan": "node scripts/scan-secrets.mjs",
-    "deps:audit": "node scripts/audit-deps.mjs"
+    "deps:audit": "node scripts/audit-deps.mjs",
+    "deps:audit:local": "node scripts/audit-deps.mjs --allow-proposed"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

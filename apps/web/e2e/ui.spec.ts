@@ -126,9 +126,21 @@ test('security headers are set and the email link pages exist in both languages'
   const nonce = nonceOf(csp);
   expect(nonce).toBeTruthy();
   const html = await res!.text();
+  // The title is in the document head as sent, not streamed in later (assistive technology, search engines).
+  expect(html.split('</head>')[0]).toContain('<title>ConversaFlow by Meronatic</title>');
   const scripts = html.match(/<script\b[^>]*>/g) ?? [];
   expect(scripts.length).toBeGreaterThan(0);
   for (const tag of scripts) expect(tag, tag).toContain(`nonce="${nonce}"`);
+  // Nothing leaves without a policy: API proxy, built assets, unknown paths, prefetch requests (review F3).
+  const strict = "default-src 'none'";
+  expect((await page.request.get('/v1/me')).headers()['content-security-policy']).toContain(strict);
+  const asset = html.match(/\/_next\/static\/[^"]+\.js/)![0];
+  expect((await page.request.get(asset)).headers()['content-security-policy']).toContain(strict);
+  for (const path of ['/favicon.ico.x', '/_next/imagefoo', '/en/no-such-page']) {
+    expect((await page.request.get(path)).headers()['content-security-policy'] ?? '', path).toMatch(/default-src '(none|self)'/);
+  }
+  const prefetch = await page.request.get('/en/sign-in', { headers: { 'next-router-prefetch': '1' } });
+  expect(prefetch.headers()['content-security-policy'] ?? '').toContain("'nonce-");
   const again = await page.request.get('/en/sign-in');
   expect(nonceOf(again.headers()['content-security-policy'] ?? '')).not.toBe(nonce);
   for (const locale of ['en', 'ar']) {

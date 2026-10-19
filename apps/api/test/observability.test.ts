@@ -46,3 +46,18 @@ describe('request logs', () => {
     expect(all).toContain('"path":"/v1/files/download"'); // the request is logged, without its query string
   });
 });
+
+describe('API security headers (review F3)', () => {
+  it('every API response forbids running, framing and sniffing its content', async () => {
+    const app = await startApp();
+    try {
+      for (const res of [await new Client(app, 'x').get('/v1/me'), await new Client(app, 'x').get('/health')]) {
+        expect(res.headers['content-security-policy']).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+        expect(res.headers['x-content-type-options']).toBe('nosniff');
+        expect(res.headers['x-frame-options']).toBe('DENY');
+      }
+    } finally {
+      await app.close();
+    }
+  });
+});

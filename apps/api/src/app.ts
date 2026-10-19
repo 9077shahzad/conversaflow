@@ -82,6 +82,14 @@ export async function createApp(deps: Deps, opts: { logSink?: LogSink } = {}): P
   const app = await NestFactory.create(AppModule.forRoot(deps), { logger: ['error', 'warn'] });
   app.use(requestLog(opts.logSink ?? (deps.config.NODE_ENV === 'test' ? () => undefined : undefined)));
   app.use(cookieParser());
+  // API responses are data, never pages: nothing in them may run, be framed or be sniffed (ADR-028, review F3).
+  app.use((_req: unknown, res: { setHeader(k: string, v: string): void }, next: () => void) => {
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+  });
   app.getHttpAdapter().getInstance().disable('x-powered-by');
   app.getHttpAdapter().getInstance().set('trust proxy', 'loopback');
   await app.init();

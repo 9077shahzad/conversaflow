@@ -4,6 +4,9 @@ const api = process.env.API_URL ?? 'http://127.0.0.1:4000';
 export default {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Pages render per request (CSP nonce). Without this, Next.js streams <title> and other metadata after the body,
+  // so the title is briefly missing for assistive technology. Treat every client as needing metadata up front.
+  htmlLimitedBots: /.*/,
   // The browser talks only to this origin; API calls are proxied, so cookies stay first-party.
   async rewrites() {
     return [{ source: '/v1/:path*', destination: `${api}/v1/:path*` }];

@@ -25,3 +25,6 @@ export function newNonce(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return btoa(String.fromCharCode(...bytes));
 }
+
+/** For responses that are not pages (API JSON, files, built assets): nothing may run, frame or load from them. */
+export const FALLBACK_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";

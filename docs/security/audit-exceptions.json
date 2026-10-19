@@ -1,5 +1,5 @@
 {
-  "_readme": "Advisories the dependency audit may pass over. Each needs a reason, an expiry date and an approver. 'proposed' entries are awaiting owner confirmation and are reported as such.",
+  "_readme": "Advisories the dependency audit may pass over. Each needs a reason, the scope it applies to (production or development), an expiry date, status 'approved' and an approver. 'proposed' entries never pass in CI; local evidence runs may pass them with --allow-proposed, and say so.",
   "exceptions": [
     {
       "advisory": "GHSA-vfj7-8cjw-p6xm",
@@ -10,7 +10,8 @@
       "review": "Remove when a fixed braces release or Tailwind 4 migration lands.",
       "expires": "2027-01-31",
       "status": "proposed",
-      "approvedBy": null
+      "approvedBy": null,
+      "scope": "development"
     }
   ]
 }

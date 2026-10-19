@@ -1,6 +1,6 @@
 # Request for quotation — independent security review (DRAFT, not sent)
 
-Status: draft for owner approval. No supplier has been contacted. Send only after approval, under NDA, from a
+Status: draft for owner approval (updated 20 Oct 2026). No supplier has been contacted. Send only after approval, under NDA, from a
 Meronatic address.
 
 ---
@@ -19,16 +19,17 @@ security review and penetration test. We would welcome your quotation for the sc
 | --- | --- |
 | Architecture | TypeScript monorepo: NestJS API (one codebase run as API and worker), Next.js web app (English and Arabic, right-to-left) |
 | Data | PostgreSQL 16 with forced row-level security on every company table; four restricted database roles (business data, sign-in, notifier, platform console) |
-| Identity | Email and password (Argon2id), TOTP two-step verification with recovery codes, server sessions with idle and absolute expiry |
+| Identity | Email and password (Argon2id); TOTP two-step verification decided inside the database, with recovery codes and security notices; server sessions with idle and absolute expiry; two-step sign-in mandatory for pilot companies |
 | Files | Uploads scanned by ClamAV (fail-closed, signature-freshness check); short-lived signed download links bound to user and company |
-| Platform console | Owner staff access to customer data only through two-person, time-limited, audited support grants bound to the staff member's session |
-| Size | About [N] thousand lines of TypeScript and SQL at feature freeze (currently about 10 thousand) |
+| Platform console | Owner staff access to customer data only through two-person, time-limited, audited support grants bound to the staff member's session; pilot enrolment by the platform owner only |
+| Web security | Content Security Policy with a fresh nonce per page; no inline script or style |
+| Size | About [N] thousand lines of TypeScript and SQL at feature freeze (currently about 9,200, plus about 2,800 lines of tests) |
 | Environment | Production-like staging in an EU region (provider to be confirmed); synthetic data only |
 | Not in scope now | WhatsApp/Meta integration, payments, AI features (later phases) |
 
 ## 2. Work requested
 
-1. **Secure code review** (estimated 4–6 days): tenant isolation (row-level security policies, how each request sets the company), database role separation and SECURITY DEFINER functions, authorisation on every API route, sign-in/MFA/session handling, signed file links, upload and scanning path, secrets handling, dependencies.
+1. **Secure code review** (estimated 4–6 days): tenant isolation (row-level security policies, how each request sets the company), database role separation and SECURITY DEFINER functions, authorisation on every API route, sign-in/MFA/session handling and the documented residual risk of the sign-in database credential, signed file links, upload and scanning path, Content Security Policy, secrets handling, dependencies.
 2. **Penetration test, grey-box, aligned to OWASP ASVS Level 2** (estimated 6–8 days): at least two companies × three roles cross-company matrix; API authorisation; MFA and session attacks; file upload and link abuse; injection; business logic (seats, trials, support access, billing state).
 3. **Retest** of fixed findings within 30–90 days (estimated 1 day).
 
