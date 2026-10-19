@@ -3,7 +3,8 @@
  *  - a table with a tenant_id column lacks row-level security, FORCE, or a policy;
  *  - any table that has RLS enabled is not forced;
  *  - any login role can bypass RLS, is a superuser, owns any object or inherits another role;
- *  - the business API role (cf_app) has any right over credentials, or anyone but cf_notify can mint email tokens;
+ *  - the business API role (cf_app) has any right over credentials or billing state, or anyone but cf_notify can mint email tokens;
+ *  - the platform console role has direct table access, or a platform function does not take a session token;
  *  - a SECURITY DEFINER function has no fixed search_path or is owned by an unexpected role.
  */
 import pg from 'pg';
@@ -64,9 +65,36 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
     if (sess.rows[0]!.ins || sess.rows[0]!.mfa || sess.rows[0]!.tok) problems.push('cf_app can create sessions, mark them MFA-verified or read their token hashes');
     const fns = await client.query<{ sig: string }>(`
       SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname = 'public' AND p.proname LIKE 'auth\\_%' AND p.proname <> 'auth_invitation_lookup'
-        AND has_function_privilege('cf_app', p.oid, 'EXECUTE')`);
+      WHERE n.nspname = 'public' AND (p.proname LIKE 'auth\\_%' OR p.proname LIKE 'platform\\_%' OR p.proname = 'support_grant_active')
+        AND p.proname <> 'auth_invitation_lookup' AND has_function_privilege('cf_app', p.oid, 'EXECUTE')`);
     for (const f of fns.rows) problems.push(`cf_app can execute ${f.sig}`);
+    // Every SECURITY DEFINER function that acts for a person must be owned by cf_auth or cf_ops (never a login role).
+    const badOwners = await client.query<{ sig: string; owner: string }>(`
+      SELECT p.oid::regprocedure::text AS sig, pg_get_userbyid(p.proowner) AS owner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.prosecdef AND pg_get_userbyid(p.proowner) NOT IN ('cf_auth', 'cf_ops')
+        AND (p.proname LIKE 'auth\\_%' OR p.proname LIKE 'platform\\_%')`);
+    for (const f of badOwners.rows) problems.push(`${f.sig} is owned by ${f.owner}; must be cf_auth or cf_ops`);
+    // The platform console role has NO direct table access except reading the plan catalogue and flags.
+    const platformTables = await client.query<{ t: string }>(`
+      SELECT c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind = 'r'
+        AND c.relname NOT IN ('plans', 'plan_versions', 'plan_entitlements', 'feature_flags')
+        AND (has_table_privilege('cf_platform', c.oid, 'SELECT,INSERT,UPDATE,DELETE') OR has_any_column_privilege('cf_platform', c.oid, 'SELECT,INSERT,UPDATE'))`);
+    for (const r of platformTables.rows) problems.push(`cf_platform has direct access to ${r.t}; it must act only through token-bound functions`);
+    // Platform functions must take the session token as proof of identity (no app.user_id trust).
+    const unbound = await client.query<{ sig: string }>(`
+      SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname LIKE 'platform\\_%' AND p.proname NOT IN ('platform_staff_role')
+        AND has_function_privilege('cf_platform', p.oid, 'EXECUTE')
+        AND NOT (p.proargtypes[0] = 'text'::regtype AND p.proargnames[1] = 'p_token')`);
+    for (const f of unbound.rows) problems.push(`${f.sig} is callable by cf_platform without a session token as its first argument`);
+    // Billing state: the business API may create a subscription (forced to a trial) but never update one,
+    // and may not insert sessions or set their MFA state.
+    const billing = await client.query<{ upd: boolean; sess: boolean }>(`
+      SELECT has_table_privilege('cf_app', 'subscriptions', 'UPDATE') OR has_any_column_privilege('cf_app', 'subscriptions', 'UPDATE') AS upd,
+             has_table_privilege('cf_identity', 'sessions', 'INSERT') AS sess`);
+    if (billing.rows[0]!.upd) problems.push('cf_app can update subscriptions (billing state)');
+    if (billing.rows[0]!.sess) problems.push('cf_identity can insert sessions directly; it must use auth_open_session');
     const minting = await client.query<{ who: string }>(`
       SELECT r.rolname AS who FROM pg_roles r
       WHERE r.rolname IN ('cf_app', 'cf_identity') AND has_function_privilege(r.oid, 'auth_issue_token(uuid,text,bytea,interval)', 'EXECUTE')`);

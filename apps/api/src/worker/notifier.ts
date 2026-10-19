@@ -64,20 +64,21 @@ export class Notifier {
       });
       return;
     }
-    const { rows } = await tx.query<{ id: string | null }>('SELECT auth_user_id_by_email($1) AS id', [req.email]);
-    const userId = rows[0]?.id;
-    if (!userId) return; // no account: nothing is sent, and the API already answered the same either way
+    const { rows } = await tx.query<{ user_id: string | null; email: string | null }>('SELECT user_id, email FROM auth_user_for_email($1)', [req.email]);
+    const userId = rows[0]?.user_id;
+    const to = rows[0]?.email; // the STORED address, never the one typed into the form
+    if (!userId || !to) return; // no account: nothing is sent, and the API already answered the same either way
     const token = randomToken();
     await tx.query('SELECT auth_issue_token($1, $2, $3, $4::interval)', [userId, req.purpose, sha256(token), TTL[req.purpose]]);
     if (req.purpose === 'verify_email') {
       await this.mailer.send({
-        to: req.email,
+        to,
         subject: 'Verify your email for ConversaFlow',
         text: `Open this link to verify your email: ${this.appOrigin}/verify-email?token=${token}`,
       });
     } else {
       await this.mailer.send({
-        to: req.email,
+        to,
         subject: 'Reset your ConversaFlow password',
         text: `Open this link within one hour to choose a new password: ${this.appOrigin}/reset-password?token=${token}`,
       });

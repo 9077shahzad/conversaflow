@@ -47,7 +47,10 @@ export async function marketingMessagesAllowed(tx: Tx): Promise<boolean> {
  * acceptances queue up and the count is exact. Must run in the same transaction as the membership insert.
  */
 export async function assertSeatAvailable(tx: Tx): Promise<void> {
-  const sub = await tx.query("SELECT 1 FROM subscriptions WHERE status IN ('trialing', 'active', 'past_due') FOR UPDATE");
+  // Serialise seat claims per company with a transaction-scoped advisory lock (the API role has no UPDATE right
+  // on subscriptions, so a row lock is not available to it).
+  await tx.query("SELECT pg_advisory_xact_lock(hashtextextended(app_tenant_id()::text || ':seats', 9))");
+  const sub = await tx.query("SELECT 1 FROM subscriptions WHERE status IN ('trialing', 'active', 'past_due')");
   if (sub.rowCount !== 1) throw Errors.forbidden('This workspace has no active subscription.');
   const limit = await limitFor(tx, 'seats');
   if (limit === null) return;
@@ -129,9 +132,34 @@ export class EntitlementsService {
 export class AutomationMetering {
   constructor(private readonly deps: Pick<Deps, 'db'>) {}
 
+  /**
+   * Starts a run: checks the limit and reserves the run id in ONE locked step, so parallel starts cannot overshoot.
+   * The run is recorded as 'failed' until recordRunOutcome(..., 'completed') is called (a run that never reports
+   * stays in the failed column and is not billed).
+   */
+  async startRun(actor: Pick<TenantActor, 'tenantId' | 'userId'>, runId: string): Promise<void> {
+    await withContext(this.deps.db, actor, async (tx) => {
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 8))', [actor.tenantId]);
+      const limit = await limitFor(tx, 'automation_executions');
+      const { rows } = await tx.query<{ used: string }>(
+        `SELECT coalesce((SELECT used FROM usage_counters WHERE key = 'automation_executions'
+                          AND period_start = date_trunc('month', now())::date), 0)
+              + (SELECT count(*) FROM usage_events WHERE key = 'automation_run' AND outcome = 'failed'
+                   AND period_start = date_trunc('month', now())::date) AS used`);
+      if (limit !== null && Number(rows[0]!.used) >= limit) throw Errors.limitReached('automation_executions', limit);
+      await tx.query(
+        `INSERT INTO usage_events (tenant_id, key, source_id, outcome, period_start)
+         VALUES ($1, 'automation_run', $2, 'failed', date_trunc('month', now())::date) ON CONFLICT DO NOTHING`,
+        [actor.tenantId, runId]);
+      await bump(tx, actor.tenantId, 'automation_executions_failed', 1);
+    });
+  }
+
   /** Call before starting a new run: refuses when the month's completed-run limit is used up. */
   async assertRunAllowed(actor: Pick<TenantActor, 'tenantId' | 'userId'>): Promise<void> {
     await withContext(this.deps.db, actor, async (tx) => {
+      // Serialised per company so parallel starts cannot all pass the check together.
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 8))', [actor.tenantId]);
       const limit = await limitFor(tx, 'automation_executions');
       if (limit === null) return;
       const { rows } = await tx.query<{ used: string }>(
@@ -152,17 +180,18 @@ export class AutomationMetering {
     actor: Pick<TenantActor, 'tenantId' | 'userId'>, runId: string, outcome: 'completed' | 'failed',
   ): Promise<{ counted: 'completed' | 'failed' | 'none' }> {
     return withContext(this.deps.db, actor, async (tx) => {
+      // One run at a time per company: no lost updates when the same run is reported twice at the same moment.
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 7))', [`${actor.tenantId}:${runId}`]);
       const existing = await tx.query<{ outcome: 'completed' | 'failed'; period_start: string }>(
         "SELECT outcome, period_start::text FROM usage_events WHERE key = 'automation_run' AND source_id = $1 FOR UPDATE", [runId]);
       const prev = existing.rows[0];
       if (prev?.outcome === 'completed' || (prev?.outcome === 'failed' && outcome === 'failed')) return { counted: 'none' as const };
 
       if (!prev) {
-        const ins = await tx.query(
+        await tx.query(
           `INSERT INTO usage_events (tenant_id, key, source_id, outcome, period_start)
-           VALUES ($1, 'automation_run', $2, $3, date_trunc('month', now())::date) ON CONFLICT DO NOTHING`,
+           VALUES ($1, 'automation_run', $2, $3, date_trunc('month', now())::date)`,
           [actor.tenantId, runId, outcome]);
-        if (ins.rowCount === 0) return { counted: 'none' as const }; // a parallel report won the race
       } else {
         await tx.query("UPDATE usage_events SET outcome = 'completed', updated_at = now() WHERE key = 'automation_run' AND source_id = $1", [runId]);
         await bump(tx, actor.tenantId, 'automation_executions_failed', -1, prev.period_start);

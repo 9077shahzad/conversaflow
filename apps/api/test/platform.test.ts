@@ -75,10 +75,10 @@ describe('support access: two people, time-limited, audited', () => {
   let grantId: string;
 
   it('without a grant, staff cannot see company content — even at database level', async () => {
-    expect((await support.get(`/v1/platform/tenants/${tenantA}/files`).expect(403)).body.error.message).toMatch(/No active, approved support access/);
-    const rows = await withContext(t.deps.platformDb, { tenantId: tenantA, userId: support.userId! }, async (tx) =>
-      (await tx.query('SELECT count(*)::int AS n FROM files')).rows[0].n);
-    expect(rows).toBe(0);
+    expect((await support.get(`/v1/platform/tenants/${tenantA}/files`).expect(403)).body.error.message).toMatch(/no active, approved support access/i);
+    // The platform role has no direct access to company tables at all (second review): permission denied, not 0 rows.
+    await expect(withContext(t.deps.platformDb, { tenantId: tenantA, userId: support.userId! }, (tx) => tx.query('SELECT count(*) FROM files')))
+      .rejects.toMatchObject({ code: '42501' });
   });
 
   it('a request needs a real reason and at most 4 hours', async () => {

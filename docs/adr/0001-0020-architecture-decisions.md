@@ -59,3 +59,22 @@ Decision for Milestone 1: accept, because reaching this requires SQL injection (
 everywhere and a lint rule that fails the build on interpolated SQL) or a compromised API process (which could
 already act as any signed-in user). Planned fix (Phase 2): move token issuing and email sending into the worker
 under a separate `cf_mailer` role, so the API role can no longer mint tokens; review again before the pilot.
+
+## ADR-025 — Privileged database actions are bound to the session token, not to `app.user_id`
+
+Context: the second independent review showed that any database role can set `app.user_id` for itself, so a
+database function that trusted it (support-grant approval, feature flags, plan publishing) could be driven by anyone
+holding that role's password, defeating the two-person rule. Decision: platform functions take the caller's session
+token (never stored; compared by SHA-256) and derive the staff member from a live, MFA-verified session inside the
+database. The platform role has no direct access to any company table. Sessions can only be opened through a
+function that fixes their lifetime and starts them without MFA. The CI guard fails the build if a platform function
+is callable without a token argument or if the platform role regains table access. `app.user_id` remains the
+mechanism for ordinary row filtering under the business API role, which rechecks membership from the session on
+every request.
+
+## ADR-026 — Migrations 0002–0004 were edited before any shared database existed
+
+The first independent review's fixes changed three migration files that had been applied only to disposable local
+databases. The migration runner refuses changed files on any database that already applied them (checksum), so this
+is safe for every environment that exists today (none are shared). From the first shared environment onward,
+applied migrations are never edited; changes go in new files.

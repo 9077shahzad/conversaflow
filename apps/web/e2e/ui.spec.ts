@@ -101,3 +101,17 @@ test('language switch keeps the page and flips direction', async ({ page }) => {
   await page.waitForURL('**/ar/sign-in');
   expect(await page.getAttribute('html', 'dir')).toBe('rtl');
 });
+
+test('security headers are set and the email link pages exist in both languages', async ({ page }) => {
+  const res = await page.goto('/en/sign-in');
+  const csp = res!.headers()['content-security-policy'] ?? '';
+  expect(csp).toContain("default-src 'self'");
+  expect(csp).toContain("frame-ancestors 'none'");
+  expect(res!.headers()['x-frame-options']).toBe('DENY');
+  for (const locale of ['en', 'ar']) {
+    await page.goto(`/${locale}/verify-email?token=not-a-real-token`);
+    await expect(page.getByRole('status')).toContainText(locale === 'ar' ? 'غير صالح' : 'invalid');
+    await page.goto(`/${locale}/reset-password?token=not-a-real-token`);
+    await expect(page.getByLabel(locale === 'ar' ? 'كلمة المرور الجديدة' : 'New password')).toBeVisible();
+  }
+});

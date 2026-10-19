@@ -15,6 +15,7 @@ import {
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
+import { requestLog, type LogSink } from './http/request-log';
 import { DEPS } from './http/tokens';
 import { AuditService } from './modules/audit.service';
 import { AuthService } from './modules/auth.service';
@@ -74,8 +75,9 @@ export class AppModule {
   }
 }
 
-export async function createApp(deps: Deps): Promise<INestApplication> {
+export async function createApp(deps: Deps, opts: { logSink?: LogSink } = {}): Promise<INestApplication> {
   const app = await NestFactory.create(AppModule.forRoot(deps), { logger: ['error', 'warn'] });
+  app.use(requestLog(opts.logSink ?? (deps.config.NODE_ENV === 'test' ? () => undefined : undefined)));
   app.use(cookieParser());
   app.getHttpAdapter().getInstance().disable('x-powered-by');
   app.getHttpAdapter().getInstance().set('trust proxy', 'loopback');

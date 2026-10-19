@@ -24,6 +24,8 @@ export interface Deps {
 
 /** The signed-in session, resolved from the cookie on every request. */
 export interface AuthSession {
+  /** The cookie value. Held in memory for this request only, so privileged database actions can be bound to it. */
+  token: string;
   sessionId: string;
   userId: string;
   activeTenantId: string | null;

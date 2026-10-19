@@ -79,12 +79,12 @@ export class AuthService {
         "SELECT tenant_id FROM memberships WHERE user_id = $1 AND status = 'active' ORDER BY created_at LIMIT 1",
         [cred.user_id],
       );
-      await tx.query(
-        `INSERT INTO sessions (token_hash, user_id, active_tenant_id, ip, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, $5, now() + make_interval(hours => $6))`,
-        [sha256(token), cred.user_id, rows[0]?.tenant_id ?? null, client.ip, client.userAgent?.slice(0, 400) ?? null,
-          this.deps.config.SESSION_ABSOLUTE_HOURS],
-      );
+      // Sessions are opened only through a database function that fixes the lifetime (max 12 h) and starts
+      // without MFA verified; the identity role cannot insert sessions directly.
+      await tx.query('SELECT auth_open_session($1, $2, $3, $4, $5, $6)', [
+        cred.user_id, sha256(token), rows[0]?.tenant_id ?? null, client.ip, client.userAgent ?? null,
+        this.deps.config.SESSION_ABSOLUTE_HOURS,
+      ]);
     });
     return { token, mfaRequired: cred.has_mfa };
   }
@@ -104,6 +104,7 @@ export class AuthService {
       return (rowCount ?? 0) > 0;
     });
     return {
+      token,
       sessionId: row.session_id,
       userId: row.user_id,
       activeTenantId: row.active_tenant_id,

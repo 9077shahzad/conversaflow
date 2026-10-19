@@ -1,0 +1,9 @@
+## GET /health (no database)
+│ Latency │ 2 ms │ 2 ms │ 10 ms │ 13 ms │ 3.31 ms │ 2.64 ms │ 125 ms │
+│ Req/Sec   │ 2,133  │ 2,133  │ 5,755  │ 7,147   │ 5,212.8 │ 1,590.76 │ 2,132  │
+52k requests in 10.02s, 14.5 MB read
+status check: 200
+## GET /v1/members (session lookup + membership + RLS query, 3 transactions per request)
+│ Latency │ 37 ms │ 52 ms │ 86 ms │ 97 ms │ 55.02 ms │ 14.11 ms │ 189 ms │
+│ Req/Sec   │ 244    │ 244    │ 359    │ 423    │ 359    │ 44.47   │ 244    │
+4k requests in 10.02s, 2.98 MB read

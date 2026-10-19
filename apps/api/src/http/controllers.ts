@@ -215,7 +215,7 @@ export class FilesController {
   constructor(@Inject(FilesService) private readonly files: FilesService) {}
 
   @RequirePermission('files.write') @Post() @HttpCode(201)
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 16 * 1024 * 1024, files: 1 } }))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES ?? 16 * 1024 * 1024), files: 1 } }))
   upload(@CurrentActor() actor: TenantActor, @UploadedFile() file?: Express.Multer.File) {
     if (!file) throw Errors.badRequest('Attach a file in the "file" field.');
     return this.files.upload(actor, { originalName: file.originalname, contentType: file.mimetype, data: file.buffer });
