@@ -1,0 +1,20 @@
+# Local development services. Local-only values; never reuse them anywhere else.
+# After `docker compose up -d`, create the owner role once:
+#   docker compose exec postgres psql -U postgres -c "CREATE ROLE cf_owner LOGIN CREATEROLE PASSWORD 'change-me-locally'" \
+#     -c "CREATE DATABASE conversaflow OWNER cf_owner"
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: change-me-locally
+    ports: ['127.0.0.1:5432:5432']
+    volumes: [pgdata:/var/lib/postgresql/data]
+  redis:
+    image: redis:7
+    ports: ['127.0.0.1:6379:6379']
+  mailpit:
+    # Catches every email locally; view at http://localhost:8025. Nothing reaches real inboxes.
+    image: axllent/mailpit:v1.21
+    ports: ['127.0.0.1:1025:1025', '127.0.0.1:8025:8025']
+volumes:
+  pgdata:

@@ -1,0 +1,3 @@
+{"status":"ok"}
+GET /v1/tenant without sign-in: 401
+{"error":{"code":"csrf","message":"Request blocked."}}  <- POST without anti-forgery header

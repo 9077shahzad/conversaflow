@@ -1,0 +1,13 @@
+{
+  "name": "@conversaflow/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Background jobs (webhooks, outbound messages, campaigns, AI, billing). Scaffold only in Milestone 1.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@conversaflow/database": "workspace:*"
+  }
+}

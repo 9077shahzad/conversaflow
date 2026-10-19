@@ -1,0 +1,31 @@
+{
+  "name": "conversaflow",
+  "private": true,
+  "description": "ConversaFlow by Meronatic — multi-tenant customer conversation platform",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "eslint . --max-warnings=0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "db:migrate": "pnpm --filter @conversaflow/database migrate",
+    "db:check-rls": "pnpm --filter @conversaflow/database check-rls",
+    "test": "pnpm db:migrate && pnpm db:check-rls && turbo run test --concurrency=1",
+    "test:local": "bash scripts/with-local-services.sh pnpm test",
+    "secrets:scan": "node scripts/scan-secrets.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0"
+  }
+}

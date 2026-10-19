@@ -1,0 +1,264 @@
+import { authenticator } from 'otplib';
+import { withAnonymous, withContext } from '@conversaflow/database';
+import { ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest } from '@conversaflow/contracts';
+import type { AuthSession, Deps } from '../core/context';
+import { decryptSecret, encryptSecret, randomToken, sha256 } from '../core/crypto';
+import { Errors } from '../core/errors';
+import { burnPasswordCheck, checkPasswordPolicy, hashPassword, verifyPassword } from '../core/passwords';
+import { RATE_RULES } from '../core/rate-limit';
+import { parse } from '../core/validate';
+
+authenticator.options = { window: 1 }; // accept the previous and next 30-second code for clock drift
+
+const SESSION_TTL_DAYS = 7;
+const RECOVERY_CODES = 10;
+
+export interface ClientInfo {
+  ip: string;
+  userAgent?: string;
+}
+
+export class AuthService {
+  constructor(private readonly deps: Deps) {}
+
+  /** Same response whether or not the email already has an account (no account enumeration). */
+  async signup(input: unknown, client: ClientInfo): Promise<void> {
+    const body = parse(SignupRequest, input);
+    await this.deps.rateLimiter.hit(RATE_RULES.signupPerIp, client.ip);
+    const problem = checkPasswordPolicy(body.password, body.email);
+    if (problem) throw Errors.badRequest(problem, [{ field: 'password', message: problem }]);
+
+    const passwordHash = await hashPassword(body.password);
+    const userId = await withAnonymous(this.deps.db, async (tx) => {
+      const { rows } = await tx.query<{ id: string | null }>('SELECT auth_register_user($1, $2, $3, $4) AS id', [
+        body.email, body.fullName, body.locale, passwordHash,
+      ]);
+      return rows[0]?.id ?? null;
+    });
+
+    if (!userId) {
+      await this.deps.mailer.send({
+        to: body.email,
+        subject: 'Sign-up attempt on ConversaFlow',
+        text: 'Someone tried to create a ConversaFlow account with this email. You already have one; you can sign in or reset your password.',
+      });
+      return;
+    }
+    await this.sendVerification(userId, body.email);
+  }
+
+  private async sendVerification(userId: string, email: string): Promise<void> {
+    const token = randomToken();
+    await withAnonymous(this.deps.db, (tx) =>
+      tx.query("SELECT auth_issue_token($1, 'verify_email', $2, interval '24 hours')", [userId, sha256(token)]),
+    );
+    await this.deps.mailer.send({
+      to: email,
+      subject: 'Verify your email for ConversaFlow',
+      text: `Open this link to verify your email: ${this.deps.config.APP_ORIGIN}/verify-email?token=${token}`,
+    });
+  }
+
+  async verifyEmail(token: string): Promise<void> {
+    const userId = await withAnonymous(this.deps.db, async (tx) => {
+      const { rows } = await tx.query<{ id: string | null }>('SELECT auth_verify_email($1) AS id', [sha256(String(token))]);
+      return rows[0]?.id ?? null;
+    });
+    if (!userId) throw Errors.invalidLink();
+  }
+
+  async login(input: unknown, client: ClientInfo): Promise<{ token: string; mfaRequired: boolean }> {
+    const body = parse(LoginRequest, input);
+    await this.deps.rateLimiter.hit(RATE_RULES.loginPerIp, client.ip);
+    await this.deps.rateLimiter.hit(RATE_RULES.loginPerEmail, body.email);
+
+    const cred = await withAnonymous(this.deps.db, async (tx) => {
+      const { rows } = await tx.query<{
+        user_id: string; password_hash: string; status: string; email_verified: boolean; has_mfa: boolean;
+      }>('SELECT * FROM auth_credentials_by_email($1)', [body.email]);
+      return rows[0];
+    });
+    if (!cred) {
+      await burnPasswordCheck(body.password);
+      throw Errors.invalidCredentials();
+    }
+    if (!(await verifyPassword(cred.password_hash, body.password)) || cred.status !== 'active') {
+      throw Errors.invalidCredentials();
+    }
+    if (!cred.email_verified) throw Errors.emailNotVerified();
+    await this.deps.rateLimiter.reset(RATE_RULES.loginPerEmail, body.email);
+
+    const token = randomToken();
+    await withContext(this.deps.db, { tenantId: null, userId: cred.user_id }, async (tx) => {
+      // Default to the first company the user belongs to.
+      const { rows } = await tx.query<{ tenant_id: string }>(
+        "SELECT tenant_id FROM memberships WHERE user_id = $1 AND status = 'active' ORDER BY created_at LIMIT 1",
+        [cred.user_id],
+      );
+      await tx.query(
+        `INSERT INTO sessions (token_hash, user_id, active_tenant_id, ip, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6))`,
+        [sha256(token), cred.user_id, rows[0]?.tenant_id ?? null, client.ip, client.userAgent?.slice(0, 400) ?? null, SESSION_TTL_DAYS],
+      );
+    });
+    return { token, mfaRequired: cred.has_mfa };
+  }
+
+  /** Resolves a cookie value to a live session, or null. */
+  async authenticate(token: string | undefined): Promise<AuthSession | null> {
+    if (!token || token.length > 200) return null;
+    const row = await withAnonymous(this.deps.db, async (tx) => {
+      const { rows } = await tx.query<{
+        session_id: string; user_id: string; active_tenant_id: string | null; mfa_verified_at: Date | null;
+      }>('SELECT * FROM auth_session_lookup($1)', [sha256(token)]);
+      return rows[0];
+    });
+    if (!row) return null;
+    const userHasMfa = await withContext(this.deps.db, { tenantId: null, userId: row.user_id }, async (tx) => {
+      const { rowCount } = await tx.query('SELECT 1 FROM mfa_factors WHERE user_id = $1 AND confirmed_at IS NOT NULL', [row.user_id]);
+      return (rowCount ?? 0) > 0;
+    });
+    return {
+      sessionId: row.session_id,
+      userId: row.user_id,
+      activeTenantId: row.active_tenant_id,
+      mfaVerified: row.mfa_verified_at !== null,
+      userHasMfa,
+    };
+  }
+
+  /** Second step of sign-in when the user has two-step verification. */
+  async completeMfa(session: AuthSession, input: { code?: string; recoveryCode?: string }): Promise<void> {
+    await this.deps.rateLimiter.hit(RATE_RULES.mfaPerSession, session.sessionId);
+    const ok = await withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
+      if (input.recoveryCode) {
+        const { rowCount } = await tx.query(
+          `UPDATE mfa_recovery_codes SET used_at = now()
+           WHERE id = (SELECT id FROM mfa_recovery_codes WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL LIMIT 1)`,
+          [session.userId, sha256(normaliseRecovery(input.recoveryCode))],
+        );
+        return (rowCount ?? 0) === 1;
+      }
+      const { rows } = await tx.query<{ secret_enc: string }>(
+        "SELECT secret_enc FROM mfa_factors WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NOT NULL",
+        [session.userId],
+      );
+      if (!rows[0] || !input.code) return false;
+      return authenticator.check(input.code, decryptSecret(this.deps.keys.mfa, rows[0].secret_enc));
+    });
+    if (!ok) throw Errors.invalidCredentials();
+    await this.markSessionMfa(session);
+  }
+
+  private async markSessionMfa(session: AuthSession): Promise<void> {
+    await withContext(this.deps.db, { tenantId: null, userId: session.userId }, (tx) =>
+      tx.query('UPDATE sessions SET mfa_verified_at = now() WHERE id = $1', [session.sessionId]),
+    );
+  }
+
+  /** Starts TOTP enrolment. Returns the secret once, to be shown as a QR code. */
+  async beginTotpSetup(session: AuthSession): Promise<{ secret: string; otpauthUrl: string }> {
+    if (session.userHasMfa) throw Errors.conflict('mfa_already_enabled', 'Two-step verification is already on.');
+    const secret = authenticator.generateSecret(20);
+    const email = await withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
+      await tx.query("DELETE FROM mfa_factors WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NULL", [session.userId]);
+      await tx.query("INSERT INTO mfa_factors (user_id, type, secret_enc) VALUES ($1, 'totp', $2)", [
+        session.userId, encryptSecret(this.deps.keys.mfa, secret),
+      ]);
+      const { rows } = await tx.query<{ email: string }>('SELECT email FROM users WHERE id = $1', [session.userId]);
+      return rows[0]!.email;
+    });
+    return { secret, otpauthUrl: authenticator.keyuri(email, 'ConversaFlow', secret) };
+  }
+
+  /** Confirms TOTP with a first code and returns single-use recovery codes (shown once). */
+  async confirmTotp(session: AuthSession, code: string): Promise<{ recoveryCodes: string[] }> {
+    const codes = Array.from({ length: RECOVERY_CODES }, () => randomToken(8).replace(/[-_]/g, 'x').slice(0, 10).toLowerCase());
+    const ok = await withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
+      const { rows } = await tx.query<{ id: string; secret_enc: string }>(
+        "SELECT id, secret_enc FROM mfa_factors WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NULL",
+        [session.userId],
+      );
+      const factor = rows[0];
+      if (!factor || !authenticator.check(code, decryptSecret(this.deps.keys.mfa, factor.secret_enc))) return false;
+      await tx.query('UPDATE mfa_factors SET confirmed_at = now() WHERE id = $1', [factor.id]);
+      await tx.query('DELETE FROM mfa_recovery_codes WHERE user_id = $1', [session.userId]);
+      for (const c of codes) {
+        await tx.query('INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES ($1, $2)', [session.userId, sha256(c)]);
+      }
+      return true;
+    });
+    if (!ok) throw Errors.badRequest('That code is not correct. Check the time on your phone and try again.');
+    await this.markSessionMfa(session);
+    return { recoveryCodes: codes };
+  }
+
+  async logout(session: AuthSession): Promise<void> {
+    await this.revokeSession(session, session.sessionId);
+  }
+
+  async listSessions(session: AuthSession) {
+    return withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
+      const { rows } = await tx.query(
+        `SELECT id, ip, user_agent AS "userAgent", created_at AS "createdAt", last_seen_at AS "lastSeenAt",
+                id = $1 AS current
+         FROM sessions WHERE revoked_at IS NULL AND expires_at > now() ORDER BY last_seen_at DESC`,
+        [session.sessionId],
+      );
+      return rows;
+    });
+  }
+
+  async revokeSession(session: AuthSession, sessionId: string): Promise<void> {
+    const count = await withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
+      const { rowCount } = await tx.query('UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL', [sessionId]);
+      return rowCount ?? 0;
+    });
+    if (count === 0) throw Errors.notFound('Session');
+  }
+
+  /** Always answers the same way, whether or not the account exists. */
+  async forgotPassword(input: unknown): Promise<void> {
+    const { email } = parse(ForgotPasswordRequest, input);
+    await this.deps.rateLimiter.hit(RATE_RULES.forgotPerEmail, email);
+    const userId = await withAnonymous(this.deps.db, async (tx) => {
+      const { rows } = await tx.query<{ id: string | null }>('SELECT auth_user_id_by_email($1) AS id', [email]);
+      return rows[0]?.id ?? null;
+    });
+    if (!userId) return;
+    const token = randomToken();
+    await withAnonymous(this.deps.db, (tx) =>
+      tx.query("SELECT auth_issue_token($1, 'reset_password', $2, interval '1 hour')", [userId, sha256(token)]),
+    );
+    await this.deps.mailer.send({
+      to: email,
+      subject: 'Reset your ConversaFlow password',
+      text: `Open this link within one hour to choose a new password: ${this.deps.config.APP_ORIGIN}/reset-password?token=${token}`,
+    });
+  }
+
+  async resetPassword(input: unknown): Promise<void> {
+    const body = parse(ResetPasswordRequest, input);
+    const problem = checkPasswordPolicy(body.password, '');
+    if (problem) throw Errors.badRequest(problem, [{ field: 'password', message: problem }]);
+    const hash = await hashPassword(body.password);
+    const userId = await withAnonymous(this.deps.db, async (tx) => {
+      const { rows } = await tx.query<{ id: string | null }>('SELECT auth_reset_password($1, $2) AS id', [sha256(body.token), hash]);
+      return rows[0]?.id ?? null;
+    });
+    if (!userId) throw Errors.invalidLink();
+  }
+
+  async me(session: AuthSession) {
+    return withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
+      const { rows } = await tx.query(
+        `SELECT id, email, full_name AS "fullName", locale, email_verified_at IS NOT NULL AS "emailVerified"
+         FROM users WHERE id = $1`,
+        [session.userId],
+      );
+      return { ...rows[0], mfaEnabled: session.userHasMfa, activeTenantId: session.activeTenantId };
+    });
+  }
+}
+
+const normaliseRecovery = (code: string) => code.trim().toLowerCase().replace(/\s+/g, '');

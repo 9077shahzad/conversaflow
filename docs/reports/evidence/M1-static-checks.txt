@@ -1,0 +1,9 @@
+
+$ pnpm audit --prod --audit-level high
+No known vulnerabilities found
+$ pnpm lint
+
+$ pnpm typecheck
+ Tasks:    6 successful, 6 total
+$ pnpm secrets:scan
+Secret scan passed (72 files checked).

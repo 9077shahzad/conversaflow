@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-superuser-only
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # CI-only throwaway credentials for the service containers above. Not secrets.
+      DATABASE_URL: postgres://cf_owner:ci-owner-pw@localhost:5432/conversaflow
+      DATABASE_APP_URL: postgres://cf_app:ci-app-password@localhost:5432/conversaflow
+      CF_APP_DB_PASSWORD: ci-app-password
+      REDIS_URL: redis://localhost:6379
+      FILE_STORAGE_DIR: ${{ runner.temp }}/storage
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Secret scan of full history (gitleaks, open-source CLI; no licence or account needed)
+        uses: docker://zricethezav/gitleaks:v8.21.2
+        with:
+          args: detect --source . --redact --verbose
+      - run: pnpm secrets:scan
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm typecheck
+      - name: Dependency audit (high and critical)
+        run: pnpm audit --audit-level high --prod
+      - name: Create the non-superuser owner role
+        run: |
+          PGPASSWORD=ci-superuser-only psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE cf_owner LOGIN CREATEROLE PASSWORD 'ci-owner-pw'" \
+            -c "CREATE DATABASE conversaflow OWNER cf_owner"
+      - name: Generate per-run keys
+        run: |
+          echo "FILE_URL_SIGNING_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "MFA_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: Migrations, isolation check and tests
+        run: pnpm test

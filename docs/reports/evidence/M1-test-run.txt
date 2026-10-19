@@ -1,0 +1,179 @@
+
+> conversaflow@ test /home/claude/conversaflow
+> pnpm db:migrate && pnpm db:check-rls && turbo run test --concurrency=1
+
+
+> conversaflow@ db:migrate /home/claude/conversaflow
+> pnpm --filter @conversaflow/database migrate
+
+
+> @conversaflow/database@0.1.0 migrate /home/claude/conversaflow/packages/database
+> tsx src/migrate.ts
+
+applied 0001_foundation.sql
+applied 0002_identity.sql
+applied 0003_tenancy_rbac.sql
+applied 0004_plans_usage.sql
+applied 0005_audit_files.sql
+
+> conversaflow@ db:check-rls /home/claude/conversaflow
+> pnpm --filter @conversaflow/database check-rls
+
+
+> @conversaflow/database@0.1.0 check-rls /home/claude/conversaflow/packages/database
+> tsx src/check-rls.ts
+
+Isolation check passed: every tenant table has forced RLS and a policy; cf_app cannot bypass RLS.
+
+   • turbo 2.11.9
+   • Packages in scope: @conversaflow/api, @conversaflow/contracts, @conversaflow/database, @conversaflow/worker
+   • Running test in 4 packages
+   • Remote caching disabled
+
+@conversaflow/database:build: cache hit, replaying logs e109abf3f1d2e80d
+@conversaflow/database:build: 
+@conversaflow/database:build: > @conversaflow/database@0.1.0 build /home/claude/conversaflow/packages/database
+@conversaflow/database:build: > tsc -p tsconfig.json
+@conversaflow/database:build: 
+@conversaflow/contracts:build: cache hit, replaying logs bedf17a12581ed67
+@conversaflow/contracts:build: 
+@conversaflow/contracts:build: > @conversaflow/contracts@0.1.0 build /home/claude/conversaflow/packages/contracts
+@conversaflow/contracts:build: > tsc -p tsconfig.json
+@conversaflow/contracts:build: 
+@conversaflow/api:test: cache bypass, force executing f46b74a12295e0e5
+@conversaflow/api:test: 
+@conversaflow/api:test: > @conversaflow/api@0.1.0 test /home/claude/conversaflow/apps/api
+@conversaflow/api:test: > vitest run
+@conversaflow/api:test: 
+@conversaflow/api:test: The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+@conversaflow/api:test: 
+@conversaflow/api:test:  RUN  v2.1.9 /home/claude/conversaflow/apps/api
+@conversaflow/api:test: 
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > covers every table that has a tenant_id column (at least the 14 known ones)
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > company B really has data in every tenant table (so the checks below are meaningful)
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > in company A's context, no row of any other company is visible in any tenant table
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > even when explicitly filtering by company B's id, company A gets nothing
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot update or delete company B's rows in any tenant table
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot insert rows labelled with company B's id
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot link its records to company B's records (composite foreign keys)
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > with no company selected, every tenant table looks empty
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > the company context never leaks to the next use of a pooled connection
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > people and companies: A sees only its own members and companies, never B's
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > a person who belongs to BOTH companies sees only the selected company (regression: switcher rule)
+@conversaflow/api:test:  ✓ test/isolation.db.test.ts > database isolation between companies > the application role cannot escalate: no SET ROLE, no direct access to secret tokens
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-up and email verification > signs up, verifies the email, signs in and reads the profile
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-up and email verification > answers sign-up identically for an existing email, and warns the owner by email instead
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-up and email verification > refuses weak passwords
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-up and email verification > does not allow sign-in before the email is verified
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-up and email verification > a verification link works once only
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-in > gives the same answer for a wrong password and an unknown email
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-in > locks out repeated attempts on one account (rate limit)
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-in > blocks state-changing requests without the anti-forgery header
+@conversaflow/api:test:  ✓ test/auth.test.ts > sign-in > sets a hardened session cookie and stores only hashes of secrets
+@conversaflow/api:test:  ✓ test/auth.test.ts > two-step verification (TOTP) > after enabling, sign-in requires the code; the account is unusable until it is entered
+@conversaflow/api:test:  ✓ test/auth.test.ts > two-step verification (TOTP) > recovery codes work exactly once
+@conversaflow/api:test:  ✓ test/auth.test.ts > two-step verification (TOTP) > limits guessing of codes per session
+@conversaflow/api:test:  ✓ test/auth.test.ts > sessions and password reset > a user can see their sessions and sign one out remotely
+@conversaflow/api:test:  ✓ test/auth.test.ts > sessions and password reset > one user cannot sign out another user's session
+@conversaflow/api:test:  ✓ test/auth.test.ts > sessions and password reset > password reset: same answer for unknown emails, link works once, all old sessions end
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B cannot read A's member by id (404, so A's records are not even confirmed to exist)
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B cannot change roles of, or remove, A's member
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B cannot switch its session into company A
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B's lists contain nothing from A
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > a tenant id smuggled in the request body or query is ignored
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > B cannot read A's file details or create a download link for it
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > B cannot download with A's valid link
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > A's link does not work without signing in
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > A can download its own file with the link and gets the exact bytes
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > a tampered link is refused (signature check)
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > an expired link is refused, even when correctly signed
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > a correctly signed link naming B's company cannot open A's file
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > files are stored inside the owning company's folder, and unsafe names cannot steer the path
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > a file flagged by the malware scan is recorded as rejected and can never be downloaded
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > disallowed file types are refused
+@conversaflow/api:test:  ✓ test/isolation.api.test.ts > membership changes take effect immediately > a removed member loses access on the very next request
+@conversaflow/api:test: (node:4853) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 listening listeners added to [Server]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+@conversaflow/api:test: (Use `node --trace-warnings ...` to show where the warning was created)
+@conversaflow/api:test: (node:4853) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 error listeners added to [Server]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+@conversaflow/api:test: (node:4853) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 close listeners added to [Server]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+@conversaflow/api:test:  ✓ test/limits.test.ts > seats > 20 people accepting invitations at the same moment on a 3-seat plan: exactly 2 get in 1371ms
+@conversaflow/api:test:  ✓ test/limits.test.ts > seats > a platform override raises the limit for one company only
+@conversaflow/api:test:  ✓ test/limits.test.ts > metered usage (automation runs) > counts usage, warns once at 80% and 95%, and hard-stops at the limit
+@conversaflow/api:test:  ✓ test/limits.test.ts > metered usage (automation runs) > parallel usage never overshoots the limit
+@conversaflow/api:test:  ✓ test/limits.test.ts > plan catalogue > loads the BRD v1.1 proposed prices and limits as data
+@conversaflow/api:test:  ✓ test/limits.test.ts > plan catalogue > a price version in use cannot be edited; a new version must be published
+@conversaflow/api:test:  ✓ test/limits.test.ts > plan catalogue > the application role cannot change prices or limits at all
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    PATCH /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/members
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    POST /v1/invitations
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    POST /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/entitlements
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/audit-events
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    POST /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    PATCH /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/members
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    POST /v1/invitations
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    POST /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/entitlements
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/audit-events
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    POST /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT PATCH /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/members
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT POST /v1/invitations
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT POST /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT GET /v1/entitlements
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT GET /v1/audit-events
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    POST /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CAN    GET /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT PATCH /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/members
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT POST /v1/invitations
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT POST /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/entitlements
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/audit-events
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CAN    GET /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CAN    POST /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CAN    GET /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT PATCH /v1/tenant
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CAN    GET /v1/members
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT POST /v1/invitations
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT POST /v1/roles
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/entitlements
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/audit-events
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT POST /v1/files
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > an Owner without two-step verification can read settings but cannot change them
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > without a company selected, company endpoints refuse
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > an Admin cannot make anyone Owner, nor change or remove an Owner
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > the last Owner cannot be demoted
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > nobody can create a custom role with permissions they do not hold
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > a custom role grants exactly its permissions
+@conversaflow/api:test:  ✓ test/rbac.test.ts > privileged actions and escalation > role changes apply on the next request
+@conversaflow/api:test:  ✓ test/audit.test.ts > audit trail > records each change in order with who did it
+@conversaflow/api:test:  ✓ test/audit.test.ts > audit trail > the chain verifies as intact
+@conversaflow/api:test:  ✓ test/audit.test.ts > audit trail > the application cannot edit or delete audit events
+@conversaflow/api:test:  ✓ test/audit.test.ts > audit trail > even the database owner is blocked by the append-only trigger
+@conversaflow/api:test:  ✓ test/audit.test.ts > audit trail > tampering by someone with direct database control is detected
+@conversaflow/api:test:  ✓ test/audit.test.ts > audit trail > another company's audit trail is invisible
+@conversaflow/api:test: 
+@conversaflow/api:test:  Test Files  6 passed (6)
+@conversaflow/api:test:       Tests  113 passed (113)
+@conversaflow/api:test:    Start at  20:02:48
+@conversaflow/api:test:    Duration  13.12s (transform 490ms, setup 36ms, collect 3.56s, tests 7.86s, environment 1ms, prepare 424ms)
+@conversaflow/api:test: 
+
+ Tasks:    3 successful, 3 total
+Cached:    2 cached, 3 total
+  Time:    14.013s 
+
