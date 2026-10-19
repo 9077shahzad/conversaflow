@@ -40,6 +40,8 @@ jobs:
       DATABASE_PLATFORM_URL: postgres://cf_platform:ci-platform-password@localhost:5432/conversaflow
       CF_PLATFORM_DB_PASSWORD: ci-platform-password
       SCANNER: clamd
+      # CI loads only the test signature; production refuses this setting (official signatures required).
+      SCANNER_REQUIRE_OFFICIAL_SIGNATURES: 'false'
       CLAMD_HOST: 127.0.0.1
       CLAMD_PORT: '3310'
       REDIS_URL: redis://localhost:6379

@@ -66,6 +66,9 @@ export CF_NOTIFY_DB_PASSWORD="$NOTIFY_PW"
 export DATABASE_PLATFORM_URL="postgres://cf_platform:$PLATFORM_PW@127.0.0.1:$PG_PORT/conversaflow"
 export CF_PLATFORM_DB_PASSWORD="$PLATFORM_PW"
 export SCANNER=clamd
+# This harness loads ONLY the local test signature (the official mirror is not reachable here), so the
+# official-signature requirement is switched off explicitly. Production refuses this setting.
+export SCANNER_REQUIRE_OFFICIAL_SIGNATURES=false
 export CLAMD_HOST=127.0.0.1
 export CLAMD_PORT="$CLAMD_PORT"
 export REDIS_URL="redis://127.0.0.1:$REDIS_PORT"

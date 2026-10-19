@@ -8,11 +8,13 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildDeps, createApp } from '../src/app';
 import { loadConfig } from '../src/core/config';
-import { ClamdScanner } from '../src/core/storage';
+import { ClamdScanner, parseClamdVersion } from '../src/core/storage';
 import { Client, enableMfa, newCompany, newUser, startApp, type TestApp } from './helpers';
 
 const EICAR = Buffer.from('X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*');
-const clamd = () => new ClamdScanner(process.env.CLAMD_HOST!, Number(process.env.CLAMD_PORT), 5000);
+// The local engine has only the test signature, so these engine tests switch the official-signature check off;
+// the signature checks have their own tests below.
+const clamd = () => new ClamdScanner(process.env.CLAMD_HOST!, Number(process.env.CLAMD_PORT), { timeoutMs: 5000, requireOfficialSignatures: false });
 
 let t: TestApp;
 let owner: Client;
@@ -58,7 +60,7 @@ describe('fail-closed when the scanner is unavailable', () => {
   }
 
   it('scanner down: upload refused with 503, no file row, nothing on disk', async () => {
-    const down = await appWithScanner(new ClamdScanner('127.0.0.1', 1, 1000));
+    const down = await appWithScanner(new ClamdScanner('127.0.0.1', 1, { timeoutMs: 1000 }));
     try {
       const c = new Client({ ...t, app: down.app }, owner.email);
       const cookie = owner.cookie!; // the same signed-in session, sent to the second app instance
@@ -79,7 +81,10 @@ describe('fail-closed when the scanner is unavailable', () => {
     await new Promise<void>((r) => silent.listen(0, '127.0.0.1', () => r()));
     const port = (silent.address() as { port: number }).port;
     try {
-      await expect(new ClamdScanner('127.0.0.1', port, 500).scan(Buffer.from('x'))).rejects.toThrow(/unavailable: timeout/);
+      await expect(new ClamdScanner('127.0.0.1', port, { timeoutMs: 500, requireOfficialSignatures: false }).scan(Buffer.from('x')))
+        .rejects.toThrow(/unavailable: timeout/);
+      // With the signature check on (production), a hanging scanner is refused even earlier: its state is unreadable.
+      await expect(new ClamdScanner('127.0.0.1', port, { timeoutMs: 500 }).scan(Buffer.from('x'))).rejects.toThrow(/signatures unknown/);
     } finally {
       silent.close();
     }
@@ -87,5 +92,116 @@ describe('fail-closed when the scanner is unavailable', () => {
 
   it('production refuses to start with the test scanner', () => {
     expect(() => loadConfig({ ...process.env, NODE_ENV: 'production', SCANNER: 'signature' })).toThrow(/requires SCANNER=clamd/);
+  });
+});
+
+/**
+ * Minimal stand-in for clamd: answers VERSION with a chosen reply and INSTREAM with "stream: OK".
+ * Lets the tests put the scanner in each signature state (current, outdated, missing, unreadable).
+ */
+async function fakeClamd(versionReply: () => string) {
+  const server: Server = createServer((sock) => {
+    let buf = Buffer.alloc(0);
+    sock.on('data', (c: Buffer) => {
+      buf = Buffer.concat([buf, c]);
+      if (buf.subarray(0, 9).toString() === 'zVERSION\0') {
+        sock.end(`${versionReply()}\0`);
+        return;
+      }
+      if (buf.subarray(0, 10).toString() === 'zINSTREAM\0') {
+        let off = 10;
+        while (off + 4 <= buf.length) {
+          const len = buf.readUInt32BE(off);
+          if (len === 0) { sock.end('stream: OK\0'); return; }
+          off += 4 + len;
+        }
+      }
+    });
+    sock.on('error', () => undefined);
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  return { port: (server.address() as { port: number }).port, close: () => server.close() };
+}
+
+const clamdDate = (hoursAgo: number) => {
+  const d = new Date(Date.now() - hoursAgo * 3_600_000);
+  const day = d.toUTCString().slice(0, 3);
+  const mon = d.toUTCString().slice(8, 11);
+  return `${day} ${mon} ${String(d.getUTCDate()).padStart(2, ' ')} ${d.toISOString().slice(11, 19)} ${d.getUTCFullYear()}`;
+};
+
+describe('signature freshness: missing or outdated official signatures block uploads', () => {
+  it('reads the four signature states from the clamd VERSION reply', () => {
+    const now = new Date();
+    expect(parseClamdVersion(`ClamAV 1.5.4/27800/${clamdDate(3)}`, now, 48)).toMatchObject({ state: 'current', databaseVersion: 27800 });
+    expect(parseClamdVersion(`ClamAV 1.5.4/27700/${clamdDate(72)}`, now, 48)).toMatchObject({ state: 'outdated' });
+    expect(parseClamdVersion('ClamAV 1.5.4', now, 48)).toMatchObject({ state: 'missing', engine: '1.5.4' });
+    expect(parseClamdVersion('garbage', now, 48)).toMatchObject({ state: 'unknown' });
+    expect(parseClamdVersion('ClamAV 1.5.4/27800/not a date', now, 48)).toMatchObject({ state: 'unknown' });
+  });
+
+  async function uploadWith(scanner: ClamdScanner, name: string) {
+    const deps = buildDeps(loadConfig(process.env), { mailer: t.mailer, scanner });
+    const app = await createApp(deps);
+    try {
+      const rowsBefore = (await owner.get('/v1/files').expect(200)).body.length;
+      const filesBefore = await storedFiles();
+      const res = await new Client({ ...t, app }, owner.email).agent.post('/v1/files').set('Cookie', owner.cookie!)
+        .set('X-Requested-With', 'conversaflow')
+        .attach('file', Buffer.from(`clean content ${name}`), { filename: `${name}.txt`, contentType: 'text/plain' });
+      return {
+        status: res.status, code: res.body?.error?.code as string | undefined,
+        rowsAdded: (await owner.get('/v1/files').expect(200)).body.length - rowsBefore,
+        filesAdded: (await storedFiles()).length - filesBefore.length,
+      };
+    } finally {
+      await app.close(); await deps.db.end(); await deps.identityDb.end(); await deps.platformDb.end(); deps.redis.disconnect();
+    }
+  }
+
+  for (const [label, reply, expected] of [
+    ['official signatures missing (engine only)', () => 'ClamAV 1.5.4', 503],
+    ['signatures older than the limit (72 h > 48 h)', () => `ClamAV 1.5.4/27700/${clamdDate(72)}`, 503],
+    ['signature state unreadable', () => 'ClamAV ???', 503],
+    ['current official signatures (3 h old)', () => `ClamAV 1.5.4/27800/${clamdDate(3)}`, 201],
+  ] as const) {
+    it(`${label} → ${expected === 201 ? 'upload accepted' : 'upload refused, nothing stored'}`, async () => {
+      const fake = await fakeClamd(reply);
+      try {
+        const r = await uploadWith(new ClamdScanner('127.0.0.1', fake.port, { requireOfficialSignatures: true, maxSignatureAgeHours: 48 }), label.slice(0, 12).replace(/\W/g, ''));
+        if (expected === 201) {
+          expect(r).toEqual({ status: 201, code: undefined, rowsAdded: 1, filesAdded: 1 });
+        } else {
+          expect(r).toEqual({ status: 503, code: 'scanner_unavailable', rowsAdded: 0, filesAdded: 0 });
+        }
+      } finally {
+        fake.close();
+      }
+    });
+  }
+
+  it('a refusal is not cached: once signatures are updated, uploads work again', async () => {
+    let reply = 'ClamAV 1.5.4';
+    const fake = await fakeClamd(() => reply);
+    try {
+      const scanner = new ClamdScanner('127.0.0.1', fake.port, { requireOfficialSignatures: true, maxSignatureAgeHours: 48 });
+      await expect(scanner.scan(Buffer.from('x'))).rejects.toThrow(/signatures missing/);
+      reply = `ClamAV 1.5.4/27801/${clamdDate(1)}`;
+      expect(await scanner.scan(Buffer.from('x'))).toBe('clean');
+    } finally {
+      fake.close();
+    }
+  });
+
+  it('the real local ClamAV, which has only the test signature, is refused when official signatures are required', async () => {
+    const real = new ClamdScanner(process.env.CLAMD_HOST!, Number(process.env.CLAMD_PORT), { requireOfficialSignatures: true });
+    expect((await real.signatureStatus(true)).state).toBe('missing');
+    await expect(real.scan(Buffer.from('ordinary text'))).rejects.toThrow(/signatures missing/);
+  });
+
+  it('production refuses to start with the official-signature requirement switched off', () => {
+    expect(() => loadConfig({ ...process.env, NODE_ENV: 'production', SCANNER: 'clamd', SCANNER_REQUIRE_OFFICIAL_SIGNATURES: 'false' }))
+      .toThrow(/requires SCANNER_REQUIRE_OFFICIAL_SIGNATURES=true/);
+    expect(loadConfig({ ...process.env, SCANNER_REQUIRE_OFFICIAL_SIGNATURES: undefined }).SCANNER_REQUIRE_OFFICIAL_SIGNATURES).toBe(true);
   });
 });

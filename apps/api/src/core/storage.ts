@@ -47,19 +47,101 @@ export interface FileScanner {
 
 export class ScannerUnavailableError extends Error {}
 
+export interface SignatureStatus {
+  state: 'current' | 'missing' | 'outdated' | 'unknown';
+  engine?: string;
+  databaseVersion?: number;
+  publishedAt?: string;
+  ageHours?: number;
+}
+
+export interface ClamdOptions {
+  timeoutMs?: number;
+  /** Require the official signature database (daily.cvd/cld) to be loaded and recent. True in production. */
+  requireOfficialSignatures?: boolean;
+  /** Oldest acceptable signature database, in hours. */
+  maxSignatureAgeHours?: number;
+  /** For tests. */
+  now?: () => Date;
+}
+
+/**
+ * Reads clamd's VERSION reply. With official signatures loaded it reads
+ * "ClamAV 1.5.4/27800/Mon Oct 19 08:23:01 2026" (engine / database version / database date).
+ * With no official database (for example only a custom test signature) it reads just "ClamAV 1.5.4".
+ */
+export function parseClamdVersion(reply: string, now: Date, maxAgeHours: number): SignatureStatus {
+  const m = /^ClamAV ([^/\s]+)(?:\/(\d+)\/(.+))?$/.exec(reply.trim());
+  if (!m) return { state: 'unknown' };
+  const engine = m[1];
+  if (!m[2] || !m[3]) return { state: 'missing', engine };
+  const published = new Date(`${m[3].trim()} UTC`);
+  if (Number.isNaN(published.getTime())) return { state: 'unknown', engine, databaseVersion: Number(m[2]) };
+  const ageHours = (now.getTime() - published.getTime()) / 3_600_000;
+  return {
+    state: ageHours > maxAgeHours ? 'outdated' : 'current',
+    engine, databaseVersion: Number(m[2]), publishedAt: published.toISOString(), ageHours: Math.round(ageHours * 10) / 10,
+  };
+}
+
 /**
  * ClamAV daemon (clamd) over TCP using the INSTREAM command. The production scanner.
- * Fail-closed: a timeout, a connection error, a size-limit reply or any unexpected answer throws
- * ScannerUnavailableError, and the upload is refused without storing anything.
+ * Fail-closed: a timeout, a connection error, a size-limit reply, any unexpected answer, or (when required)
+ * missing, outdated or unreadable official signatures throws ScannerUnavailableError, and the upload is refused
+ * without storing anything.
  */
 export class ClamdScanner implements FileScanner {
+  private readonly timeoutMs: number;
+  private readonly requireOfficial: boolean;
+  private readonly maxAgeHours: number;
+  private readonly now: () => Date;
+  private cached?: { at: number; status: SignatureStatus };
+
   constructor(
     private readonly host: string,
     private readonly port: number,
-    private readonly timeoutMs = 15_000,
-  ) {}
+    opts: ClamdOptions | number = {},
+  ) {
+    const o = typeof opts === 'number' ? { timeoutMs: opts } : opts;
+    this.timeoutMs = o.timeoutMs ?? 15_000;
+    this.requireOfficial = o.requireOfficialSignatures ?? true;
+    this.maxAgeHours = o.maxSignatureAgeHours ?? 48;
+    this.now = o.now ?? (() => new Date());
+  }
 
-  scan(data: Buffer): Promise<'clean' | 'infected'> {
+  /** Current state of the signature database, as reported by clamd (cached for 60 seconds). */
+  async signatureStatus(fresh = false): Promise<SignatureStatus> {
+    if (!fresh && this.cached && Date.now() - this.cached.at < 60_000) return this.cached.status;
+    const reply = await this.command('zVERSION\0', 3000).catch(() => null);
+    const status = reply === null ? { state: 'unknown' as const } : parseClamdVersion(reply, this.now(), this.maxAgeHours);
+    this.cached = { at: Date.now(), status };
+    return status;
+  }
+
+  async scan(data: Buffer): Promise<'clean' | 'infected'> {
+    if (this.requireOfficial) {
+      const s = await this.signatureStatus();
+      if (s.state !== 'current') {
+        this.cached = undefined; // re-check on the next upload rather than caching a failure
+        throw new ScannerUnavailableError(`Malware scanner signatures ${s.state}`);
+      }
+    }
+    return this.stream(data);
+  }
+
+  private command(cmd: string, timeoutMs: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const socket = connect({ host: this.host, port: this.port });
+      let out = '';
+      socket.setTimeout(timeoutMs, () => { socket.destroy(); reject(new Error('timeout')); });
+      socket.on('error', reject);
+      socket.on('connect', () => socket.write(cmd));
+      socket.on('data', (c) => (out += c.toString()));
+      socket.on('end', () => resolve(out.replace(/\0/g, '').trim()));
+    });
+  }
+
+  private stream(data: Buffer): Promise<'clean' | 'infected'> {
     return new Promise((resolve, reject) => {
       const socket = connect({ host: this.host, port: this.port });
       const chunks: Buffer[] = [];

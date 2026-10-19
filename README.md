@@ -2,7 +2,8 @@
 
 Multi-company (multi-tenant) customer conversation platform, WhatsApp-first. Proprietary — © Meronatic. All rights reserved.
 
-**Status: Milestone 1 locally checked; Phase 1 build complete locally. GitHub CI and hosted verification pending.**
+**Status: Phase 1 development complete; local checks reported passed; GitHub CI and hosted verification pending.
+Live pilot approval remains pending those checks and the remaining readiness conditions** (see `docs/readiness/blockers.md`).
 No live integrations, no paid services, no public deployment.
 
 ## What exists today

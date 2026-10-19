@@ -29,6 +29,9 @@ const Schema = z.object({
   CLAMD_HOST: z.string().default('127.0.0.1'),
   CLAMD_PORT: z.coerce.number().int().default(3310),
   CLAMD_TIMEOUT_MS: z.coerce.number().int().default(15_000),
+  /** Uploads are refused unless clamd has the official signature database loaded and it is recent. */
+  SCANNER_REQUIRE_OFFICIAL_SIGNATURES: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  SCANNER_MAX_SIGNATURE_AGE_HOURS: z.coerce.number().int().min(1).max(168).default(48),
 });
 
 export type Config = z.infer<typeof Schema>;
@@ -42,6 +45,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   if (parsed.data.NODE_ENV === 'production' && parsed.data.SCANNER !== 'clamd') {
     throw new Error('Invalid configuration: production requires SCANNER=clamd (the signature scanner is a test double).');
+  }
+  if (parsed.data.NODE_ENV === 'production' && !parsed.data.SCANNER_REQUIRE_OFFICIAL_SIGNATURES) {
+    throw new Error('Invalid configuration: production requires SCANNER_REQUIRE_OFFICIAL_SIGNATURES=true.');
   }
   return parsed.data;
 }

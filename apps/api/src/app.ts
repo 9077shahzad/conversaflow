@@ -44,7 +44,11 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
     scanner:
       overrides.scanner ??
       (config.SCANNER === 'clamd'
-        ? new ClamdScanner(config.CLAMD_HOST, config.CLAMD_PORT, config.CLAMD_TIMEOUT_MS)
+        ? new ClamdScanner(config.CLAMD_HOST, config.CLAMD_PORT, {
+            timeoutMs: config.CLAMD_TIMEOUT_MS,
+            requireOfficialSignatures: config.SCANNER_REQUIRE_OFFICIAL_SIGNATURES,
+            maxSignatureAgeHours: config.SCANNER_MAX_SIGNATURE_AGE_HOURS,
+          })
         : new SignatureScanner()),
     keys: overrides.keys ?? {
       fileLinks: Buffer.from(config.FILE_URL_SIGNING_KEY, 'base64'),
