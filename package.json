@@ -1,7 +1,7 @@
 {
   "name": "conversaflow",
   "private": true,
-  "description": "ConversaFlow by Meronatic — multi-tenant customer conversation platform",
+  "description": "ConversaFlow by Meronatic \u2014 multi-tenant customer conversation platform",
   "license": "UNLICENSED",
   "packageManager": "pnpm@10.28.0",
   "engines": {
@@ -27,5 +27,10 @@
     "turbo": "^2.3.3",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "^8.5.23"
+    }
   }
 }
