@@ -1,7 +1,7 @@
 /** Plans, seat limits (including under concurrency), metered usage, warnings and frozen price versions. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { EntitlementsService } from '../src/modules/entitlements.service';
-import { asOwner, Client, clearRateLimits, enableMfa, invite, newCompany, newUser, PASSWORD, startApp, tokenFrom, uniqueEmail, type TestApp } from './helpers';
+import { activateSubscription, asOwner, Client, clearRateLimits, enableMfa, invite, newCompany, newUser, PASSWORD, startApp, tokenFrom, uniqueEmail, type TestApp } from './helpers';
 
 let t: TestApp;
 let owner: Client;
@@ -11,6 +11,7 @@ beforeAll(async () => {
   t = await startApp();
   owner = await newUser(t, 'limits');
   tenantId = await newCompany(owner, 'limits', 'starter'); // Starter: 3 seats, 1,000 automation runs
+  await activateSubscription(t, tenantId); // paid-plan behaviour; trials are tested in trial.test.ts
   await enableMfa(owner);
 });
 afterAll(() => t?.close());
@@ -60,6 +61,7 @@ describe('metered usage (automation runs)', () => {
   it('parallel usage never overshoots the limit', async () => {
     const other = await newUser(t, 'burst');
     const otherTenant = await newCompany(other, 'burst', 'starter');
+    await activateSubscription(t, otherTenant);
     const svc = new EntitlementsService(t.deps);
     const actor = { tenantId: otherTenant, userId: other.userId! };
     await svc.consume(actor, 'automation_executions', 990);
@@ -75,7 +77,7 @@ describe('plan catalogue', () => {
     const { rows } = await t.ownerDb.query(
       `SELECT p.code, v.price_monthly_cents AS price, e.key, e.limit_value::int AS lim, e.addon_price_cents AS addon
        FROM plans p JOIN plan_versions v ON v.plan_id = p.id JOIN plan_entitlements e ON e.plan_version_id = v.id
-       WHERE e.key = 'seats' ORDER BY v.price_monthly_cents`);
+       WHERE e.key = 'seats' AND v.version = 1 ORDER BY v.price_monthly_cents`);
     expect(rows).toEqual([
       { code: 'starter', price: 2900, key: 'seats', lim: 3, addon: null },
       { code: 'growth', price: 7900, key: 'seats', lim: 10, addon: 800 },
@@ -86,16 +88,16 @@ describe('plan catalogue', () => {
 
   it('a price version in use cannot be edited; a new version must be published', async () => {
     await expect(
-      t.ownerDb.query("UPDATE plan_versions SET price_monthly_cents = 1 WHERE plan_id = (SELECT id FROM plans WHERE code = 'starter')"),
+      t.ownerDb.query("UPDATE plan_versions SET price_monthly_cents = 1 WHERE version = 1 AND plan_id = (SELECT id FROM plans WHERE code = 'starter')"),
     ).rejects.toThrow(/in use; publish a new version/);
     await expect(
       t.ownerDb.query(`UPDATE plan_entitlements SET limit_value = 999 WHERE key = 'seats' AND plan_version_id =
-        (SELECT v.id FROM plan_versions v JOIN plans p ON p.id = v.plan_id WHERE p.code = 'starter')`),
+        (SELECT v.id FROM plan_versions v JOIN plans p ON p.id = v.plan_id WHERE p.code = 'starter' AND v.version = 1)`),
     ).rejects.toThrow(/in use/);
     // ...and no new limit can be slipped into a version that is in use.
     await expect(
       t.ownerDb.query(`INSERT INTO plan_entitlements (plan_version_id, key, limit_value)
-        SELECT v.id, 'ai_credits', 999999 FROM plan_versions v JOIN plans p ON p.id = v.plan_id WHERE p.code = 'starter'`),
+        SELECT v.id, 'ai_credits', 999999 FROM plan_versions v JOIN plans p ON p.id = v.plan_id WHERE p.code = 'starter' AND v.version = 1`),
     ).rejects.toThrow(/in use/);
   });
 

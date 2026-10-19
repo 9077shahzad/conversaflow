@@ -31,9 +31,12 @@ export class TenantsService {
     );
 
     const tenant = await withContext(db, { tenantId, userId: session.userId }, async (tx) => {
+      // Latest PUBLISHED version only (drafts, such as the annual-price draft, are never offered).
+      // Trial length comes from the configurable trial policy.
       const plan = await tx.query<{ id: string; trial_days: number }>(
-        `SELECT v.id, v.trial_days FROM plan_versions v JOIN plans p ON p.id = v.plan_id
-         WHERE p.code = $1 AND p.is_public AND v.effective_from <= now() ORDER BY v.version DESC LIMIT 1`,
+        `SELECT v.id, (SELECT trial_days FROM trial_policy) AS trial_days FROM plan_versions v JOIN plans p ON p.id = v.plan_id
+         WHERE p.code = $1 AND p.is_public AND v.published_at IS NOT NULL AND v.effective_from <= now()
+         ORDER BY v.version DESC LIMIT 1`,
         [body.planCode],
       );
       if (!plan.rows[0]) throw Errors.badRequest('Unknown plan.');

@@ -6,6 +6,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
+import { AutomationMetering } from '../src/modules/entitlements.service';
 import { addMember, asOwner, enableMfa, invite, newCompany, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -24,6 +25,7 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await t.deps.db.query('SELECT 1'); // warm pool
   await withContext(t.deps.db, { tenantId, userId: owner.userId! }, (tx) =>
     tx.query("INSERT INTO usage_counters (tenant_id, key, period_start, used) VALUES ($1, 'ai_credits', date_trunc('month', now())::date, 5)", [tenantId]));
+  await new AutomationMetering(t.deps).recordRunOutcome({ tenantId, userId: owner.userId! }, `run-${label}`, 'completed');
   await asOwner(t, tenantId, (tx) =>
     tx.query("INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'seats', 5, 'test')", [tenantId]));
 }

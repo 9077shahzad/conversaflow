@@ -1,7 +1,7 @@
 /** Role permissions: every system role against every Phase 1 endpoint, plus escalation and MFA rules. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { SYSTEM_ROLES } from '../src/modules/rbac';
-import { addMember, enableMfa, newCompany, newUser, startApp, uniqueEmail, type Client, type TestApp } from './helpers';
+import { activateSubscription, addMember, enableMfa, newCompany, newUser, startApp, uniqueEmail, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
 let owner: Client;
@@ -25,7 +25,7 @@ const ENDPOINTS: Array<{ name: string; permission: string; call: Call }> = [
 beforeAll(async () => {
   t = await startApp();
   owner = await newUser(t, 'boss');
-  await newCompany(owner, 'matrix', 'business');
+  await activateSubscription(t, await newCompany(owner, 'matrix', 'business'));
   await enableMfa(owner);
   members.owner = owner;
   for (const role of ['admin', 'supervisor', 'agent', 'analyst']) {

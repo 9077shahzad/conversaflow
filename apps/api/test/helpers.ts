@@ -142,3 +142,8 @@ export async function nextTotp(c: Client): Promise<string> {
   while (step() === start) await new Promise((r) => setTimeout(r, 250));
   return authenticator.generate(c.mfaSecret!);
 }
+
+/** Ends the trial for a company (platform operation, owner role) so plan limits apply without trial caps. */
+export async function activateSubscription(t: TestApp, tenantId: string): Promise<void> {
+  await asOwner(t, tenantId, (tx) => tx.query("UPDATE subscriptions SET status = 'active', trial_ends_at = NULL WHERE tenant_id = $1", [tenantId]));
+}
