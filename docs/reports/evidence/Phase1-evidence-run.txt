@@ -1,0 +1,42 @@
+# Evidence run — code commit 61180f604a0deeda216da083a741db0a64a76753 (2026-10-19 20:17:26 +0000)
+# Disposable local PostgreSQL 16, Redis and ClamAV. ClamAV has the test signature only, so this harness turns the
+# official-signature requirement off; production configuration refuses that setting (tested).
+
+## Static checks
+$ pnpm lint
+lint: no problems
+$ pnpm typecheck
+ Tasks:    6 successful, 6 total
+$ pnpm audit --prod --audit-level high
+No known vulnerabilities found
+$ pnpm secrets:scan
+Secret scan passed (138 files checked).
+
+## Migrations and isolation check
+applied 0001_foundation.sql
+applied 0002_identity.sql
+applied 0003_tenancy_rbac.sql
+applied 0004_plans_usage.sql
+applied 0005_audit_files.sql
+applied 0006_credential_separation.sql
+applied 0007_commercial_policies.sql
+applied 0008_settings_teams_platform.sql
+applied 0009_identity_binding.sql
+applied 0010_mfa_in_database.sql
+Isolation check passed: every tenant table has forced RLS and a policy; no login role can bypass RLS; cf_app has no rights over credentials; only cf_notify can mint email tokens.
+
+## Database roles actually used by the tests (restricted, non-owner)
+DATABASE_APP_URL -> role cf_app, superuser=off, bypassrls=false
+DATABASE_IDENTITY_URL -> role cf_identity, superuser=off, bypassrls=false
+DATABASE_NOTIFY_URL -> role cf_notify, superuser=off, bypassrls=false
+DATABASE_PLATFORM_URL -> role cf_platform, superuser=off, bypassrls=false
+
+## API tests (vitest, 15 files)
+ Test Files  15 passed (15)
+      Tests  213 passed (213)
+
+## Browser checks (Playwright, Chromium; English and Arabic, three screen sizes)
+  8 passed (29.3s)
+
+## Full test log
+Saved next to this file as evidence-61180f604a0deeda216da083a741db0a64a76753.log

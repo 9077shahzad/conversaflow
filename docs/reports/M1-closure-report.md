@@ -70,8 +70,37 @@ A fresh reviewer re-tested every finding above against the exact commit (204/204
 
 | Recheck finding | Fix | Regression test | Status |
 | --- | --- | --- | --- |
-| N1 MFA-verified session forgeable by the sign-in role | Migration 0010: MFA decided only in the database from the session token; sealed secrets; DB guessing limit; CI guard | review3.test (5) | Fixed — **awaiting independent recheck** |
-| N2 staff session ignored status / idle | `platform_session_staff` requires an active user, 60-minute idle, 12-hour absolute | review3.test (2) | Fixed — **awaiting independent recheck** |
-| N3 recovery-code race | Single-use enforced in the database function | review3.test (1) | Fixed — **awaiting independent recheck** |
-| N4 signature-date edge cases | Future dates, version 0 and zone suffixes read as unreadable (blocks uploads); clamd runs with TZ=UTC | scanner.test | Fixed — **awaiting independent recheck**; hosted check still open |
-| Residual: sign-in credential can open a non-MFA session for any user | Accepted with mitigations (ADR-027) | review3.test documents the boundary | Accepted — owner to confirm |
+| N1 MFA-verified session forgeable by the sign-in role | Migration 0010: MFA decided only in the database from the session token; sealed secrets; DB guessing limit; CI guard | review3.test (5) | **Verified closed** by the second recheck of `6972acb` |
+| N2 staff session ignored status / idle | `platform_session_staff` requires an active user, 60-minute idle, 12-hour absolute | review3.test (2) | **Verified closed** by the second recheck of `6972acb` |
+| N3 recovery-code race | Single-use enforced in the database function | review3.test (1) | **Verified closed** by the second recheck of `6972acb` |
+| N4 signature-date edge cases | Future dates, version 0 and zone suffixes read as unreadable (blocks uploads); clamd runs with TZ=UTC | scanner.test | **Verified closed** by the second recheck of `6972acb`; hosted check with official signatures still open |
+| Residual: sign-in credential can open a non-MFA session for any user | Accepted with mitigations (ADR-027) | review3.test documents the boundary | Reviewer agrees it is accurately scoped — **owner to confirm** |
+
+## Second independent recheck of commit 6972acb (19 Oct 2026)
+
+**Commit reviewed:** `6972acb61309cb4586a0af17a2a163745328f5ea`, from a clean clone, fresh database, restricted roles.
+**Reviewer's result:** 213/213 tests, isolation guard passed, plus 7 of the reviewer's own probes, all passing.
+**Verdict:** "N1–N4 are genuinely closed and the ADR-027 residual is accurately scoped and reasonable; no new High/Medium
+issues. The fixes hold for this exact commit."
+
+| Item | Reviewer's verdict | What the reviewer checked |
+| --- | --- | --- |
+| N1 | Verified closed | Sign-in role cannot update the verified flag, assume other roles, read the key or call the internal TOTP functions; full attack replayed and refused |
+| TOTP window, replay, guessing limit | Verified closed | ±1 step only; a code works once across sessions; 10 failures per hour enforced under concurrency; interoperates with authenticator apps |
+| N2 | Verified closed | Disabled user, 61 minutes idle and 13 hours old all refused |
+| N3 | Verified closed | Two simultaneous uses of one recovery code: exactly one succeeds |
+| N4 | Verified closed | Future, 2099, version 0, partial and zone-suffixed replies all block uploads |
+| Residual (ADR-027) | Agrees, accurately described | A forged session for an MFA user reaches only the challenge and sign-out; for a non-MFA user it equals knowing the password |
+| Cross-company, credentials, billing, console | Verified closed | Guard and isolation suites green; the console role alone reads nothing |
+
+New observations, none above Low:
+
+| # | Observation | Severity | Status |
+| --- | --- | --- | --- |
+| R2-1 | Someone holding the sign-in database credential could lock a user out of MFA for an hour by forcing 10 wrong guesses | Low (inside the ADR-027 residual; denial of service only) | Open — owner to accept with the residual. Mitigation is protecting that credential (secrets manager, network-restricted database) |
+| R2-2 | `base32_decode` is not used on the verification path | Informational | No action |
+| R2-3 | Authenticator set up before migration 0010 can no longer pass TOTP (recovery codes still work) | Informational | No action: affects disposable local databases only; documented in the migration |
+
+The harness note from the reviewer: in its sandbox the disposable database folder had to sit outside the scratch
+directory because of folder permissions. Application code, migrations and roles were unchanged.
+

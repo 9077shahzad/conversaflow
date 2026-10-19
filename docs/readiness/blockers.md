@@ -18,14 +18,14 @@ been bought, submitted, sent, connected or deployed.
 | A6 | Annual pricing | Owner | Approved prices after reviewing margins | Review `ConversaFlow-Annual-Pricing-Margin.xlsx`. At growth scale annual margins are about 25% (Starter) to 56% (Enterprise); at pilot scale most plans run at a loss because fixed hosting is spread over five companies |
 | A7 | Pilot companies and seat allowance | Owner | Named companies (one per sector) and agreement to a recorded 10-seat allowance each, since the 3-seat trial cap is below realistic team size | Confirm companies; invitations stay unsent until approved |
 | A8 | Arabic wording reviewer | Owner | Named native Arabic business reader; returned workbook | Confirm the reviewer and send `ConversaFlow-Arabic-Review.xlsx` (101 strings, 9 screens) |
-| A9 | Accept the remaining sign-in risk (ADR-027) | Owner | Written acceptance, or a decision to require MFA for every pilot user | Decide. Recommended: require MFA for all pilot users, which closes most of the residual risk |
+| A9 | Accept the remaining sign-in risk (ADR-027) | Owner | Written acceptance, or a decision to require MFA for every pilot user | Decide. The reviewer agrees the risk is accurately described, and added one Low item within it (R2-1: a holder of the sign-in database credential could lock a user out of MFA for an hour). Recommended: require MFA for all pilot users and keep that credential in a secrets manager |
 | A10 | Legal documents | Owner (legal adviser) | Approved terms of service, privacy notice, data processing agreement, acceptable use policy | Instruct counsel; Dev can supply system and data-flow facts |
 
 ## B. Verification still to run (Dev, after the approvals above)
 
 | # | Blocker | Owner | Evidence needed | Next action |
 | --- | --- | --- | --- | --- |
-| B1 | Independent recheck of the latest security fixes | Dev (independent reviewer) | Reviewer's post-fix verdict for the exact commit, item by item | See the closure report: N1–N4 are fixed and marked "awaiting independent recheck" until the verdict is recorded |
+| B1 | Independent recheck of the latest security fixes | Dev (independent reviewer) | Reviewer's post-fix verdict for the exact commit, item by item | **Done for `6972acb`:** N1–N4 verified closed, no new High or Medium findings (closure report). Later commits change documents and one build dependency only; the external review (B10) covers the final code |
 | B2 | GitHub CI | Dev | Green CI run on GitHub for the pushed commit, logs kept | Runs on first push (needs A3) |
 | B3 | Reproducibility from a clean checkout | Dev | Fresh clone, fresh database, migrations, isolation check and full tests run with the restricted roles; results saved in `docs/reports/evidence/` | Run immediately after A3 |
 | B4 | Malware scanning in hosting | Dev | `freshclam` installs and updates official signatures; clamd runs with `TZ=UTC`; startup shows signatures *current*; uploads refused with signatures missing, outdated, scanner down or timed out | Needs A4. The refusal paths are already proven locally against a fake scanner; hosted validation stays open until official signatures are installed and updating |
