@@ -10,6 +10,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 COMMIT="$(git -C "$REPO" rev-parse "${1:-HEAD}")"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/cf-clean-XXXXXX")"
+# The disposable database runs as the postgres account, which must be able to enter the work folder.
+chmod 755 "$WORK"
 OUT="$REPO/docs/reports/evidence/clean-checkout-${COMMIT:0:7}.txt"
 trap 'rm -rf "$WORK"' EXIT
 

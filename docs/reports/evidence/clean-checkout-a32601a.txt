@@ -1,0 +1,34 @@
+# Clean-checkout verification — commit a32601ab6efdb44c74f9f8e8dedb4447fca1a0d0 (2026-10-19 22:01:25 +0000)
+# Empty folder, fresh clone, install from the frozen lockfile, fresh disposable database.
+# Node v22.22.0, pnpm 10.28.0, Linux 6.18.44-fc-v139
+
+## Install
+$ pnpm install --frozen-lockfile
+installed exactly as locked
+
+## Secret scan
+$ pnpm secrets:scan
+Secret scan passed (147 files checked).
+
+## Lint
+$ pnpm lint
+lint: no problems
+
+## Build
+$ pnpm build
+ WARNING  no output files found for task @conversaflow/web#build. Please check your `outputs` key in `turbo.json`
+build: all packages built
+
+## Type check
+$ pnpm typecheck
+ Tasks:    6 successful, 6 total
+
+## Dependency audit (all packages; production and development/build tools)
+$ pnpm deps:audit
+Dependency audit (all packages), 2026-10-19
+Totals: {"info":0,"low":0,"moderate":0,"high":1,"critical":0}; production: {"info":0,"low":0,"moderate":0,"high":0,"critical":0}
+- HIGH braces GHSA-vfj7-8cjw-p6xm [development/build only] fix: <0.0.0 -> excepted until 2027-01-31 (proposed)
+    braces vulnerable to stack-exhaustion denial of service through deeply nested patterns
+    via apps__web>tailwindcss>chokidar>braces
+Dependency audit passed.
+initdb: error: could not access directory "/tmp/cf-clean-hWnHNb/repo/.local/run-13197/pg": Permission denied
