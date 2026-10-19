@@ -9,3 +9,6 @@ coverage/
 storage/
 *.log
 .DS_Store
+.next/
+test-results/
+playwright-report/

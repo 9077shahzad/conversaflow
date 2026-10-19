@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html { -webkit-text-size-adjust: 100%; }
+body { background: #F8FAFC; color: #0F172A; }
+/* Arabic needs a little more line height and must never be letter-spaced. */
+html[lang='ar'] body { line-height: 1.7; letter-spacing: 0; }
+html[lang='en'] body { line-height: 1.55; }
+:focus-visible { outline: 3px solid #0E7490; outline-offset: 2px; border-radius: 6px; }
