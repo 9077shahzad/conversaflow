@@ -1,8 +1,10 @@
 /**
  * Applies SQL migrations in order, as the owner role (DATABASE_URL).
- * Creates the two restricted roles first:
- *   cf_app  — used by the API and worker; owns nothing, cannot bypass row-level security.
- *   cf_auth — NOLOGIN; owns the few authentication functions that run before a user is known.
+ * Creates the restricted roles first (none owns tables, none can bypass row-level security):
+ *   cf_app      — API business data (companies, members, files, …). No rights over credentials.
+ *   cf_identity — sign-in, sessions and MFA, through a few narrow functions.
+ *   cf_notify   — the notifier worker: the only role that can issue email verification / reset tokens.
+ *   cf_auth     — NOLOGIN; owns the authentication functions.
  */
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
@@ -11,12 +13,12 @@ import pg from 'pg';
 
 const migrationsDir = join(__dirname, '..', 'migrations');
 
-export async function migrate(ownerUrl: string, appPassword: string, log = console.log): Promise<string[]> {
+export async function migrate(ownerUrl: string, passwords: RolePasswords, log = console.log): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
   await client.connect();
   const applied: string[] = [];
   try {
-    await bootstrapRoles(client, appPassword);
+    await bootstrapRoles(client, passwords);
     await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
       filename text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
     const done = new Map<string, string>(
@@ -52,15 +54,26 @@ export async function migrate(ownerUrl: string, appPassword: string, log = conso
   }
 }
 
-async function bootstrapRoles(client: pg.Client, appPassword: string): Promise<void> {
-  if (!appPassword || appPassword.length < 12) throw new Error('CF_APP_DB_PASSWORD must be set (12+ characters).');
+export interface RolePasswords {
+  app: string; // cf_app: API business data
+  identity: string; // cf_identity: sign-in, sessions, MFA
+  notify: string; // cf_notify: issues email tokens and sends account emails
+}
+
+async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Promise<void> {
   const exists = async (role: string) =>
     (await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role])).rowCount === 1;
-
-  if (!(await exists('cf_app'))) {
+  const loginRoles: Array<[string, string, string]> = [
+    ['cf_app', passwords.app, 'CF_APP_DB_PASSWORD'],
+    ['cf_identity', passwords.identity, 'CF_IDENTITY_DB_PASSWORD'],
+    ['cf_notify', passwords.notify, 'CF_NOTIFY_DB_PASSWORD'],
+  ];
+  for (const [role, password, envName] of loginRoles) {
+    if (!password || password.length < 12) throw new Error(`${envName} must be set (12+ characters).`);
+    if (await exists(role)) continue;
     const { rows } = await client.query<{ sql: string }>(
-      "SELECT format('CREATE ROLE cf_app LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD %L', $1::text) AS sql",
-      [appPassword],
+      "SELECT format('CREATE ROLE %I LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD %L', $1::text, $2::text) AS sql",
+      [role, password],
     );
     await client.query(rows[0]!.sql);
   }
@@ -72,8 +85,10 @@ async function bootstrapRoles(client: pg.Client, appPassword: string): Promise<v
   // Identifiers come from the server itself and are escaped; GRANT cannot take bind parameters.
   // eslint-disable-next-line no-restricted-syntax
   await client.query(`GRANT cf_auth TO ${pg.escapeIdentifier(me[0]!.u)}`);
-  // eslint-disable-next-line no-restricted-syntax
-  await client.query(`GRANT CONNECT ON DATABASE ${pg.escapeIdentifier(me[0]!.db)} TO cf_app`);
+  for (const [role] of loginRoles) {
+    // eslint-disable-next-line no-restricted-syntax
+    await client.query(`GRANT CONNECT ON DATABASE ${pg.escapeIdentifier(me[0]!.db)} TO ${pg.escapeIdentifier(role)}`);
+  }
 }
 
 if (require.main === module) {
@@ -82,7 +97,11 @@ if (require.main === module) {
     console.error('DATABASE_URL is not set');
     process.exit(1);
   }
-  migrate(url, process.env.CF_APP_DB_PASSWORD ?? '').catch((err) => {
+  migrate(url, {
+    app: process.env.CF_APP_DB_PASSWORD ?? '',
+    identity: process.env.CF_IDENTITY_DB_PASSWORD ?? '',
+    notify: process.env.CF_NOTIFY_DB_PASSWORD ?? '',
+  }).catch((err) => {
     console.error(err.message);
     process.exit(1);
   });

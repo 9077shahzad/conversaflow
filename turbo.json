@@ -3,6 +3,6 @@
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "typecheck": { "dependsOn": ["^build"] },
-    "test": { "dependsOn": ["^build"], "cache": false, "env": ["DATABASE_URL", "DATABASE_APP_URL", "REDIS_URL", "FILE_URL_SIGNING_KEY", "MFA_ENCRYPTION_KEY", "FILE_STORAGE_DIR", "CF_APP_DB_PASSWORD"] }
+    "test": { "dependsOn": ["^build"], "cache": false, "env": ["DATABASE_URL", "DATABASE_APP_URL", "REDIS_URL", "FILE_URL_SIGNING_KEY", "MFA_ENCRYPTION_KEY", "FILE_STORAGE_DIR", "CF_APP_DB_PASSWORD", "DATABASE_IDENTITY_URL", "DATABASE_NOTIFY_URL", "CF_IDENTITY_DB_PASSWORD", "CF_NOTIFY_DB_PASSWORD", "SCANNER", "CLAMD_HOST", "CLAMD_PORT"] }
   }
 }

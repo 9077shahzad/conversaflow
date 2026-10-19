@@ -2,10 +2,14 @@
  * Isolation guard, run in CI after migrations. Fails the build when:
  *  - a table with a tenant_id column lacks row-level security, FORCE, or a policy;
  *  - any table that has RLS enabled is not forced;
- *  - the application role can bypass RLS, is a superuser, or owns any object;
+ *  - any login role can bypass RLS, is a superuser, owns any object or inherits another role;
+ *  - the business API role (cf_app) has any right over credentials, or anyone but cf_notify can mint email tokens;
  *  - a SECURITY DEFINER function has no fixed search_path or is owned by an unexpected role.
  */
 import pg from 'pg';
+
+const LOGIN_ROLES = ['cf_app', 'cf_identity', 'cf_notify'];
+const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests'];
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
@@ -29,20 +33,49 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity AND NOT c.relforcerowsecurity`);
     for (const t of unforced.rows) problems.push(`${t.table}: RLS enabled but not forced`);
 
-    const role = await client.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
-      "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'cf_app'");
-    if (role.rowCount !== 1) problems.push('role cf_app does not exist');
-    else if (role.rows[0]!.rolsuper || role.rows[0]!.rolbypassrls) problems.push('cf_app can bypass row-level security');
+    for (const roleName of LOGIN_ROLES) {
+      const role = await client.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+        'SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = $1', [roleName]);
+      if (role.rowCount !== 1) problems.push(`role ${roleName} does not exist`);
+      else if (role.rows[0]!.rolsuper || role.rows[0]!.rolbypassrls) problems.push(`${roleName} can bypass row-level security`);
 
-    const owned = await client.query<{ name: string }>(`
-      SELECT c.relname AS name FROM pg_class c WHERE c.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'cf_app')
-      UNION ALL
-      SELECT p.proname FROM pg_proc p WHERE p.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'cf_app')`);
-    for (const o of owned.rows) problems.push(`cf_app owns ${o.name}; it must own nothing`);
+      const owned = await client.query<{ name: string }>(`
+        SELECT c.relname AS name FROM pg_class c WHERE c.relowner = (SELECT oid FROM pg_roles WHERE rolname = $1)
+        UNION ALL
+        SELECT p.proname FROM pg_proc p WHERE p.proowner = (SELECT oid FROM pg_roles WHERE rolname = $1)`, [roleName]);
+      for (const o of owned.rows) problems.push(`${roleName} owns ${o.name}; it must own nothing`);
 
-    const membership = await client.query(`
-      SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'cf_app'`);
-    if ((membership.rowCount ?? 0) > 0) problems.push('cf_app is a member of another role; it must not inherit privileges');
+      const membership = await client.query(
+        'SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = $1', [roleName]);
+      if ((membership.rowCount ?? 0) > 0) problems.push(`${roleName} is a member of another role; it must not inherit privileges`);
+    }
+
+    // Credential separation (ADR-024 resolution): the business API role has no rights over credentials.
+    for (const table of CREDENTIAL_TABLES) {
+      const { rows } = await client.query<{ any: boolean }>(
+        `SELECT has_table_privilege('cf_app', $1, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
+             OR has_any_column_privilege('cf_app', $1, 'SELECT,INSERT,UPDATE') AS any`, [table]);
+      if (rows[0]!.any) problems.push(`cf_app has privileges on credential table ${table}`);
+    }
+    const sess = await client.query<{ ins: boolean; mfa: boolean; tok: boolean }>(`
+      SELECT has_table_privilege('cf_app', 'sessions', 'INSERT') AS ins,
+             has_column_privilege('cf_app', 'sessions', 'mfa_verified_at', 'UPDATE') AS mfa,
+             has_column_privilege('cf_app', 'sessions', 'token_hash', 'SELECT') AS tok`);
+    if (sess.rows[0]!.ins || sess.rows[0]!.mfa || sess.rows[0]!.tok) problems.push('cf_app can create sessions, mark them MFA-verified or read their token hashes');
+    const fns = await client.query<{ sig: string }>(`
+      SELECT p.oid::regprocedure::text AS sig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proname LIKE 'auth\\_%' AND p.proname <> 'auth_invitation_lookup'
+        AND has_function_privilege('cf_app', p.oid, 'EXECUTE')`);
+    for (const f of fns.rows) problems.push(`cf_app can execute ${f.sig}`);
+    const minting = await client.query<{ who: string }>(`
+      SELECT r.rolname AS who FROM pg_roles r
+      WHERE r.rolname IN ('cf_app', 'cf_identity') AND has_function_privilege(r.oid, 'auth_issue_token(uuid,text,bytea,interval)', 'EXECUTE')`);
+    for (const m of minting.rows) problems.push(`${m.who} can mint email tokens; only cf_notify may`);
+    const notifyReads = await client.query<{ t: string }>(`
+      SELECT c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'auth_email_requests'
+        AND (has_table_privilege('cf_notify', c.oid, 'SELECT') OR has_any_column_privilege('cf_notify', c.oid, 'SELECT'))`);
+    for (const r of notifyReads.rows) problems.push(`cf_notify can read ${r.t}; it must only see auth_email_requests`);
 
     const definers = await client.query<{ name: string; owner: string; config: string[] | null }>(`
       SELECT p.proname AS name, pg_get_userbyid(p.proowner) AS owner, p.proconfig AS config
@@ -65,7 +98,7 @@ if (require.main === module) {
         console.error(`Isolation check FAILED (${problems.length}):\n - ${problems.join('\n - ')}`);
         process.exit(1);
       }
-      console.log('Isolation check passed: every tenant table has forced RLS and a policy; cf_app cannot bypass RLS.');
+      console.log('Isolation check passed: every tenant table has forced RLS and a policy; no login role can bypass RLS; cf_app has no rights over credentials; only cf_notify can mint email tokens.');
     },
     (err) => {
       console.error(err.message);

@@ -8,7 +8,10 @@ import type { FileScanner, ObjectStorage } from './storage';
 /** Everything a service needs, built once at start-up (and by tests with fakes where useful). */
 export interface Deps {
   config: Config;
+  /** cf_app: business data. Has no rights over credentials. */
   db: Db;
+  /** cf_identity: sign-in, sessions and MFA only. */
+  identityDb: Db;
   redis: Redis;
   rateLimiter: RateLimiter;
   mailer: Mailer;

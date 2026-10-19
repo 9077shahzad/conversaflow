@@ -1,7 +1,7 @@
 import { withContext } from '@conversaflow/database';
 import type { AuthSession, Deps, TenantActor } from '../core/context';
 import { hmac, safeEqual, sha256 } from '../core/crypto';
-import { Errors } from '../core/errors';
+import { AppError, Errors } from '../core/errors';
 import { storageKeyFor } from '../core/storage';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
@@ -43,7 +43,13 @@ export class FilesService {
     if (input.data.length > this.deps.config.MAX_UPLOAD_BYTES) throw Errors.badRequest('The file is too large.');
     if (!ALLOWED_TYPES.has(input.contentType)) throw Errors.badRequest('This file type is not allowed.');
     const name = sanitiseName(input.originalName);
-    const verdict = await this.deps.scanner.scan(input.data);
+    let verdict: 'clean' | 'infected';
+    try {
+      verdict = await this.deps.scanner.scan(input.data);
+    } catch {
+      // Fail closed: no clear answer from the scanner means the file is not accepted or stored.
+      throw new AppError(503, 'scanner_unavailable', 'Files cannot be checked for viruses right now. Please try again shortly.');
+    }
 
     return withContext(this.deps.db, actor, async (tx) => {
       const fileId = (await tx.query<{ id: string }>('SELECT uuid_generate_v7() AS id')).rows[0]!.id;

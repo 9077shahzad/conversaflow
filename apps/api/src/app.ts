@@ -8,7 +8,7 @@ import { loadConfig, type Config } from './core/config';
 import type { Deps } from './core/context';
 import { MemoryMailer, SmtpMailer, type Mailer } from './core/mailer';
 import { RateLimiter } from './core/rate-limit';
-import { LocalStorage, SignatureScanner } from './core/storage';
+import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 import {
   AuditController, AuthController, BillingController, FilesController, HealthController, MeController, MembersController,
   TenantsController,
@@ -32,11 +32,16 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
   return {
     config,
     db: overrides.db ?? createPool(config.DATABASE_APP_URL),
+    identityDb: overrides.identityDb ?? createPool(config.DATABASE_IDENTITY_URL, 5),
     redis,
     rateLimiter: overrides.rateLimiter ?? new RateLimiter(redis),
     mailer,
     storage: overrides.storage ?? new LocalStorage(config.FILE_STORAGE_DIR),
-    scanner: overrides.scanner ?? new SignatureScanner(),
+    scanner:
+      overrides.scanner ??
+      (config.SCANNER === 'clamd'
+        ? new ClamdScanner(config.CLAMD_HOST, config.CLAMD_PORT, config.CLAMD_TIMEOUT_MS)
+        : new SignatureScanner()),
     keys: overrides.keys ?? {
       fileLinks: Buffer.from(config.FILE_URL_SIGNING_KEY, 'base64'),
       mfa: Buffer.from(config.MFA_ENCRYPTION_KEY, 'base64'),

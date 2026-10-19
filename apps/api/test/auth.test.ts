@@ -21,6 +21,7 @@ describe('sign-up and email verification', () => {
     const again = await new Client(t, c.email).post('/v1/auth/signup', { email: c.email, password: PASSWORD, fullName: 'X' }).expect(202);
     const fresh = await new Client(t, 'x').post('/v1/auth/signup', { email: uniqueEmail('new'), password: PASSWORD, fullName: 'Y' }).expect(202);
     expect(again.body).toEqual(fresh.body);
+    await t.deliver();
     expect(t.mailer.lastTo(c.email)?.subject).toBe('Sign-up attempt on ConversaFlow');
   });
 
@@ -44,7 +45,7 @@ describe('sign-up and email verification', () => {
     await clearRateLimits(t);
     const c = new Client(t, uniqueEmail('once'));
     await c.post('/v1/auth/signup', { email: c.email, password: PASSWORD, fullName: 'O' }).expect(202);
-    const token = tokenFrom(t.mailer, c.email);
+    const token = await tokenFrom(t, c.email);
     await c.post('/v1/auth/verify-email', { token }).expect(204);
     await c.post('/v1/auth/verify-email', { token }).expect(403);
   });
@@ -83,8 +84,9 @@ describe('sign-in', () => {
     expect(cookie).toMatch(/SameSite=Lax/);
     const value = decodeURIComponent(cookie.match(/cf_session=([^;]+)/)![1]!);
     const { withContext } = await import('@conversaflow/database');
-    const stored = await withContext(t.deps.db, { tenantId: null, userId: c.userId! }, async (tx) => ({
-      password: (await tx.query('SELECT password_hash FROM user_credentials')).rows[0].password_hash as string,
+    // Read through the identity role (the business API role cannot see credentials at all).
+    const stored = await withContext(t.deps.identityDb, { tenantId: null, userId: c.userId! }, async (tx) => ({
+      password: (await tx.query('SELECT password_hash FROM auth_credentials_by_email($1)', [c.email])).rows[0].password_hash as string,
       tokens: (await tx.query('SELECT token_hash FROM sessions')).rows.map((r) => r.token_hash as Buffer),
     }));
     expect(stored.password.startsWith('$argon2id$')).toBe(true);
@@ -93,7 +95,8 @@ describe('sign-in', () => {
       expect(h).toHaveLength(32); // SHA-256 digest, never the cookie value itself
       expect(h.toString('utf8')).not.toContain(value);
     }
-    const viaHash = await t.deps.db.query("SELECT count(*)::int AS n FROM auth_session_lookup(sha256(convert_to($1, 'UTF8')))", [value]);
+    const viaHash = await t.deps.identityDb.query(
+      "SELECT count(*)::int AS n FROM auth_session_lookup(sha256(convert_to($1, 'UTF8')), interval '1 hour')", [value]);
     expect(viaHash.rows[0].n).toBe(1);
   });
 });
@@ -173,7 +176,7 @@ describe('sessions and password reset', () => {
     const b = await new Client(t, 'z').post('/v1/auth/password/forgot', { email: uniqueEmail('ghost') }).expect(202);
     expect(a.body).toEqual(b.body);
 
-    const token = tokenFrom(t.mailer, c.email);
+    const token = await tokenFrom(t, c.email);
     const newPassword = 'Another-Strong-Pass-42';
     await c.post('/v1/auth/password/reset', { token, password: newPassword }).expect(204);
     await c.post('/v1/auth/password/reset', { token, password: 'Third-Strong-Pass-77' }).expect(403);

@@ -7,6 +7,7 @@ import { buildDeps, createApp } from '../src/app';
 import { loadConfig } from '../src/core/config';
 import type { Deps } from '../src/core/context';
 import { MemoryMailer } from '../src/core/mailer';
+import { Notifier } from '../src/worker/notifier';
 
 export const PASSWORD = 'Correct-Horse-Battery-9';
 
@@ -16,6 +17,10 @@ export interface TestApp {
   mailer: MemoryMailer;
   /** Owner-role connection for test set-up only (the API never uses it). */
   ownerDb: Db;
+  /** The notifier worker's connection (role cf_notify). */
+  notifyDb: Db;
+  /** Runs the notifier once, as the worker would, so queued account emails are sent. */
+  deliver(): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -24,12 +29,17 @@ export async function startApp(): Promise<TestApp> {
   const deps = buildDeps(loadConfig(process.env), { mailer });
   const app = await createApp(deps);
   const ownerDb = createPool(process.env.DATABASE_URL!, 3);
+  const notifyDb = createPool(process.env.DATABASE_NOTIFY_URL!, 2);
+  const notifier = new Notifier(notifyDb, mailer, deps.config.APP_ORIGIN);
   return {
-    app, deps, mailer, ownerDb,
+    app, deps, mailer, ownerDb, notifyDb,
+    deliver: () => notifier.processPending(),
     async close() {
       await app.close();
       await deps.db.end();
+      await deps.identityDb.end();
       await ownerDb.end();
+      await notifyDb.end();
       deps.redis.disconnect();
     },
   };
@@ -62,13 +72,17 @@ export class Client {
   /** Set after enableMfa(). */
   mfaSecret?: string;
   userId?: string;
+  /** The session cookie (name=value) from sign-in. */
+  cookie?: string;
 }
 
 export const uniqueEmail = (label: string) => `${label}.${randomBytes(4).toString('hex')}@example.test`;
 export const uniqueSlug = (label: string) => `${label}-${randomBytes(3).toString('hex')}`;
 
-export function tokenFrom(mailer: MemoryMailer, to: string): string {
-  const mail = mailer.lastTo(to);
+/** Delivers queued account emails (as the worker would), then reads the newest token sent to `to`. */
+export async function tokenFrom(t: TestApp, to: string): Promise<string> {
+  await t.deliver();
+  const mail = t.mailer.lastTo(to);
   const match = mail?.text.match(/token=([A-Za-z0-9_-]+)/);
   if (!match) throw new Error(`No token mailed to ${to}`);
   return match[1]!;
@@ -82,8 +96,9 @@ export async function newUser(t: TestApp, label: string): Promise<Client> {
   const c = new Client(t, uniqueEmail(label));
   await clearRateLimits(t);
   await c.post('/v1/auth/signup', { email: c.email, password: PASSWORD, fullName: `Test ${label}` }).expect(202);
-  await c.post('/v1/auth/verify-email', { token: tokenFrom(t.mailer, c.email) }).expect(204);
-  await c.post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(200);
+  await c.post('/v1/auth/verify-email', { token: await tokenFrom(t, c.email) }).expect(204);
+  const login = await c.post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(200);
+  c.cookie = String(login.headers['set-cookie']).split(';')[0];
   c.userId = (await c.get('/v1/me').expect(200)).body.id;
   return c;
 }
@@ -104,7 +119,7 @@ export async function newCompany(c: Client, label: string, planCode = 'starter')
 /** Owner invites `email` with `roleKey`; returns the emailed token. Owner must have MFA. */
 export async function invite(t: TestApp, owner: Client, email: string, roleKey: string): Promise<string> {
   await owner.post('/v1/invitations', { email, roleKey }).expect(201);
-  return tokenFrom(t.mailer, email);
+  return await tokenFrom(t, email);
 }
 
 /** Creates a user and adds them to the owner's active company with the given role. */

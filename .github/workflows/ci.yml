@@ -33,6 +33,13 @@ jobs:
       DATABASE_URL: postgres://cf_owner:ci-owner-pw@localhost:5432/conversaflow
       DATABASE_APP_URL: postgres://cf_app:ci-app-password@localhost:5432/conversaflow
       CF_APP_DB_PASSWORD: ci-app-password
+      DATABASE_IDENTITY_URL: postgres://cf_identity:ci-identity-password@localhost:5432/conversaflow
+      CF_IDENTITY_DB_PASSWORD: ci-identity-password
+      DATABASE_NOTIFY_URL: postgres://cf_notify:ci-notify-password@localhost:5432/conversaflow
+      CF_NOTIFY_DB_PASSWORD: ci-notify-password
+      SCANNER: clamd
+      CLAMD_HOST: 127.0.0.1
+      CLAMD_PORT: '3310'
       REDIS_URL: redis://localhost:6379
       FILE_STORAGE_DIR: ${{ runner.temp }}/storage
     steps:
@@ -60,6 +67,13 @@ jobs:
           PGPASSWORD=ci-superuser-only psql -h localhost -U postgres -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE cf_owner LOGIN CREATEROLE PASSWORD 'ci-owner-pw'" \
             -c "CREATE DATABASE conversaflow OWNER cf_owner"
+      - name: Start ClamAV with the test signature (official signatures are used in hosted environments)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q clamav-daemon
+          sudo systemctl stop clamav-daemon clamav-freshclam || true
+          mkdir -p "$RUNNER_TEMP/clamdb" && cp scripts/clamav/test-signatures.ndb "$RUNNER_TEMP/clamdb/"
+          printf 'DatabaseDirectory %s\nTCPSocket 3310\nTCPAddr 127.0.0.1\nForeground no\nUser root\nStreamMaxLength 20M\n' "$RUNNER_TEMP/clamdb" > "$RUNNER_TEMP/clamd.conf"
+          sudo clamd --config-file="$RUNNER_TEMP/clamd.conf"
       - name: Generate per-run keys
         run: |
           echo "FILE_URL_SIGNING_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"

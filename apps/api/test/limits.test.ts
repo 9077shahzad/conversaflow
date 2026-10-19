@@ -23,7 +23,7 @@ describe('seats', () => {
       await clearRateLimits(t);
       const c = new Client(t, uniqueEmail(`seat${i}`));
       await c.post('/v1/auth/signup', { email: c.email, password: PASSWORD, fullName: `Seat ${i}` }).expect(202);
-      await c.post('/v1/auth/verify-email', { token: tokenFrom(t.mailer, c.email) }).expect(204);
+      await c.post('/v1/auth/verify-email', { token: await tokenFrom(t, c.email) }).expect(204);
       await c.post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(200);
       people.push({ c, token: await invite(t, owner, c.email, 'agent') });
     }
