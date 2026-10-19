@@ -1,0 +1,246 @@
+# Handover evidence — commit 2be1885691019e0e3b88bc393e33dac2bea317b7 (2026-10-19 21:51:57 +0400)
+
+## Static checks
+$ pnpm lint
+lint: no problems
+$ pnpm typecheck
+ Tasks:    6 successful, 6 total
+$ pnpm build
+ Tasks:    4 successful, 4 total
+$ pnpm audit --prod --audit-level high
+Severity: 2 moderate | 2 high
+$ pnpm secrets:scan
+Secret scan passed (123 files checked).
+
+$ pnpm db:migrate
+applied 0001_foundation.sql
+applied 0002_identity.sql
+applied 0003_tenancy_rbac.sql
+applied 0004_plans_usage.sql
+applied 0005_audit_files.sql
+applied 0006_credential_separation.sql
+applied 0007_commercial_policies.sql
+applied 0008_settings_teams_platform.sql
+applied 0009_identity_binding.sql
+$ pnpm db:check-rls
+Isolation check passed: every tenant table has forced RLS and a policy; no login role can bypass RLS; cf_app has no rights over credentials; only cf_notify can mint email tokens.
+
+## Database roles actually used by the tests (restricted, non-owner)
+DATABASE_APP_URL -> role cf_app, superuser=off, bypassrls=false
+DATABASE_IDENTITY_URL -> role cf_identity, superuser=off, bypassrls=false
+DATABASE_NOTIFY_URL -> role cf_notify, superuser=off, bypassrls=false
+DATABASE_PLATFORM_URL -> role cf_platform, superuser=off, bypassrls=false
+
+## API test suite (vitest), run against the restricted roles above
+$ pnpm test
+ ✓ test/review2.test.ts > finding 1 (high): spoofing app.user_id on the platform connection > a support agent holding the platform credential cannot approve their own request by pretending to be an owner
+ ✓ test/review2.test.ts > finding 1 (high): spoofing app.user_id on the platform connection > feature flags and plan publishing need a real platform-owner session token too
+ ✓ test/review2.test.ts > finding 1 (high): spoofing app.user_id on the platform connection > the platform role has no direct access to any company table or the audit trails (reviewer finding 7 and 8)
+ ✓ test/review2.test.ts > finding 1 (high): spoofing app.user_id on the platform connection > a session that is signed out or past its MFA step is not accepted as staff
+ ✓ test/review2.test.ts > finding 2 (medium): the identity role cannot forge sessions > cannot insert a session at all, and cannot open one with MFA pre-verified or a long lifetime
+ ✓ test/review2.test.ts > finding 2 (medium): the identity role cannot forge sessions > the database itself ends sessions older than 12 hours, whatever the row says 17124ms
+ ✓ test/review2.test.ts > finding 3 (medium): the business API cannot change billing state > cannot activate a trial, change plan, add seats or move the period
+ ✓ test/review2.test.ts > finding 3 (medium): the business API cannot change billing state > a subscription inserted by the API is forced to a trial, whatever values it tries to set
+ ✓ test/review2.test.ts > findings 4, 6, 11: idle NULL, token lifetimes, stored address > a NULL idle timeout is refused
+ ✓ test/review2.test.ts > findings 4, 6, 11: idle NULL, token lifetimes, stored address > the notifier cannot mint long-lived tokens
+ ✓ test/review2.test.ts > findings 4, 6, 11: idle NULL, token lifetimes, stored address > reset emails go to the stored address exactly as stored
+ ✓ test/review2.test.ts > finding 9: metering under concurrency > a run reported failed and completed at the same moment ends up counted once as completed
+ ✓ test/review2.test.ts > finding 9: metering under concurrency > parallel starts cannot overshoot the limit
+ ✓ test/review2.test.ts > the CI guard now catches these regressions > flags direct platform table access, unbound platform functions and billing updates
+ ✓ test/isolation.db.test.ts > database isolation between companies > covers every table that has a tenant_id column (at least the 18 known ones)
+ ✓ test/isolation.db.test.ts > database isolation between companies > company B really has data in every tenant table (so the checks below are meaningful)
+ ✓ test/isolation.db.test.ts > database isolation between companies > in company A's context, no row of any other company is visible in any tenant table
+ ✓ test/isolation.db.test.ts > database isolation between companies > even when explicitly filtering by company B's id, company A gets nothing
+ ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot update or delete company B's rows in any tenant table
+ ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot move its own rows into company B in any tenant table (WITH CHECK side)
+ ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot insert rows labelled with company B's id
+ ✓ test/isolation.db.test.ts > database isolation between companies > company A cannot link its records to company B's records (composite foreign keys)
+ ✓ test/isolation.db.test.ts > database isolation between companies > with no company selected, every tenant table looks empty
+ ✓ test/isolation.db.test.ts > database isolation between companies > the company context never leaks to the next use of a pooled connection
+ ✓ test/isolation.db.test.ts > database isolation between companies > people and companies: A sees only its own members and companies, never B's
+ ✓ test/isolation.db.test.ts > database isolation between companies > a person who belongs to BOTH companies sees only the selected company (regression: switcher rule)
+ ✓ test/isolation.db.test.ts > database isolation between companies > the application role cannot escalate: no SET ROLE, no direct access to secret tokens
+ ✓ test/credentials.test.ts > the business API role cannot change credentials > every credential-changing attempt is refused, and the victim is unchanged
+ ✓ test/credentials.test.ts > the business API role cannot change credentials > the identity role cannot mint email tokens or read company data
+ ✓ test/credentials.test.ts > the business API role cannot change credentials > the notifier role can only read the email queue
+ ✓ test/credentials.test.ts > the business API role cannot change credentials > reset links are only created by the notifier, and the API response never contains one
+ ✓ test/credentials.test.ts > the business API role cannot change credentials > if the email cannot be sent, no usable token is left behind and the request is retried
+ ✓ test/credentials.test.ts > the business API role cannot change credentials > the CI guard fails the build if the API role ever regains a credential right
+ ✓ test/credentials.test.ts > session expiry (pre-pilot item 2) > a session idle for longer than the limit is ended for good; data stays unchanged
+ ✓ test/credentials.test.ts > session expiry (pre-pilot item 2) > a session still in use but past its absolute lifetime is refused
+ ✓ test/credentials.test.ts > session expiry (pre-pilot item 2) > new sessions last the configured absolute lifetime
+ ✓ test/credentials.test.ts > session expiry (pre-pilot item 2) > turning on two-step verification signs out the other sessions
+ ✓ test/credentials.test.ts > session expiry (pre-pilot item 2) > the database refuses unreasonable idle settings
+ ✓ test/credentials.test.ts > two-step codes after sign-in > a fresh code works once 25651ms
+ ✓ test/auth.test.ts > sign-up and email verification > signs up, verifies the email, signs in and reads the profile
+ ✓ test/auth.test.ts > sign-up and email verification > answers sign-up identically for an existing email, and warns the owner by email instead
+ ✓ test/auth.test.ts > sign-up and email verification > refuses weak passwords
+ ✓ test/auth.test.ts > sign-up and email verification > does not allow sign-in before the email is verified
+ ✓ test/auth.test.ts > sign-up and email verification > a verification link works once only
+ ✓ test/auth.test.ts > sign-in > gives the same answer for a wrong password and an unknown email
+ ✓ test/auth.test.ts > sign-in > locks out repeated attempts on one account (rate limit)
+ ✓ test/auth.test.ts > sign-in > blocks state-changing requests without the anti-forgery header
+ ✓ test/auth.test.ts > sign-in > sets a hardened session cookie and stores only hashes of secrets
+ ✓ test/auth.test.ts > two-step verification (TOTP) > after enabling, sign-in requires the code; the account is unusable until it is entered 28259ms
+ ✓ test/auth.test.ts > two-step verification (TOTP) > recovery codes work exactly once
+ ✓ test/auth.test.ts > two-step verification (TOTP) > limits guessing of codes per session
+ ✓ test/auth.test.ts > sessions and password reset > a user can see their sessions and sign one out remotely
+ ✓ test/auth.test.ts > sessions and password reset > one user cannot sign out another user's session
+ ✓ test/auth.test.ts > sessions and password reset > password reset: same answer for unknown emails, link works once, all old sessions end
+ ✓ test/auth.test.ts > two-step verification hardening (independent review findings) > signing in again does not reset the allowance for guessing codes
+ ✓ test/auth.test.ts > two-step verification hardening (independent review findings) > a code cannot be used twice, even inside its 30-second window 29270ms
+ ✓ test/commercial.test.ts > trial (14 days, caps, no marketing; configurable) > a new company starts a 14-day trial from the trial policy
+ ✓ test/commercial.test.ts > trial (14 days, caps, no marketing; configurable) > trial caps apply over the plan limits, and lift when the trial ends
+ ✓ test/commercial.test.ts > trial (14 days, caps, no marketing; configurable) > marketing messages are refused during a trial, and the rule is configurable
+ ✓ test/commercial.test.ts > trial (14 days, caps, no marketing; configurable) > the application cannot change trial settings
+ ✓ test/commercial.test.ts > annual pricing draft (10 x monthly, unpublished) > each plan has an unpublished draft with annual = 10 x monthly and the same limits
+ ✓ test/commercial.test.ts > annual pricing draft (10 x monthly, unpublished) > new companies get the published monthly version, never the draft
+ ✓ test/commercial.test.ts > annual pricing draft (10 x monthly, unpublished) > nobody can subscribe a company to a draft version, and the app cannot publish one
+ ✓ test/commercial.test.ts > retention (proposals only; no automatic deletion without an approved policy) > holds the proposed periods by data type
+ ✓ test/commercial.test.ts > retention (proposals only; no automatic deletion without an approved policy) > automatic deletion cannot be switched on for a proposal
+ ✓ test/commercial.test.ts > automation usage (one completed run = one; retries never double-count; failures separate) > the same completed run reported three times counts once
+ ✓ test/commercial.test.ts > automation usage (one completed run = one; retries never double-count; failures separate) > a failed run is tracked separately; failing again on retry does not add
+ ✓ test/commercial.test.ts > automation usage (one completed run = one; retries never double-count; failures separate) > a failed run that is resumed and completes moves from failed to completed, once
+ ✓ test/commercial.test.ts > automation usage (one completed run = one; retries never double-count; failures separate) > ten parallel reports of one run count once
+ ✓ test/commercial.test.ts > automation usage (one completed run = one; retries never double-count; failures separate) > new runs are refused once the limit is reached (trial cap 200 here)
+ ✓ test/commercial.test.ts > Meta rates: dated, configurable, verified before customers see them > finds the verified Business Agent rate by date
+ ✓ test/commercial.test.ts > Meta rates: dated, configurable, verified before customers see them > draft rates are never returned for customer use
+ ✓ test/commercial.test.ts > Meta rates: dated, configurable, verified before customers see them > a rate cannot be verified without a reconciliation note, and verified rates cannot overlap
+ ✓ test/commercial.test.ts > Meta rates: dated, configurable, verified before customers see them > the 1,000 free service messages allowance is recorded but still pending reconciliation
+ ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B cannot read A's member by id (404, so A's records are not even confirmed to exist)
+ ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B cannot change roles of, or remove, A's member
+ ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B cannot switch its session into company A
+ ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > B's lists contain nothing from A
+ ✓ test/isolation.api.test.ts > records: company B cannot reach company A through the API > a tenant id smuggled in the request body or query is ignored
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > B cannot read A's file details or create a download link for it
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > B cannot download with A's valid link
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > A's link does not work without signing in
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > A can download its own file with the link and gets the exact bytes
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > a tampered link is refused (signature check)
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > an expired link is refused, even when correctly signed
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > a correctly signed link naming B's company cannot open A's file
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > files are stored inside the owning company's folder, and unsafe names cannot steer the path
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > a file flagged by the malware scan is recorded as rejected and can never be downloaded
+ ✓ test/isolation.api.test.ts > files: company B cannot reach company A files > disallowed file types are refused
+ ✓ test/isolation.api.test.ts > membership changes take effect immediately > a removed member loses access on the very next request
+ ✓ test/isolation.api.test.ts > download links respect role changes (independent review finding) > a link stops working when its holder loses the files.read permission
+ ✓ test/platform.test.ts > who can use the console > a company Owner is not platform staff
+ ✓ test/platform.test.ts > who can use the console > staff without two-step verification are refused
+ ✓ test/platform.test.ts > who can use the console > staff cannot be added through the API role or the platform role
+ ✓ test/platform.test.ts > directory and plans: metadata only > lists companies with plan, status and counts, but no names of files or people
+ ✓ test/platform.test.ts > directory and plans: metadata only > shows the annual draft versions as unpublished; only a platform owner may publish
+ ✓ test/platform.test.ts > directory and plans: metadata only > feature flags: a platform owner sets one; the company sees it; support agents cannot
+ ✓ test/platform.test.ts > support access: two people, time-limited, audited > without a grant, staff cannot see company content — even at database level
+ ✓ test/platform.test.ts > support access: two people, time-limited, audited > a request needs a real reason and at most 4 hours
+ ✓ test/platform.test.ts > support access: two people, time-limited, audited > nobody can approve their own request, and support agents cannot approve
+ ✓ test/platform.test.ts > support access: two people, time-limited, audited > once approved by a second platform owner, staff see that company only, and each look is in its audit trail
+ ✓ test/platform.test.ts > support access: two people, time-limited, audited > the platform role can never change company data, even with a grant
+ ✓ test/platform.test.ts > support access: two people, time-limited, audited > access ends when revoked, and when it expires
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    PATCH /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/members
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    POST /v1/invitations
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    POST /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/entitlements
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/audit-events
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    GET /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > owner      CAN    POST /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    PATCH /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/members
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    POST /v1/invitations
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    POST /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/entitlements
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/audit-events
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    GET /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > admin      CAN    POST /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT PATCH /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/members
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT POST /v1/invitations
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT POST /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT GET /v1/entitlements
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CANNOT GET /v1/audit-events
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    GET /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > supervisor CAN    POST /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CAN    GET /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT PATCH /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/members
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT POST /v1/invitations
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT POST /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/entitlements
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CANNOT GET /v1/audit-events
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CAN    GET /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > agent      CAN    POST /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CAN    GET /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT PATCH /v1/tenant
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CAN    GET /v1/members
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT POST /v1/invitations
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT POST /v1/roles
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/entitlements
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/audit-events
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT GET /v1/files
+ ✓ test/rbac.test.ts > permission matrix: system roles x Phase 1 endpoints > analyst    CANNOT POST /v1/files
+ ✓ test/rbac.test.ts > privileged actions and escalation > an Owner without two-step verification can read settings but cannot change them
+ ✓ test/rbac.test.ts > privileged actions and escalation > without a company selected, company endpoints refuse
+ ✓ test/rbac.test.ts > privileged actions and escalation > an Admin cannot make anyone Owner, nor change or remove an Owner
+ ✓ test/rbac.test.ts > privileged actions and escalation > the last Owner cannot leave, and cannot change their own roles
+ ✓ test/rbac.test.ts > privileged actions and escalation > nobody can create a custom role with permissions they do not hold
+ ✓ test/rbac.test.ts > privileged actions and escalation > a custom role grants exactly its permissions
+ ✓ test/rbac.test.ts > privileged actions and escalation > role changes apply on the next request
+ ✓ test/rbac.test.ts > no privilege escalation inside a company (independent review findings) > a member manager cannot raise anyone — including themselves — above their own permissions
+ ✓ test/rbac.test.ts > no privilege escalation inside a company (independent review findings) > an Admin cannot give anyone a custom role holding billing.manage
+ ✓ test/rbac.test.ts > no privilege escalation inside a company (independent review findings) > nobody can invite a person into a role above their own permissions
+ ✓ test/rbac.test.ts > no privilege escalation inside a company (independent review findings) > a malformed audit page size is a 400, not a server error
+ ✓ test/limits.test.ts > seats > 20 people accepting invitations at the same moment on a 3-seat plan: exactly 2 get in 1585ms
+ ✓ test/limits.test.ts > seats > a platform override raises the limit for one company only
+ ✓ test/limits.test.ts > metered usage (automation runs) > counts usage, warns once at 80% and 95%, and hard-stops at the limit
+ ✓ test/limits.test.ts > metered usage (automation runs) > parallel usage never overshoots the limit
+ ✓ test/limits.test.ts > plan catalogue > loads the BRD v1.1 proposed prices and limits as data
+ ✓ test/limits.test.ts > plan catalogue > a price version in use cannot be edited; a new version must be published
+ ✓ test/limits.test.ts > plan catalogue > overrides only accept known limit names
+ ✓ test/limits.test.ts > plan catalogue > the application role cannot change prices or limits at all
+ ✓ test/settings.test.ts > company settings > starts with defaults and saves hours, languages and SLA targets
+ ✓ test/settings.test.ts > company settings > rejects impossible hours and unknown languages
+ ✓ test/settings.test.ts > company settings > records holidays once per day
+ ✓ test/settings.test.ts > company settings > agents can read settings but not change them
+ ✓ test/settings.test.ts > company settings > another company's settings and holidays are untouched and invisible
+ ✓ test/settings.test.ts > branches and teams > creates branches and teams and adds members
+ ✓ test/settings.test.ts > branches and teams > a team cannot use another company's branch, team or member (not found)
+ ✓ test/settings.test.ts > branches and teams > agents cannot create teams
+ ✓ test/scanner.test.ts > ClamAV engine > the API is configured with the real ClamAV scanner in this run
+ ✓ test/scanner.test.ts > ClamAV engine > answers ping, passes clean data and detects the test virus, also inside a larger file
+ ✓ test/scanner.test.ts > ClamAV engine > an infected upload is recorded as rejected and never written to storage
+ ✓ test/scanner.test.ts > fail-closed when the scanner is unavailable > scanner down: upload refused with 503, no file row, nothing on disk
+ ✓ test/scanner.test.ts > fail-closed when the scanner is unavailable > scanner hangs: the scan times out and the upload is refused 504ms
+ ✓ test/scanner.test.ts > fail-closed when the scanner is unavailable > production refuses to start with the test scanner
+ ✓ test/hosted-check.test.ts > hosted file-revocation check (local dry run) > every step passes against a correct server, including removal 380ms
+ ✓ test/hosted-check.test.ts > hosted file-revocation check (local dry run) > the check catches a server that fails to revoke access (deliberately broken download) 29962ms
+ ✓ test/observability.test.ts > request logs > every response carries a request id that matches its log line; a valid incoming id is kept
+ ✓ test/observability.test.ts > request logs > never logs passwords, emails, cookies, signed link tokens or file content
+ ✓ test/audit.test.ts > audit trail > records each change in order with who did it
+ ✓ test/audit.test.ts > audit trail > the chain verifies as intact
+ ✓ test/audit.test.ts > audit trail > the application cannot edit or delete audit events
+ ✓ test/audit.test.ts > audit trail > even the database owner is blocked by the append-only trigger
+ ✓ test/audit.test.ts > audit trail > tampering by someone with direct database control is detected
+ ✓ test/audit.test.ts > audit trail > another company's audit trail is invisible
+ Test Files  14 passed (14)
+      Tests  196 passed (196)
+   Duration  171.65s (transform 695ms, setup 47ms, collect 7.80s, tests 160.27s, environment 4ms, prepare 880ms)
+
+## Browser checks (Playwright, Chromium): English and Arabic at mobile, tablet, desktop
+$ pnpm --filter @conversaflow/web e2e
+  ✓  1 e2e/ui.spec.ts:65:9 › en mobile: sign-in, dashboard, company settings, team (3.7s)
+  ✓  2 e2e/ui.spec.ts:65:9 › en tablet: sign-in, dashboard, company settings, team (3.8s)
+  ✓  3 e2e/ui.spec.ts:65:9 › en desktop: sign-in, dashboard, company settings, team (3.9s)
+  ✓  4 e2e/ui.spec.ts:65:9 › ar mobile: sign-in, dashboard, company settings, team (3.4s)
+  ✓  5 e2e/ui.spec.ts:65:9 › ar tablet: sign-in, dashboard, company settings, team (3.5s)
+  ✓  6 e2e/ui.spec.ts:65:9 › ar desktop: sign-in, dashboard, company settings, team (3.8s)
+  ✓  7 e2e/ui.spec.ts:98:5 › language switch keeps the page and flips direction (422ms)
+  ✓  8 e2e/ui.spec.ts:105:5 › security headers are set and the email link pages exist in both languages (639ms)
+  8 passed (26.9s)
