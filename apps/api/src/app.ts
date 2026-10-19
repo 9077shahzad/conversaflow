@@ -52,7 +52,6 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
         : new SignatureScanner()),
     keys: overrides.keys ?? {
       fileLinks: Buffer.from(config.FILE_URL_SIGNING_KEY, 'base64'),
-      mfa: Buffer.from(config.MFA_ENCRYPTION_KEY, 'base64'),
     },
   };
 }

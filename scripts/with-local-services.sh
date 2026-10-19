@@ -44,7 +44,7 @@ Foreground no
 StreamMaxLength 20M
 CONF
 [ "$(id -u)" = "0" ] && echo "User root" >> "$WORK/clamd.conf"
-clamd --config-file="$WORK/clamd.conf"
+TZ=UTC clamd --config-file="$WORK/clamd.conf"   # clamd prints signature dates in local time; always UTC
 for i in $(seq 1 60); do
   [ "$(printf 'zPING\0' | timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$CLAMD_PORT; cat >&3; cat <&3" 2>/dev/null | tr -d '\0')" = "PONG" ] && break
   sleep 0.5
@@ -73,7 +73,6 @@ export CLAMD_HOST=127.0.0.1
 export CLAMD_PORT="$CLAMD_PORT"
 export REDIS_URL="redis://127.0.0.1:$REDIS_PORT"
 export FILE_URL_SIGNING_KEY="$(openssl rand -base64 32)"
-export MFA_ENCRYPTION_KEY="$(openssl rand -base64 32)"
 export FILE_STORAGE_DIR="$WORK/storage"
 
 "$@"

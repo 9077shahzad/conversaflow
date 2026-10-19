@@ -69,15 +69,23 @@ export interface ClamdOptions {
  * Reads clamd's VERSION reply. With official signatures loaded it reads
  * "ClamAV 1.5.4/27800/Mon Oct 19 08:23:01 2026" (engine / database version / database date).
  * With no official database (for example only a custom test signature) it reads just "ClamAV 1.5.4".
+ * clamd prints the date in its own local time, so clamd MUST run with TZ=UTC (container setting; checked in the
+ * hosted verification). A database dated more than an hour in the future, a version of 0, or a date with a time-zone
+ * suffix is treated as unreadable, which blocks uploads.
  */
 export function parseClamdVersion(reply: string, now: Date, maxAgeHours: number): SignatureStatus {
   const m = /^ClamAV ([^/\s]+)(?:\/(\d+)\/(.+))?$/.exec(reply.trim());
   if (!m) return { state: 'unknown' };
   const engine = m[1];
-  if (!m[2] || !m[3]) return { state: 'missing', engine };
-  const published = new Date(`${m[3].trim()} UTC`);
+  if (m[2] === undefined && m[3] === undefined) return { state: 'missing', engine };
+  if (!m[2] || !m[3] || Number(m[2]) <= 0) return { state: 'unknown', engine };
+  const dateText = m[3].trim();
+  // Exactly clamd's format, e.g. "Mon Oct 19 08:23:01 2026" — no offset or zone suffix accepted.
+  if (!/^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/.test(dateText)) return { state: 'unknown', engine, databaseVersion: Number(m[2]) };
+  const published = new Date(`${dateText} UTC`);
   if (Number.isNaN(published.getTime())) return { state: 'unknown', engine, databaseVersion: Number(m[2]) };
   const ageHours = (now.getTime() - published.getTime()) / 3_600_000;
+  if (ageHours < -1) return { state: 'unknown', engine, databaseVersion: Number(m[2]) }; // dated in the future
   return {
     state: ageHours > maxAgeHours ? 'outdated' : 'current',
     engine, databaseVersion: Number(m[2]), publishedAt: published.toISOString(), ageHours: Math.round(ageHours * 10) / 10,

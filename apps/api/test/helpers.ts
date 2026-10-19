@@ -156,3 +156,23 @@ export async function newStaff(t: TestApp, label: string, role: 'platform_owner'
   await enableMfa(c);
   return c;
 }
+
+/**
+ * Runs SQL as cf_auth (the owner of the authentication functions), for test inspection of credential data that
+ * no login role can read. The migration owner is a member of cf_auth; nothing in the application can do this.
+ */
+export async function asAuthRole<T>(t: TestApp, fn: (tx: import('@conversaflow/database').Tx) => Promise<T>): Promise<T> {
+  const c = await t.ownerDb.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SET LOCAL ROLE cf_auth');
+    const r = await fn(c);
+    await c.query('COMMIT');
+    return r;
+  } catch (err) {
+    await c.query('ROLLBACK');
+    throw err;
+  } finally {
+    c.release();
+  }
+}

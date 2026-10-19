@@ -77,11 +77,10 @@ jobs:
           sudo systemctl stop clamav-daemon clamav-freshclam || true
           mkdir -p "$RUNNER_TEMP/clamdb" && cp scripts/clamav/test-signatures.ndb "$RUNNER_TEMP/clamdb/"
           printf 'DatabaseDirectory %s\nTCPSocket 3310\nTCPAddr 127.0.0.1\nForeground no\nUser root\nStreamMaxLength 20M\n' "$RUNNER_TEMP/clamdb" > "$RUNNER_TEMP/clamd.conf"
-          sudo clamd --config-file="$RUNNER_TEMP/clamd.conf"
+          sudo TZ=UTC clamd --config-file="$RUNNER_TEMP/clamd.conf"
       - name: Generate per-run keys
         run: |
           echo "FILE_URL_SIGNING_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
-          echo "MFA_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
       - name: Migrations, isolation check and tests
         run: pnpm test
       - name: English/Arabic UI checks (readability, RTL, accessibility) with screenshots

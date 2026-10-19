@@ -9,7 +9,7 @@ import { createPool, withContext, type Db } from '@conversaflow/database';
 import { checkIsolation } from '@conversaflow/database/dist/check-rls';
 import { sha256 } from '../src/core/crypto';
 import { Notifier } from '../src/worker/notifier';
-import { Client, clearRateLimits, enableMfa, newUser, nextTotp, PASSWORD, startApp, type TestApp } from './helpers';
+import { asAuthRole, Client, clearRateLimits, enableMfa, newUser, nextTotp, PASSWORD, startApp, type TestApp } from './helpers';
 
 let t: TestApp;
 let victim: Client;
@@ -17,11 +17,12 @@ let app: Db; // cf_app — what a SQL-injection flaw in business code would run 
 
 /** Everything that controls the victim's sign-in, read through the identity role. */
 async function fingerprint() {
-  return withContext(t.deps.identityDb, { tenantId: null, userId: victim.userId! }, async (tx) => ({
-    password: (await tx.query('SELECT password_hash FROM auth_credentials_by_email($1)', [victim.email])).rows[0].password_hash,
-    mfa: (await tx.query('SELECT id, secret_enc, confirmed_at FROM mfa_factors ORDER BY id')).rows,
-    recovery: (await tx.query('SELECT id, code_hash, used_at FROM mfa_recovery_codes ORDER BY id')).rows,
-    sessions: (await tx.query('SELECT id, revoked_at, mfa_verified_at FROM sessions ORDER BY id')).rows,
+  // Read as cf_auth: since migration 0010 no login role can read MFA secrets or recovery codes.
+  return asAuthRole(t, async (tx) => ({
+    password: (await tx.query('SELECT password_hash FROM user_credentials WHERE user_id = $1', [victim.userId])).rows[0].password_hash,
+    mfa: (await tx.query('SELECT id, secret_sealed, confirmed_at FROM mfa_factors WHERE user_id = $1 ORDER BY id', [victim.userId])).rows,
+    recovery: (await tx.query('SELECT id, code_hash, used_at FROM mfa_recovery_codes WHERE user_id = $1 ORDER BY id', [victim.userId])).rows,
+    sessions: (await tx.query('SELECT id, revoked_at, mfa_verified_at FROM sessions WHERE user_id = $1 ORDER BY id', [victim.userId])).rows,
     user: (await tx.query('SELECT email, email_verified_at, status FROM users WHERE id = $1', [victim.userId])).rows[0],
   }));
 }

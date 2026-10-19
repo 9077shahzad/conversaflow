@@ -78,3 +78,23 @@ The first independent review's fixes changed three migration files that had been
 databases. The migration runner refuses changed files on any database that already applied them (checksum), so this
 is safe for every environment that exists today (none are shared). From the first shared environment onward,
 applied migrations are never edited; changes go in new files.
+
+## ADR-027 — Two-step verification is decided inside the database; residual risk of the sign-in credential
+
+Context: the independent post-fix recheck of commit 8d42a5b showed that the sign-in role (`cf_identity`) could open a
+session for any user and mark it MFA-verified with a plain UPDATE, because row security trusted `app.user_id`, which a
+role sets for itself. Combined with the platform credential this approved support grants; against a customer it
+opened MFA-protected data.
+
+Decision (migration 0010): no login role can write MFA data, read TOTP secrets or recovery codes, or mark a session
+verified. `auth_mfa_begin`, `auth_mfa_confirm` and `auth_mfa_verify` (owned by `cf_auth`) identify the user from the
+**session token**, check a real TOTP code (RFC 6238, computed in SQL) or recovery code, and are the only way to set
+`mfa_verified_at`. TOTP secrets are sealed with a key in `auth_keys`, readable only by `cf_auth`. Wrong guesses are
+limited in the database (10 per user per hour), on top of the API's limits. The CI guard fails the build on regression.
+
+Residual risk (accepted for the pilot, review before general availability): password checking (Argon2id) runs in the
+API, so whoever holds the `cf_identity` credential can still open a session **without** verified MFA for any user.
+For users with MFA that session can only reach the MFA step. For users **without** MFA it is a full session.
+Mitigations: (1) platform staff, Owners and Admins must use MFA (already enforced for sensitive permissions);
+(2) at deployment, keep the identity credential in its own secret, readable only by the API service, never by the
+worker or console; (3) option for the owner: require MFA for every pilot user (see readiness checklist).

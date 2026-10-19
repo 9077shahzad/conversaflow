@@ -19,7 +19,7 @@ export interface Deps {
   mailer: Mailer;
   storage: ObjectStorage;
   scanner: FileScanner;
-  keys: { fileLinks: Buffer; mfa: Buffer };
+  keys: { fileLinks: Buffer };
 }
 
 /** The signed-in session, resolved from the cookie on every request. */

@@ -138,6 +138,15 @@ describe('signature freshness: missing or outdated official signatures block upl
     expect(parseClamdVersion('ClamAV 1.5.4', now, 48)).toMatchObject({ state: 'missing', engine: '1.5.4' });
     expect(parseClamdVersion('garbage', now, 48)).toMatchObject({ state: 'unknown' });
     expect(parseClamdVersion('ClamAV 1.5.4/27800/not a date', now, 48)).toMatchObject({ state: 'unknown' });
+    // Independent recheck (N4): these must never count as current.
+    const future = new Date(Date.now() + 5 * 24 * 3_600_000);
+    const fmt = (d: Date) => `${d.toUTCString().slice(0, 3)} ${d.toUTCString().slice(8, 11)} ${String(d.getUTCDate()).padStart(2, ' ')} ${d.toISOString().slice(11, 19)} ${d.getUTCFullYear()}`;
+    expect(parseClamdVersion(`ClamAV 1.5.4/27800/${fmt(future)}`, now, 48)).toMatchObject({ state: 'unknown' });
+    expect(parseClamdVersion('ClamAV 1.5.4/27800/Fri Jan  1 00:00:00 2099', now, 48)).toMatchObject({ state: 'unknown' });
+    expect(parseClamdVersion(`ClamAV 1.5.4/0/${clamdDate(1)}`, now, 48)).toMatchObject({ state: 'unknown' });
+    expect(parseClamdVersion('ClamAV 1.5.4/99999', now, 48)).toMatchObject({ state: 'unknown' });
+    expect(parseClamdVersion('ClamAV 1.5.4/99999/', now, 48)).toMatchObject({ state: 'unknown' });
+    expect(parseClamdVersion(`ClamAV 1.5.4/27800/${clamdDate(1)} +0300`, now, 48)).toMatchObject({ state: 'unknown' });
   });
 
   async function uploadWith(scanner: ClamdScanner, name: string) {

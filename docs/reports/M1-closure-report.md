@@ -34,7 +34,7 @@ is unchanged. **Accepted** = documented residual risk with an ADR. **Pending** =
 | # | Finding | Severity | Status |
 | --- | --- | --- | --- |
 | 1 | Anyone holding the platform database password could approve their own support access by setting `app.user_id` to an owner's id, then read company files | High | Closed — every platform action now takes the caller's session token and the database derives the staff member from a live, MFA-verified session; the platform role has no direct table access; CI guard checks both. review2.test replays the exact attack (refused, grant unapproved, files unread) |
-| 2 | Identity role could insert a session with MFA pre-verified and a 10-year lifetime, taking over any account | Medium | Closed — sessions can only be opened through `auth_open_session` (1–12 h, MFA not verified); the lookup also refuses sessions older than 12 h; review2.test |
+| 2 | Identity role could insert a session with MFA pre-verified and a 10-year lifetime, taking over any account | Medium | Reopened by the post-fix recheck (N1), fixed again in migration 0010 — MFA is now decided only inside the database; see the recheck section; review2.test, review3.test |
 | 3 | Business API role could activate its own trial, change plan and seats | Medium | Closed — no UPDATE/DELETE on subscriptions; any subscription the API inserts is forced to a trial by a trigger; review2.test |
 | 4 | NULL idle timeout skipped idle expiry | Low | Closed — review2.test |
 | 5 | API/identity role could point a session at another company (denial of service only; membership is rechecked) | Low | Accepted — ADR-025; no data exposure; switch endpoint rechecks membership (isolation.api.test) |
@@ -53,3 +53,25 @@ is unchanged. **Accepted** = documented residual risk with an ADR. **Pending** =
 - Independent human security review and penetration test (proposal in the preparation pack).
 - Hosted ClamAV with official signatures (`freshclam`), and `AlertExceedsMax yes` in its configuration.
 - Per-request CSP nonces in the web app.
+
+## Independent post-fix recheck of commit 8d42a5b (19 Oct 2026)
+
+A fresh reviewer re-tested every finding above against the exact commit (204/204 tests passing at the time).
+
+- **Verified closed by the reviewer:** owner conditions (credential permissions for the business role, session expiry on
+  the API path, real virus scanner), first review #1–#8, second review #1 (for the platform credential on its own), #3,
+  #4, #6, #7, #8, #11, and the new signature-freshness check.
+- **Accepted, reviewer agrees:** second review #5 and #10.
+- **Cannot verify locally:** the hosted file-revocation check (needs a deployed environment).
+- **Not closed — second review #2 (variant N1, Medium):** the sign-in role could still open a session for any user and
+  mark it MFA-verified, which reached platform-owner actions and MFA-protected customer data.
+- **New, Low:** N2 staff sessions ignored user status and idle limit; N3 a recovery code could be spent twice in a race;
+  N4 signature-date edge cases (future dates, version 0, clamd local time).
+
+| Recheck finding | Fix | Regression test | Status |
+| --- | --- | --- | --- |
+| N1 MFA-verified session forgeable by the sign-in role | Migration 0010: MFA decided only in the database from the session token; sealed secrets; DB guessing limit; CI guard | review3.test (5) | Fixed — **awaiting independent recheck** |
+| N2 staff session ignored status / idle | `platform_session_staff` requires an active user, 60-minute idle, 12-hour absolute | review3.test (2) | Fixed — **awaiting independent recheck** |
+| N3 recovery-code race | Single-use enforced in the database function | review3.test (1) | Fixed — **awaiting independent recheck** |
+| N4 signature-date edge cases | Future dates, version 0 and zone suffixes read as unreadable (blocks uploads); clamd runs with TZ=UTC | scanner.test | Fixed — **awaiting independent recheck**; hosted check still open |
+| Residual: sign-in credential can open a non-MFA session for any user | Accepted with mitigations (ADR-027) | review3.test documents the boundary | Accepted — owner to confirm |

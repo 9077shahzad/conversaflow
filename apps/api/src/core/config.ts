@@ -15,7 +15,6 @@ const Schema = z.object({
   DATABASE_PLATFORM_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   FILE_URL_SIGNING_KEY: key32,
-  MFA_ENCRYPTION_KEY: key32,
   FILE_STORAGE_DIR: z.string().min(1),
   APP_ORIGIN: z.string().url().default('http://localhost:3000'),
   SMTP_URL: z.string().optional(),

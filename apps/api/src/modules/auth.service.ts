@@ -2,7 +2,7 @@ import { authenticator } from 'otplib';
 import { withAnonymous, withContext, type Tx } from '@conversaflow/database';
 import { ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest } from '@conversaflow/contracts';
 import type { AuthSession, Deps } from '../core/context';
-import { decryptSecret, encryptSecret, randomToken, sha256 } from '../core/crypto';
+import { randomToken, sha256 } from '../core/crypto';
 import { Errors } from '../core/errors';
 import { burnPasswordCheck, checkPasswordPolicy, hashPassword, verifyPassword } from '../core/passwords';
 import { RATE_RULES } from '../core/rate-limit';
@@ -113,78 +113,55 @@ export class AuthService {
     };
   }
 
+  /**
+   * Runs one of the database MFA functions. The database identifies the user from the session token (never from a
+   * user id the API supplies), checks the code itself and limits wrong guesses per user.
+   */
+  private async mfaCall<T>(session: AuthSession, fn: (tx: Tx, tokenHash: Buffer) => Promise<T>): Promise<T> {
+    try {
+      return await withContext(this.deps.identityDb, { tenantId: null, userId: session.userId }, (tx) => fn(tx, sha256(session.token)));
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === '54000') throw Errors.tooManyRequests(); // database-side guessing limit
+      if (code === '23505') throw Errors.conflict('mfa_already_enabled', 'Two-step verification is already on.');
+      if (code === '42501') throw Errors.unauthenticated();
+      throw err;
+    }
+  }
+
   /** Second step of sign-in when the user has two-step verification. */
   async completeMfa(session: AuthSession, input: { code?: string; recoveryCode?: string }): Promise<void> {
     await this.deps.rateLimiter.hit(RATE_RULES.mfaPerSession, session.sessionId);
     await this.deps.rateLimiter.hit(RATE_RULES.mfaPerUser, session.userId);
-    const ok = await withContext(this.deps.identityDb, { tenantId: null, userId: session.userId }, async (tx) => {
-      if (input.recoveryCode) {
-        const { rowCount } = await tx.query(
-          `UPDATE mfa_recovery_codes SET used_at = now()
-           WHERE id = (SELECT id FROM mfa_recovery_codes WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL LIMIT 1)`,
-          [session.userId, sha256(normaliseRecovery(input.recoveryCode))],
-        );
-        return (rowCount ?? 0) === 1;
-      }
-      const { rows } = await tx.query<{ id: string; secret_enc: string; last_used_step: string | null }>(
-        `SELECT id, secret_enc, last_used_step FROM mfa_factors
-         WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NOT NULL FOR UPDATE`,
-        [session.userId],
-      );
-      if (!rows[0] || !input.code) return false;
-      return acceptTotp(tx, rows[0], input.code, this.deps.keys.mfa);
+    const ok = await this.mfaCall(session, async (tx, tokenHash) => {
+      const { rows } = await tx.query<{ ok: boolean }>('SELECT auth_mfa_verify($1, $2, $3) AS ok', [
+        tokenHash, input.recoveryCode ? null : (input.code ?? null), input.recoveryCode ? sha256(normaliseRecovery(input.recoveryCode)) : null,
+      ]);
+      return rows[0]!.ok;
     });
     if (!ok) throw Errors.invalidCredentials();
-    await this.markSessionMfa(session);
   }
 
-  private async markSessionMfa(session: AuthSession): Promise<void> {
-    await withContext(this.deps.identityDb, { tenantId: null, userId: session.userId }, (tx) =>
-      tx.query('UPDATE sessions SET mfa_verified_at = now() WHERE id = $1', [session.sessionId]),
-    );
-  }
-
-  /** Starts TOTP enrolment. Returns the secret once, to be shown as a QR code. */
+  /** Starts TOTP enrolment. The database creates and seals the secret and returns it once, for the QR code. */
   async beginTotpSetup(session: AuthSession): Promise<{ secret: string; otpauthUrl: string }> {
     if (session.userHasMfa) throw Errors.conflict('mfa_already_enabled', 'Two-step verification is already on.');
-    const secret = authenticator.generateSecret(20);
-    const email = await withContext(this.deps.identityDb, { tenantId: null, userId: session.userId }, async (tx) => {
-      await tx.query("DELETE FROM mfa_factors WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NULL", [session.userId]);
-      await tx.query("INSERT INTO mfa_factors (user_id, type, secret_enc) VALUES ($1, 'totp', $2)", [
-        session.userId, encryptSecret(this.deps.keys.mfa, secret),
-      ]);
-      const { rows } = await tx.query<{ email: string }>('SELECT email FROM users WHERE id = $1', [session.userId]);
-      return rows[0]!.email;
+    const { secret, email } = await this.mfaCall(session, async (tx, tokenHash) => {
+      const s = (await tx.query<{ secret: string }>('SELECT auth_mfa_begin($1) AS secret', [tokenHash])).rows[0]!.secret;
+      const e = (await tx.query<{ email: string }>('SELECT email FROM users WHERE id = $1', [session.userId])).rows[0]!.email;
+      return { secret: s, email: e };
     });
     return { secret, otpauthUrl: authenticator.keyuri(email, 'ConversaFlow', secret) };
   }
 
-  /** Confirms TOTP with a first code and returns single-use recovery codes (shown once). */
+  /**
+   * Confirms TOTP with a first code and returns single-use recovery codes (shown once). The database stores only
+   * their hashes, marks this session verified and signs out every other session (opened without MFA).
+   */
   async confirmTotp(session: AuthSession, code: string): Promise<{ recoveryCodes: string[] }> {
     const codes = Array.from({ length: RECOVERY_CODES }, () => randomToken(8).replace(/[-_]/g, 'x').slice(0, 10).toLowerCase());
-    const ok = await withContext(this.deps.identityDb, { tenantId: null, userId: session.userId }, async (tx) => {
-      const { rows } = await tx.query<{ id: string; secret_enc: string }>(
-        "SELECT id, secret_enc FROM mfa_factors WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NULL",
-        [session.userId],
-      );
-      const factor = rows[0];
-      if (!factor || !(await acceptTotp(tx, { ...factor, last_used_step: null }, code, this.deps.keys.mfa))) return false;
-      await tx.query('UPDATE mfa_factors SET confirmed_at = now() WHERE id = $1', [factor.id]);
-      await tx.query('DELETE FROM mfa_recovery_codes WHERE user_id = $1', [session.userId]);
-      for (const c of codes) {
-        await tx.query('INSERT INTO mfa_recovery_codes (user_id, code_hash) VALUES ($1, $2)', [session.userId, sha256(c)]);
-      }
-      return true;
-    });
+    const ok = await this.mfaCall(session, async (tx, tokenHash) =>
+      (await tx.query<{ ok: boolean }>('SELECT auth_mfa_confirm($1, $2, $3) AS ok', [tokenHash, code, codes.map((c) => sha256(c))])).rows[0]!.ok);
     if (!ok) throw Errors.badRequest('That code is not correct. Check the time on your phone and try again.');
-    await this.markSessionMfa(session);
-    // Turning on two-step verification signs out every other session, which were opened without it.
-    await withContext(this.deps.identityDb, { tenantId: null, userId: session.userId }, (tx) =>
-      tx.query(
-        "UPDATE sessions SET revoked_at = now(), revoke_reason = 'mfa_enabled' WHERE revoked_at IS NULL AND id <> $1",
-        [session.sessionId],
-      ),
-    );
     return { recoveryCodes: codes };
   }
 
@@ -243,21 +220,6 @@ export class AuthService {
       return { ...rows[0], mfaEnabled: session.userHasMfa, activeTenantId: session.activeTenantId };
     });
   }
-}
-
-/**
- * Checks a TOTP code and records the 30-second step it belongs to, so the same code (or an older one)
- * can never be accepted twice, even within its validity window.
- */
-async function acceptTotp(
-  tx: Tx, factor: { id: string; secret_enc: string; last_used_step: string | null }, code: string, key: Buffer,
-): Promise<boolean> {
-  const delta = authenticator.checkDelta(code, decryptSecret(key, factor.secret_enc));
-  if (delta === null) return false;
-  const step = Math.floor(Date.now() / 1000 / 30) + delta;
-  if (factor.last_used_step !== null && step <= Number(factor.last_used_step)) return false;
-  await tx.query('UPDATE mfa_factors SET last_used_step = $1 WHERE id = $2', [step, factor.id]);
-  return true;
 }
 
 const normaliseRecovery = (code: string) => code.trim().toLowerCase().replace(/\s+/g, '');

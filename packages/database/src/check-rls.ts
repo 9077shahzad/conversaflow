@@ -10,7 +10,7 @@
 import pg from 'pg';
 
 const LOGIN_ROLES = ['cf_app', 'cf_identity', 'cf_notify', 'cf_platform'];
-const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests'];
+const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests', 'auth_keys', 'mfa_attempts'];
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
@@ -90,6 +90,23 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
     for (const f of unbound.rows) problems.push(`${f.sig} is callable by cf_platform without a session token as its first argument`);
     // Billing state: the business API may create a subscription (forced to a trial) but never update one,
     // and may not insert sessions or set their MFA state.
+    // Two-step verification is decided only inside the database (migration 0010): no login role may write MFA data,
+    // read secrets, recovery codes or the sealing key, or mark a session verified directly.
+    for (const roleName of LOGIN_ROLES) {
+      const { rows } = await client.query<{ w: boolean; secret: boolean; rec: boolean; key: boolean; mark: boolean }>(`
+        SELECT has_table_privilege($1, 'mfa_factors', 'INSERT,UPDATE,DELETE') OR has_table_privilege($1, 'mfa_recovery_codes', 'INSERT,UPDATE,DELETE')
+                 OR has_any_column_privilege($1, 'mfa_factors', 'INSERT,UPDATE') OR has_any_column_privilege($1, 'mfa_recovery_codes', 'INSERT,UPDATE') AS w,
+               has_column_privilege($1, 'mfa_factors', 'secret_enc', 'SELECT') OR has_column_privilege($1, 'mfa_factors', 'secret_sealed', 'SELECT') AS secret,
+               has_any_column_privilege($1, 'mfa_recovery_codes', 'SELECT') AS rec,
+               has_any_column_privilege($1, 'auth_keys', 'SELECT') OR has_any_column_privilege($1, 'mfa_attempts', 'SELECT,INSERT') AS key,
+               has_column_privilege($1, 'sessions', 'mfa_verified_at', 'UPDATE') OR has_table_privilege($1, 'sessions', 'UPDATE') AS mark`, [roleName]);
+      const r = rows[0]!;
+      if (r.w) problems.push(`${roleName} can write MFA factors or recovery codes directly`);
+      if (r.secret) problems.push(`${roleName} can read TOTP secrets`);
+      if (r.rec) problems.push(`${roleName} can read recovery codes`);
+      if (r.key) problems.push(`${roleName} can read the MFA sealing key or attempt log`);
+      if (r.mark) problems.push(`${roleName} can mark sessions as MFA-verified directly`);
+    }
     const billing = await client.query<{ upd: boolean; sess: boolean }>(`
       SELECT has_table_privilege('cf_app', 'subscriptions', 'UPDATE') OR has_any_column_privilege('cf_app', 'subscriptions', 'UPDATE') AS upd,
              has_table_privilege('cf_identity', 'sessions', 'INSERT') AS sess`);
