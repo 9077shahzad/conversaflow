@@ -1,5 +1,5 @@
 import { authenticator } from 'otplib';
-import { withAnonymous, withContext } from '@conversaflow/database';
+import { withAnonymous, withContext, type Tx } from '@conversaflow/database';
 import { ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest } from '@conversaflow/contracts';
 import type { AuthSession, Deps } from '../core/context';
 import { decryptSecret, encryptSecret, randomToken, sha256 } from '../core/crypto';
@@ -130,6 +130,7 @@ export class AuthService {
   /** Second step of sign-in when the user has two-step verification. */
   async completeMfa(session: AuthSession, input: { code?: string; recoveryCode?: string }): Promise<void> {
     await this.deps.rateLimiter.hit(RATE_RULES.mfaPerSession, session.sessionId);
+    await this.deps.rateLimiter.hit(RATE_RULES.mfaPerUser, session.userId);
     const ok = await withContext(this.deps.db, { tenantId: null, userId: session.userId }, async (tx) => {
       if (input.recoveryCode) {
         const { rowCount } = await tx.query(
@@ -139,12 +140,13 @@ export class AuthService {
         );
         return (rowCount ?? 0) === 1;
       }
-      const { rows } = await tx.query<{ secret_enc: string }>(
-        "SELECT secret_enc FROM mfa_factors WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NOT NULL",
+      const { rows } = await tx.query<{ id: string; secret_enc: string; last_used_step: string | null }>(
+        `SELECT id, secret_enc, last_used_step FROM mfa_factors
+         WHERE user_id = $1 AND type = 'totp' AND confirmed_at IS NOT NULL FOR UPDATE`,
         [session.userId],
       );
       if (!rows[0] || !input.code) return false;
-      return authenticator.check(input.code, decryptSecret(this.deps.keys.mfa, rows[0].secret_enc));
+      return acceptTotp(tx, rows[0], input.code, this.deps.keys.mfa);
     });
     if (!ok) throw Errors.invalidCredentials();
     await this.markSessionMfa(session);
@@ -180,7 +182,7 @@ export class AuthService {
         [session.userId],
       );
       const factor = rows[0];
-      if (!factor || !authenticator.check(code, decryptSecret(this.deps.keys.mfa, factor.secret_enc))) return false;
+      if (!factor || !(await acceptTotp(tx, { ...factor, last_used_step: null }, code, this.deps.keys.mfa))) return false;
       await tx.query('UPDATE mfa_factors SET confirmed_at = now() WHERE id = $1', [factor.id]);
       await tx.query('DELETE FROM mfa_recovery_codes WHERE user_id = $1', [session.userId]);
       for (const c of codes) {
@@ -259,6 +261,21 @@ export class AuthService {
       return { ...rows[0], mfaEnabled: session.userHasMfa, activeTenantId: session.activeTenantId };
     });
   }
+}
+
+/**
+ * Checks a TOTP code and records the 30-second step it belongs to, so the same code (or an older one)
+ * can never be accepted twice, even within its validity window.
+ */
+async function acceptTotp(
+  tx: Tx, factor: { id: string; secret_enc: string; last_used_step: string | null }, code: string, key: Buffer,
+): Promise<boolean> {
+  const delta = authenticator.checkDelta(code, decryptSecret(key, factor.secret_enc));
+  if (delta === null) return false;
+  const step = Math.floor(Date.now() / 1000 / 30) + delta;
+  if (factor.last_used_step !== null && step <= Number(factor.last_used_step)) return false;
+  await tx.query('UPDATE mfa_factors SET last_used_step = $1 WHERE id = $2', [step, factor.id]);
+  return true;
 }
 
 const normaliseRecovery = (code: string) => code.trim().toLowerCase().replace(/\s+/g, '');

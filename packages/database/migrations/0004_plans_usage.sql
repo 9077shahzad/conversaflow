@@ -54,7 +54,7 @@ CREATE TRIGGER subscriptions_updated_at BEFORE UPDATE ON subscriptions FOR EACH 
 CREATE TABLE entitlement_overrides (
   id          uuid NOT NULL DEFAULT uuid_generate_v7() PRIMARY KEY,
   tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  key         text NOT NULL,
+  key         text NOT NULL CHECK (key IN ('seats', 'whatsapp_numbers', 'automation_executions', 'ai_credits', 'outbound_messages')),
   limit_value bigint NOT NULL CHECK (limit_value >= 0),
   reason      text NOT NULL,
   granted_by  uuid,
@@ -83,13 +83,14 @@ BEGIN
 END $$;
 CREATE FUNCTION plan_entitlement_frozen() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM subscriptions WHERE plan_version_id = OLD.plan_version_id) THEN
-    RAISE EXCEPTION 'plan version % is in use; publish a new version instead', OLD.plan_version_id USING ERRCODE = 'check_violation';
+  IF EXISTS (SELECT 1 FROM subscriptions WHERE plan_version_id =
+             CASE WHEN TG_OP = 'INSERT' THEN NEW.plan_version_id ELSE OLD.plan_version_id END) THEN
+    RAISE EXCEPTION 'plan version is in use; publish a new version instead' USING ERRCODE = 'check_violation';
   END IF;
   RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END $$;
 CREATE TRIGGER plan_versions_frozen BEFORE UPDATE OR DELETE ON plan_versions FOR EACH ROW EXECUTE FUNCTION plan_version_frozen();
-CREATE TRIGGER plan_entitlements_frozen BEFORE UPDATE OR DELETE ON plan_entitlements FOR EACH ROW EXECUTE FUNCTION plan_entitlement_frozen();
+CREATE TRIGGER plan_entitlements_frozen BEFORE INSERT OR UPDATE OR DELETE ON plan_entitlements FOR EACH ROW EXECUTE FUNCTION plan_entitlement_frozen();
 
 ALTER TABLE subscriptions         ENABLE ROW LEVEL SECURITY; ALTER TABLE subscriptions         FORCE ROW LEVEL SECURITY;
 ALTER TABLE entitlement_overrides ENABLE ROW LEVEL SECURITY; ALTER TABLE entitlement_overrides FORCE ROW LEVEL SECURITY;

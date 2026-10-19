@@ -122,10 +122,11 @@ CREATE POLICY auth_invitations ON invitations FOR SELECT TO cf_auth USING (true)
 -- users can now see the people in the selected company.
 CREATE POLICY users_read ON users FOR SELECT TO cf_app USING (
   id = app_user_id()
-  OR id IN (SELECT m.user_id FROM memberships m WHERE m.tenant_id = app_tenant_id()));
+  OR id IN (SELECT m.user_id FROM memberships m WHERE m.tenant_id = app_tenant_id() AND m.status <> 'removed'));
 
 GRANT SELECT, INSERT, UPDATE ON tenants TO cf_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON memberships, roles, role_permissions, membership_roles, invitations TO cf_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON memberships, roles, role_permissions, invitations TO cf_app;
+GRANT SELECT, INSERT, DELETE ON membership_roles TO cf_app;  -- role links are replaced, never edited
 GRANT SELECT ON permissions TO cf_app;
 GRANT SELECT ON invitations TO cf_auth;
 

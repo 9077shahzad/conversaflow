@@ -33,7 +33,7 @@ export class TenantsService {
     const tenant = await withContext(db, { tenantId, userId: session.userId }, async (tx) => {
       const plan = await tx.query<{ id: string; trial_days: number }>(
         `SELECT v.id, v.trial_days FROM plan_versions v JOIN plans p ON p.id = v.plan_id
-         WHERE p.code = $1 AND v.effective_from <= now() ORDER BY v.version DESC LIMIT 1`,
+         WHERE p.code = $1 AND p.is_public AND v.effective_from <= now() ORDER BY v.version DESC LIMIT 1`,
         [body.planCode],
       );
       if (!plan.rows[0]) throw Errors.badRequest('Unknown plan.');

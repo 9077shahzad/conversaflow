@@ -75,10 +75,11 @@ describe('privileged actions and escalation', () => {
     await admin.post('/v1/invitations', { email: uniqueEmail('o'), roleKey: 'owner' }).expect(403);
   });
 
-  it('the last Owner cannot be demoted', async () => {
+  it('the last Owner cannot leave, and cannot change their own roles', async () => {
     const ownerId = ((await owner.get('/v1/members').expect(200)).body as Array<{ id: string; roles: string[] }>)
       .find((m) => m.roles.includes('owner'))!.id;
-    const res = await owner.put(`/v1/members/${ownerId}/roles`, { roleKeys: ['admin'] }).expect(409);
+    await owner.put(`/v1/members/${ownerId}/roles`, { roleKeys: ['admin'] }).expect(403);
+    const res = await owner.delete(`/v1/members/${ownerId}`).expect(409);
     expect(res.body.error.code).toBe('last_owner');
   });
 
@@ -102,5 +103,40 @@ describe('privileged actions and escalation', () => {
       .find((m) => m.email === analyst.email)!.id;
     await owner.put(`/v1/members/${id}/roles`, { roleKeys: ['agent'] }).expect(204);
     await analyst.get('/v1/files').expect(200);
+  });
+});
+
+describe('no privilege escalation inside a company (independent review findings)', () => {
+  it('a member manager cannot raise anyone — including themselves — above their own permissions', async () => {
+    await owner.post('/v1/roles', { key: 'people_mgr', name: 'People manager', permissions: ['tenant.read', 'members.read', 'members.manage'] }).expect(201);
+    const mgr = await addMember(t, owner, 'peoplemgr', 'people_mgr');
+    await enableMfa(mgr);
+    const list = (await owner.get('/v1/members').expect(200)).body as Array<{ id: string; email: string }>;
+    const self = list.find((m) => m.email === mgr.email)!.id;
+    const agent = list.find((m) => m.email === members.agent!.email)!.id;
+    expect((await mgr.put(`/v1/members/${self}/roles`, { roleKeys: ['admin'] }).expect(403)).body.error.message).toMatch(/your own roles/);
+    expect((await mgr.put(`/v1/members/${agent}/roles`, { roleKeys: ['admin'] }).expect(403)).body.error.message).toMatch(/do not have/);
+    await mgr.patch('/v1/tenant', { timezone: 'Asia/Dubai' }).expect(403);
+  });
+
+  it('an Admin cannot give anyone a custom role holding billing.manage', async () => {
+    await owner.post('/v1/roles', { key: 'payer', name: 'Payer', permissions: ['billing.manage', 'tenant.read'] }).expect(201);
+    const list = (await owner.get('/v1/members').expect(200)).body as Array<{ id: string; email: string }>;
+    const sup = list.find((m) => m.email === members.supervisor!.email)!.id;
+    await members.admin!.put(`/v1/members/${sup}/roles`, { roleKeys: ['payer'] }).expect(403);
+    await members.admin!.post('/v1/invitations', { email: uniqueEmail('payer'), roleKey: 'payer' }).expect(403);
+    await owner.put(`/v1/members/${sup}/roles`, { roleKeys: ['supervisor'] }).expect(204); // Owner may
+  });
+
+  it('nobody can invite a person into a role above their own permissions', async () => {
+    await owner.post('/v1/roles', { key: 'inviter', name: 'Inviter', permissions: ['tenant.read', 'members.read', 'members.invite'] }).expect(201);
+    const inviter = await addMember(t, owner, 'inviter', 'inviter');
+    await enableMfa(inviter);
+    await inviter.post('/v1/invitations', { email: uniqueEmail('alt'), roleKey: 'admin' }).expect(403);
+    await inviter.post('/v1/invitations', { email: uniqueEmail('alt'), roleKey: 'inviter' }).expect(201);
+  });
+
+  it('a malformed audit page size is a 400, not a server error', async () => {
+    await owner.get('/v1/audit-events?limit=abc').expect(400);
   });
 });

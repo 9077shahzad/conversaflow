@@ -90,8 +90,8 @@ describe('database isolation between companies', () => {
       for (const sql of [`UPDATE ${table} SET tenant_id = tenant_id WHERE tenant_id = $1`, `DELETE FROM ${table} WHERE tenant_id = $1`]) {
         const affected = await withContext(t.deps.db, ctxA(), async (tx) => (await tx.query(sql, [tenantB])).rowCount)
           .catch((err: { code?: string }) => {
-            // 42501 = no privilege at all (e.g. audit_events is append-only) — also a refusal.
-            expect(['42501', 'P0001'], `${table}: unexpected error ${err.code}`).toContain(err.code);
+            // 42501 = no privilege at all (e.g. audit_events is append-only) — also a refusal. Nothing else is accepted.
+            expect(err.code, `${table}: unexpected error ${err.code}`).toBe('42501');
             return 0;
           });
         expect(affected, `${table}: ${sql.split(' ')[0]} touched another company's rows`).toBe(0);
@@ -101,6 +101,17 @@ describe('database isolation between companies', () => {
     const members = await withContext(t.deps.db, { tenantId: tenantB, userId: b.userId! }, async (tx) =>
       (await tx.query('SELECT count(*)::int AS n FROM memberships')).rows[0].n);
     expect(members).toBe(2);
+  });
+
+  it("company A cannot move its own rows into company B in any tenant table (WITH CHECK side)", async () => {
+    for (const table of tenantTables) {
+      const outcome = await withContext(t.deps.db, ctxA(), async (tx) => {
+        const r = await tx.query(`UPDATE ${table} SET tenant_id = $1 WHERE tenant_id = $2`, [tenantB, tenantA]);
+        return `updated ${r.rowCount} rows`;
+      }).catch((err: { code?: string }) => err.code);
+      // 42501: RLS WITH CHECK or no UPDATE privilege. 23503: composite foreign key refuses the move first.
+      expect(['42501', '23503'], `${table}: rows could be moved into another company (${outcome})`).toContain(outcome);
+    }
   });
 
   it("company A cannot insert rows labelled with company B's id", async () => {
@@ -173,6 +184,14 @@ describe('database isolation between companies', () => {
     await expect(t.deps.db.query('SET ROLE cf_owner')).rejects.toMatchObject({ code: '42501' });
     await expect(t.deps.db.query('SELECT * FROM auth_tokens')).rejects.toMatchObject({ code: '42501' });
     await expect(t.deps.db.query('ALTER TABLE files DISABLE ROW LEVEL SECURITY')).rejects.toMatchObject({ code: '42501' });
+    // Column-level grants: a user's email, verification and a session's owner can never be rewritten by the app.
+    const self = { tenantId: null, userId: a.userId! };
+    await expect(withContext(t.deps.db, self, (tx) => tx.query("UPDATE users SET email = 'x@evil.test' WHERE id = $1", [a.userId])))
+      .rejects.toMatchObject({ code: '42501' });
+    await expect(withContext(t.deps.db, self, (tx) => tx.query('UPDATE users SET email_verified_at = now() WHERE id = $1', [a.userId])))
+      .rejects.toMatchObject({ code: '42501' });
+    await expect(withContext(t.deps.db, self, (tx) => tx.query('UPDATE sessions SET user_id = $1', [b.userId])))
+      .rejects.toMatchObject({ code: '42501' });
     const role = await t.deps.db.query('SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user');
     expect(role.rows[0]).toEqual({ rolbypassrls: false, rolsuper: false });
   });

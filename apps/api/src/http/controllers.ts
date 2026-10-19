@@ -196,7 +196,10 @@ export class AuditController {
 
   @RequirePermission('audit.read') @Get()
   list(@CurrentActor() actor: TenantActor, @Query('before') before?: string, @Query('limit') limit?: string) {
-    return this.audit.list(actor, limit ? Number(limit) : 50, before ? Number(before) : undefined);
+    const n = limit === undefined ? 50 : Number(limit);
+    const b = before === undefined ? undefined : Number(before);
+    if (!Number.isInteger(n) || (b !== undefined && !Number.isInteger(b))) throw Errors.badRequest('limit and before must be whole numbers.');
+    return this.audit.list(actor, n, b);
   }
 
   @RequirePermission('audit.read') @Get('verify')

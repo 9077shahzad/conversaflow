@@ -92,6 +92,17 @@ describe('plan catalogue', () => {
       t.ownerDb.query(`UPDATE plan_entitlements SET limit_value = 999 WHERE key = 'seats' AND plan_version_id =
         (SELECT v.id FROM plan_versions v JOIN plans p ON p.id = v.plan_id WHERE p.code = 'starter')`),
     ).rejects.toThrow(/in use/);
+    // ...and no new limit can be slipped into a version that is in use.
+    await expect(
+      t.ownerDb.query(`INSERT INTO plan_entitlements (plan_version_id, key, limit_value)
+        SELECT v.id, 'ai_credits', 999999 FROM plan_versions v JOIN plans p ON p.id = v.plan_id WHERE p.code = 'starter'`),
+    ).rejects.toThrow(/in use/);
+  });
+
+  it('overrides only accept known limit names', async () => {
+    await expect(asOwner(t, tenantId, (tx) =>
+      tx.query("INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'unlimited_everything', 1, 'x')", [tenantId])))
+      .rejects.toMatchObject({ code: '23514' });
   });
 
   it('the application role cannot change prices or limits at all', async () => {

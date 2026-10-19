@@ -119,3 +119,11 @@ export async function addMember(t: TestApp, owner: Client, label: string, roleKe
 export function asOwner<T>(t: TestApp, tenantId: string | null, fn: Parameters<typeof withContext<T>>[2]) {
   return withContext(t.ownerDb, { tenantId, userId: null }, fn);
 }
+
+/** A code from a fresh 30-second step (each step's code is accepted only once). */
+export async function nextTotp(c: Client): Promise<string> {
+  const step = () => Math.floor(Date.now() / 30000);
+  const start = step();
+  while (step() === start) await new Promise((r) => setTimeout(r, 250));
+  return authenticator.generate(c.mfaSecret!);
+}

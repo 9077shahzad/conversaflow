@@ -94,9 +94,13 @@ export class FilesService {
     // The link is bound to the user and company it was issued for.
     if (claims.u !== session.userId || claims.t !== session.activeTenantId) throw Errors.invalidLink();
     return withContext(this.deps.db, { tenantId: claims.t, userId: session.userId }, async (tx) => {
-      const member = await tx.query(
-        "SELECT 1 FROM memberships WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'", [claims.t, session.userId]);
-      if (member.rowCount !== 1) throw Errors.invalidLink();
+      // Re-check the person is still a member AND still allowed to read files (roles may have changed).
+      const allowed = await tx.query(
+        `SELECT 1 FROM memberships m JOIN membership_roles mr ON mr.membership_id = m.id
+         JOIN role_permissions rp ON rp.role_id = mr.role_id
+         WHERE m.tenant_id = $1 AND m.user_id = $2 AND m.status = 'active' AND rp.permission_key = 'files.read' LIMIT 1`,
+        [claims.t, session.userId]);
+      if (allowed.rowCount !== 1) throw Errors.invalidLink();
       const { rows } = await tx.query<{ storage_key: string; original_name: string; content_type: string; status: string }>(
         'SELECT storage_key, original_name, content_type, status FROM files WHERE id = $1', [claims.f]);
       const file = rows[0];

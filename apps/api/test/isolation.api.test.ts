@@ -57,9 +57,11 @@ describe('records: company B cannot reach company A through the API', () => {
     expect(members.map((m: { email: string }) => m.email)).toEqual([b.email]);
     const files = (await b.get('/v1/files').expect(200)).body;
     expect(files).toEqual([]);
-    const audit = (await b.get('/v1/audit-events').expect(200)).body;
-    expect(JSON.stringify(audit)).not.toContain(tenantA);
-    expect(JSON.stringify(audit)).not.toContain(fileOfA);
+    const audit = (await b.get('/v1/audit-events').expect(200)).body as Array<{ actorUserId: string; targetId: string }>;
+    expect(audit.length).toBeGreaterThan(0);
+    expect(audit.every((e) => e.actorUserId === b.userId)).toBe(true); // only B's own actions
+    expect(audit.map((e) => e.targetId)).not.toContain(fileOfA);
+    expect(audit.map((e) => e.targetId)).not.toContain(tenantA);
     expect((await b.get('/v1/me/tenants').expect(200)).body.map((x: { id: string }) => x.id)).toEqual([tenantB]);
   });
 
@@ -152,5 +154,16 @@ describe('membership changes take effect immediately', () => {
     const res = await temp.get('/v1/members').expect(403);
     expect(res.body.error.message).toMatch(/no longer a member/);
     await temp.get(`/v1/files/${fileOfA}`).expect(403);
+  });
+});
+
+describe('download links respect role changes (independent review finding)', () => {
+  it('a link stops working when its holder loses the files.read permission', async () => {
+    const worker = await addMember(t, a, 'acme-dl', 'agent');
+    const link = (await worker.post(`/v1/files/${fileOfA}/link`).expect(201)).body.url;
+    await worker.get(link).expect(200);
+    const id = (await a.get('/v1/members').expect(200)).body.find((m: { email: string }) => m.email === worker.email).id;
+    await a.put(`/v1/members/${id}/roles`, { roleKeys: ['analyst'] }).expect(204);
+    await worker.get(link).expect(403);
   });
 });

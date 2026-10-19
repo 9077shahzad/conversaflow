@@ -42,6 +42,7 @@ export class MembersService {
     const result = await withContext(this.deps.db, actor, async (tx) => {
       const role = await tx.query<{ id: string }>('SELECT id FROM roles WHERE key = $1', [body.roleKey]);
       if (!role.rows[0]) throw Errors.badRequest('Unknown role.');
+      await assertWithinActor(tx, actor, [role.rows[0].id]);
       const existing = await tx.query(
         "SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE u.email = $1 AND m.status = 'active'",
         [body.email],
@@ -127,11 +128,14 @@ export class MembersService {
     const { roleKeys } = parse(SetMemberRolesRequest, input);
     if (!isUuid(membershipId)) throw Errors.notFound('Member');
     if (roleKeys.includes('owner') && !actor.roles.includes('owner')) throw Errors.forbidden('Only an Owner can grant the Owner role.');
+    if (membershipId === actor.membershipId) throw Errors.forbidden('You cannot change your own roles. Ask another Owner or Admin.');
     await withContext(this.deps.db, actor, async (tx) => {
       const target = await this.lockMember(tx, membershipId);
       if (target.roles.includes('owner') && !actor.roles.includes('owner')) throw Errors.forbidden('Only an Owner can change another Owner.');
+      await assertTargetWithinActor(tx, actor, membershipId);
       const roles = await tx.query<{ id: string; key: string }>('SELECT id, key FROM roles WHERE key = ANY($1::text[])', [roleKeys]);
       if (roles.rowCount !== new Set(roleKeys).size) throw Errors.badRequest('Unknown role.');
+      await assertWithinActor(tx, actor, roles.rows.map((r) => r.id));
       await tx.query('DELETE FROM membership_roles WHERE membership_id = $1', [membershipId]);
       for (const r of roles.rows) {
         await tx.query('INSERT INTO membership_roles (tenant_id, membership_id, role_id) VALUES ($1, $2, $3)', [actor.tenantId, membershipId, r.id]);
@@ -149,6 +153,7 @@ export class MembersService {
     await withContext(this.deps.db, actor, async (tx) => {
       const target = await this.lockMember(tx, membershipId);
       if (target.roles.includes('owner') && !actor.roles.includes('owner')) throw Errors.forbidden('Only an Owner can remove an Owner.');
+      if (membershipId !== actor.membershipId) await assertTargetWithinActor(tx, actor, membershipId);
       await tx.query("UPDATE memberships SET status = 'removed' WHERE id = $1", [membershipId]);
       await tx.query('DELETE FROM membership_roles WHERE membership_id = $1', [membershipId]);
       await this.assertOwnerRemains(tx);
@@ -216,6 +221,27 @@ export class MembersService {
       });
       return { key: body.key, name: body.name, permissions: body.permissions };
     });
+  }
+}
+
+/**
+ * No privilege escalation: you can only hand out roles whose permissions you hold yourself.
+ * (The Owner holds every permission, so Owners are never blocked.)
+ */
+async function assertWithinActor(tx: Tx, actor: TenantActor, roleIds: string[]): Promise<void> {
+  const { rows } = await tx.query<{ permission_key: string }>(
+    'SELECT DISTINCT permission_key FROM role_permissions WHERE role_id = ANY($1::uuid[])', [roleIds]);
+  const missing = rows.map((r) => r.permission_key).filter((p) => !actor.permissions.has(p));
+  if (missing.length) throw Errors.forbidden(`You cannot grant permissions you do not have: ${missing.sort().join(', ')}`);
+}
+
+/** You can only change or remove people whose current permissions you also hold. */
+async function assertTargetWithinActor(tx: Tx, actor: TenantActor, membershipId: string): Promise<void> {
+  const { rows } = await tx.query<{ permission_key: string }>(
+    `SELECT DISTINCT rp.permission_key FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id
+     WHERE mr.membership_id = $1`, [membershipId]);
+  if (rows.some((r) => !actor.permissions.has(r.permission_key))) {
+    throw Errors.forbidden('This person has permissions you do not have, so you cannot change them.');
   }
 }
 

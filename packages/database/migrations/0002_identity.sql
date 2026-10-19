@@ -27,6 +27,7 @@ CREATE TABLE mfa_factors (
   type         text NOT NULL CHECK (type IN ('totp')),
   secret_enc   text NOT NULL,              -- AES-256-GCM, key held outside the database
   confirmed_at timestamptz,
+  last_used_step bigint,                -- last accepted 30-second step; a code is never accepted twice
   created_at   timestamptz NOT NULL DEFAULT now(),
   UNIQUE (user_id, type)
 );
@@ -93,8 +94,12 @@ CREATE POLICY auth_sessions    ON sessions         FOR ALL TO cf_auth USING (tru
 CREATE POLICY auth_tokens_all  ON auth_tokens      FOR ALL TO cf_auth USING (true) WITH CHECK (true);
 CREATE POLICY auth_mfa         ON mfa_factors      FOR SELECT TO cf_auth USING (true);
 
-GRANT SELECT, UPDATE ON users TO cf_app;
-GRANT SELECT, INSERT, UPDATE ON user_credentials, mfa_factors, mfa_recovery_codes, sessions TO cf_app;
+-- Column-level grants: the app can never rewrite a user's email, verification time or status, or a session's owner.
+GRANT SELECT ON users TO cf_app;
+GRANT UPDATE (full_name, locale) ON users TO cf_app;
+GRANT SELECT, INSERT, UPDATE ON user_credentials, mfa_factors, mfa_recovery_codes TO cf_app;
+GRANT SELECT, INSERT ON sessions TO cf_app;
+GRANT UPDATE (active_tenant_id, mfa_verified_at, revoked_at, last_seen_at) ON sessions TO cf_app;
 GRANT DELETE ON mfa_factors, mfa_recovery_codes TO cf_app;
 GRANT SELECT, INSERT, UPDATE ON users, user_credentials, sessions, auth_tokens TO cf_auth;
 GRANT SELECT ON mfa_factors TO cf_auth;

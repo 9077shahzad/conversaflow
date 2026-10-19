@@ -49,3 +49,13 @@ Found by the Milestone 1 isolation tests: a policy that let a user see "their ow
 applied while another company was selected, which allowed a session to switch into a company the user did not
 belong to (later requests were still refused; no data was exposed). Decision: cross-company visibility of one's own
 memberships and companies applies **only when no company is selected**. Regression test added.
+
+## ADR-024 — Residual risk: authentication functions callable by the app role
+
+Context: the independent review showed that anyone able to run arbitrary SQL as `cf_app` could call
+`auth_issue_token` for any user and then reset that user's password, or read password hashes through
+`auth_credentials_by_email`. These functions exist because the API must email tokens and verify passwords.
+Decision for Milestone 1: accept, because reaching this requires SQL injection (blocked by parameterised queries
+everywhere and a lint rule that fails the build on interpolated SQL) or a compromised API process (which could
+already act as any signed-in user). Planned fix (Phase 2): move token issuing and email sending into the worker
+under a separate `cf_mailer` role, so the API role can no longer mint tokens; review again before the pilot.

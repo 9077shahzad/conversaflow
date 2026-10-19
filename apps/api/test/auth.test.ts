@@ -1,7 +1,7 @@
 /** Sign-up, email verification, sign-in, two-step verification, sessions and password reset. */
 import { authenticator } from 'otplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { clearRateLimits, Client, enableMfa, newUser, PASSWORD, startApp, tokenFrom, uniqueEmail, type TestApp } from './helpers';
+import { clearRateLimits, Client, enableMfa, newUser, nextTotp, PASSWORD, startApp, tokenFrom, uniqueEmail, type TestApp } from './helpers';
 
 let t: TestApp;
 beforeAll(async () => {
@@ -99,7 +99,7 @@ describe('sign-in', () => {
 });
 
 describe('two-step verification (TOTP)', () => {
-  it('after enabling, sign-in requires the code; the account is unusable until it is entered', async () => {
+  it('after enabling, sign-in requires the code; the account is unusable until it is entered', { timeout: 45_000 }, async () => {
     const c = await newUser(t, 'mfa');
     await enableMfa(c);
     await c.post('/v1/auth/logout').expect(204);
@@ -112,7 +112,7 @@ describe('two-step verification (TOTP)', () => {
     expect(blocked.body.error.code).toBe('mfa_required');
 
     await c.post('/v1/auth/mfa/challenge', { code: '000000' }).expect(401);
-    await c.post('/v1/auth/mfa/challenge', { code: authenticator.generate(c.mfaSecret!) }).expect(204);
+    await c.post('/v1/auth/mfa/challenge', { code: await nextTotp(c) }).expect(204);
     expect((await c.get('/v1/me').expect(200)).body.mfaEnabled).toBe(true);
   });
 
@@ -183,4 +183,40 @@ describe('sessions and password reset', () => {
     await new Client(t, c.email).post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(401);
     await new Client(t, c.email).post('/v1/auth/login', { email: c.email, password: newPassword }).expect(200);
   });
+});
+
+describe('two-step verification hardening (independent review findings)', () => {
+  it('signing in again does not reset the allowance for guessing codes', async () => {
+    const c = await newUser(t, 'relog');
+    await enableMfa(c);
+    await clearRateLimits(t);
+    let refused = false;
+    for (let attempt = 0; attempt < 4 && !refused; attempt++) {
+      const s = new Client(t, c.email);
+      await t.deps.redis.del(`rl:login:email:${c.email}`, 'rl:login:ip:::ffff:127.0.0.1', 'rl:login:ip:127.0.0.1');
+      await s.post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(200);
+      for (let i = 0; i < 6; i++) {
+        const r = await s.post('/v1/auth/mfa/challenge', { code: '111111' });
+        if (r.status === 429) refused = true;
+      }
+    }
+    expect(refused).toBe(true); // per-user limit (10 per hour) kicks in across sessions
+  });
+
+  it('a code cannot be used twice, even inside its 30-second window', async () => {
+    const c = await newUser(t, 'replay');
+    await enableMfa(c);
+    // The confirmation code was just used; wait for a fresh step so the next one is unused.
+    const step = () => Math.floor(Date.now() / 30000);
+    const start = step();
+    while (step() === start) await new Promise((r) => setTimeout(r, 250));
+    const code = authenticator.generate(c.mfaSecret!);
+    await clearRateLimits(t);
+    const s1 = new Client(t, c.email);
+    await s1.post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(200);
+    await s1.post('/v1/auth/mfa/challenge', { code }).expect(204);
+    const s2 = new Client(t, c.email);
+    await s2.post('/v1/auth/login', { email: c.email, password: PASSWORD }).expect(200);
+    await s2.post('/v1/auth/mfa/challenge', { code }).expect(401);
+  }, 45_000);
 });

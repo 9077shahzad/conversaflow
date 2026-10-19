@@ -14,8 +14,9 @@ export class RateLimiter {
 
   async hit(rule: RateRule, subject: string): Promise<void> {
     const key = `rl:${rule.name}:${subject}`;
-    const count = await this.redis.incr(key);
-    if (count === 1) await this.redis.expire(key, rule.windowSeconds);
+    // One atomic round trip: create the window with its expiry if missing, then count.
+    const res = await this.redis.multi().set(key, 0, 'EX', rule.windowSeconds, 'NX').incr(key).exec();
+    const count = Number(res?.[1]?.[1] ?? 0);
     if (count > rule.limit) throw Errors.tooManyRequests();
   }
 
@@ -29,5 +30,7 @@ export const RATE_RULES = {
   loginPerIp: { name: 'login:ip', limit: 50, windowSeconds: 15 * 60 },
   signupPerIp: { name: 'signup:ip', limit: 20, windowSeconds: 60 * 60 },
   mfaPerSession: { name: 'mfa:session', limit: 6, windowSeconds: 15 * 60 },
+  // Per user too: signing in again must not reset the allowance for guessing codes.
+  mfaPerUser: { name: 'mfa:user', limit: 10, windowSeconds: 60 * 60 },
   forgotPerEmail: { name: 'forgot:email', limit: 5, windowSeconds: 60 * 60 },
 } satisfies Record<string, RateRule>;
