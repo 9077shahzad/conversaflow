@@ -201,3 +201,10 @@ test('the unsupported-browser notice exists in both languages and stays hidden i
     await expect(notice).toBeHidden();
   }
 });
+
+test('the preview-only notice is absent from normal builds', async ({ page }) => {
+  for (const locale of ['en', 'ar']) {
+    await page.goto(`/${locale}/sign-in`);
+    await expect(page.getByTestId('preview-notice')).toHaveCount(0);
+  }
+});

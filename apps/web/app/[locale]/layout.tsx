@@ -24,6 +24,10 @@ export default async function LocaleLayout({ children, params }: { children: Rea
       <body className={`min-h-screen antialiased ${locale === 'ar' ? 'font-arabic' : 'font-latin'}`}>
         {/* Shown only by browsers older than the supported set (ADR-031); supported browsers hide it in globals.css. */}
         <p className="browser-notice" role="note">{t(locale).browser.unsupported}</p>
+        {/* Netlify preview only (CF_PREVIEW_NOTICE=1 at build time): screens without the engine, so forms cannot work. */}
+        {process.env.CF_PREVIEW_NOTICE === '1' && (
+          <p className="preview-notice" role="status" data-testid="preview-notice">{t(locale).preview.notice}</p>
+        )}
         {children}
       </body>
     </html>

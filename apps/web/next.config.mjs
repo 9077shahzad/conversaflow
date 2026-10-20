@@ -4,6 +4,8 @@ const api = process.env.API_URL ?? 'http://127.0.0.1:4000';
 export default {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Build-time switch for the Netlify screens preview banner; empty in every other build.
+  env: { CF_PREVIEW_NOTICE: process.env.CF_PREVIEW_NOTICE ?? '' },
   // Pages render per request (CSP nonce). Without this, Next.js streams <title> and other metadata after the body,
   // so the title is briefly missing for assistive technology. Treat every client as needing metadata up front.
   htmlLimitedBots: /.*/,

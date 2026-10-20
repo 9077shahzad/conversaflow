@@ -67,3 +67,17 @@ html[lang='en'] body { line-height: 1.55; }
     display: none;
   }
 }
+
+/* Preview-only notice (Netlify screens preview, no engine connected). Always visible when built in. */
+.preview-notice {
+  display: block;
+  margin: 0;
+  padding: 12px 16px;
+  background: #fee2e2;
+  color: #0f172a;
+  border-bottom: 1px solid #b91c1c;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+}
