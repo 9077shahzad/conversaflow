@@ -15,8 +15,17 @@ const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_code
 const PILOT_WRITERS_ALLOWED = ['platform_enrol_pilot(text,uuid,integer,integer,text)', 'platform_end_pilot(text,uuid)'];
 /** Roles that may hold write rights on pilot enrolments and seat overrides: the table owner and cf_pilot (migration 0018). */
 const PILOT_TABLE_WRITERS = ['cf_owner', 'cf_pilot'];
-/** Privileged trigger functions reviewed and allowed although their owner could write those tables (billing guards). */
-const REVIEWED_TRIGGER_FUNCTIONS = ['subscription_new_is_trial()', 'subscription_requires_published_version()'];
+/**
+ * Privileged trigger functions reviewed and allowed although their owner could write those tables. Each is pinned to
+ * the md5 of its reviewed body, so replacing the body with one that writes fails the check until it is reviewed again.
+ * All four only read and raise an error; none writes.
+ */
+const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
+  'subscription_new_is_trial()': '46f9f782f26c9571854b68cbf2e024a9',
+  'subscription_requires_published_version()': 'b77f1d37d8a42636a07a6edc4e5d0eb7',
+  'plan_version_frozen()': '6565841f7b428834066e9bf433ef6b4f',
+  'plan_entitlement_frozen()': 'abf040ce198e92bf76e9d8325e40d5b9',
+};
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
@@ -155,15 +164,13 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
         AND pg_get_userbyid(p.proowner) = ANY($2::text[])
         AND NOT (p.oid::regprocedure::text = ANY($3::text[]))`, [LOGIN_ROLES, [...writers], PILOT_WRITERS_ALLOWED]);
     for (const w of pilotWriters.rows) problems.push(`${w.who} can run ${w.fn}, a privileged function able to write pilot or override records`);
-    // Privileged trigger functions owned by a writer, on a table a login role can change (recheck of candidate 3, L-D).
+    // Privileged trigger functions owned by a writer, on any table, unless reviewed (recheck of candidate 3, L-D and G2).
     const pilotTriggers = await client.query<{ trg: string; tbl: string }>(`
       SELECT t.tgname AS trg, t.tgrelid::regclass::text AS tbl
       FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+      -- on ANY table: a privileged function may write a table no login role can (final recheck of candidate 3, G2)
       WHERE NOT t.tgisinternal AND p.prosecdef AND pg_get_userbyid(p.proowner) = ANY($1::text[])
-        AND NOT (p.oid::regprocedure::text = ANY($3::text[]))
-        AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = ANY($2::text[])
-                    AND (has_table_privilege(r.oid, t.tgrelid, 'INSERT,UPDATE,DELETE,TRUNCATE')
-                         OR has_any_column_privilege(r.oid, t.tgrelid, 'INSERT,UPDATE')))`, [[...writers], LOGIN_ROLES, REVIEWED_TRIGGER_FUNCTIONS]);
+        AND coalesce($2::jsonb ->> (p.oid::regprocedure::text), '') <> md5(p.prosrc)`, [[...writers], JSON.stringify(REVIEWED_TRIGGER_FUNCTIONS)]);
     for (const x of pilotTriggers.rows) problems.push(`trigger ${x.trg} on ${x.tbl} runs as a role able to write pilot or override records`);
     // Rules run with the table owner's rights; none are used, so any rule is flagged. Views over the two tables too.
     const rules = await client.query<{ rule: string; tbl: string }>(`

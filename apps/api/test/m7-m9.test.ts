@@ -281,6 +281,12 @@ describe('M9: pilot invitations are single use, revocable and last 72 hours', ()
     await withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
       tx.query("UPDATE invitations SET expires_at = now() + interval '30 days' WHERE id = $1", [inv.body.invitationId]));
     expect(await left()).toBeLessThan(72.1);
+    // ...nor reset the clock by changing the creation time (final recheck of candidate 3, L-C).
+    await expect(withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
+      tx.query("UPDATE invitations SET created_at = now() + interval '1 year' WHERE id = $1", [inv.body.invitationId]))).rejects.toMatchObject({ code: '42501' });
+    await expect(withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
+      tx.query("INSERT INTO invitations (tenant_id, email, role_id, token_hash, invited_by, expires_at, created_at) SELECT $1, 'x@example.test', id, '\\x01', $2, now() + interval '1 day', now() + interval '1 year' FROM roles LIMIT 1",
+        [tenant, o.userId]))).rejects.toMatchObject({ code: '42501' });
   });
 
   it('a revoked invitation stops working at once; the list never shows tokens', async () => {
@@ -346,6 +352,8 @@ describe('CI guard: privileged functions that could write pilot or override reco
         AS $$ BEGIN INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (NEW.tenant_id, 'seats', 99, 'x', now() + interval '1 day'); RETURN NEW; END $$`);
       await owner.query('ALTER FUNCTION test_trg() OWNER TO cf_pilot');
       await owner.query('CREATE TRIGGER test_trg AFTER INSERT ON branches FOR EACH ROW EXECUTE FUNCTION test_trg()');
+      // G2: a privileged trigger on a table only privileged functions write.
+      await owner.query('CREATE TRIGGER test_trg_g2 AFTER INSERT ON mfa_attempts FOR EACH ROW EXECUTE FUNCTION test_trg()');
       await owner.query(`CREATE RULE test_rule AS ON INSERT TO teams DO ALSO
         INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (NEW.tenant_id, 'seats', 99, 'x', now() + interval '1 day')`);
       await owner.query('GRANT EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) TO cf_identity');
@@ -357,6 +365,7 @@ describe('CI guard: privileged functions that could write pilot or override reco
         'cf_app can run test_concat(uuid), a privileged function able to write pilot or override records',
         'cf_app can run zz_other.g(uuid), a privileged function able to write pilot or override records',
         'trigger test_trg on branches runs as a role able to write pilot or override records',
+        'trigger test_trg_g2 on mfa_attempts runs as a role able to write pilot or override records',
         "rule test_rule on teams: rules are not allowed (they run with the table owner's rights)",
         'cf_identity can issue two-step confirmation codes; only cf_notify may',
       ]));
@@ -368,9 +377,28 @@ describe('CI guard: privileged functions that could write pilot or override reco
       await owner.query('DROP FUNCTION IF EXISTS zz_helper_grant(uuid)');
       await owner.query('DROP RULE IF EXISTS test_rule ON teams');
       await owner.query('DROP TRIGGER IF EXISTS test_trg ON branches');
+      await owner.query('DROP TRIGGER IF EXISTS test_trg_g2 ON mfa_attempts');
       await owner.query('DROP FUNCTION IF EXISTS test_trg()');
       await owner.query('DROP SCHEMA IF EXISTS zz_other CASCADE');
       await owner.query('REVOKE EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) FROM cf_identity');
+      await owner.end();
+    }
+    expect(await checkIsolation(process.env.DATABASE_URL!)).toEqual([]);
+  });
+
+  it('a reviewed trigger function is allowed only with its reviewed body', async () => {
+    const owner = createPool(process.env.DATABASE_URL!, 1);
+    const original = (await owner.query<{ src: string }>(
+      "SELECT pg_get_functiondef('plan_version_frozen()'::regprocedure) AS src")).rows[0]!.src;
+    try {
+      // Same name and signature, new body that writes an override: must be flagged until reviewed again.
+      await owner.query(`CREATE OR REPLACE FUNCTION plan_version_frozen() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+        SET search_path = public, pg_temp AS $$ BEGIN UPDATE entitlement_overrides SET expires_at = now() WHERE false;
+        RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END; END $$`);
+      expect(await checkIsolation(process.env.DATABASE_URL!)).toContain(
+        'trigger plan_versions_frozen on plan_versions runs as a role able to write pilot or override records');
+    } finally {
+      await owner.query(original);
       await owner.end();
     }
     expect(await checkIsolation(process.env.DATABASE_URL!)).toEqual([]);
