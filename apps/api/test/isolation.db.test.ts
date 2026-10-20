@@ -4,7 +4,9 @@
  * and tries to reach B's rows from A's context in every tenant table the database contains.
  * The table list is read from the database catalogue, so a table added later is covered automatically.
  */
+import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { signBody } from '../src/modules/channels';
 import { withContext } from '@conversaflow/database';
 import { AutomationMetering } from '../src/modules/entitlements.service';
 import { addMember, asOwner, enableMfa, invite, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
@@ -27,6 +29,19 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await t.deps.db.query('SELECT 1'); // warm pool
   await withContext(t.deps.db, { tenantId, userId: owner.userId! }, (tx) =>
     tx.query("INSERT INTO usage_counters (tenant_id, key, period_start, used) VALUES ($1, 'ai_credits', date_trunc('month', now())::date, 5)", [tenantId]));
+  // Messaging (migration 0022): a sandbox channel, a signed inbound message and an opt-out, and an internal note.
+  const number = `iso${label}${Date.now().toString(36)}`;
+  await owner.post('/v1/channels', { provider: 'sandbox', providerNumberId: number, displayPhone: '+966500000000', label: `Channel ${label}` }).expect(201);
+  const wa = `9665${Date.now().toString().slice(-8)}`;
+  for (const [i, text] of ['Hello', 'STOP'].entries()) {
+    const raw = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: {
+      metadata: { phone_number_id: number }, contacts: [{ wa_id: wa, profile: { name: `Customer ${label}` } }],
+      messages: [{ from: wa, id: `wamid.iso.${label}.${i}`, timestamp: String(Math.floor(Date.now() / 1000) + i), type: 'text', text: { body: text } }] } }] }] });
+    await request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
+      .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, raw)).send(raw).expect(200);
+  }
+  const conv = (await owner.get('/v1/conversations?limit=1').expect(200)).body.items[0];
+  await owner.post(`/v1/conversations/${conv.id}/notes`, { body: `Note for ${label}` }).expect(201);
   // Settings, holidays, branches, teams and team members.
   await owner.post('/v1/settings/holidays', { day: '2026-12-25', name: `Holiday ${label}` }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;

@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { Module, type DynamicModule, type INestApplication } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, NestFactory } from '@nestjs/core';
 import cookieParser from 'cookie-parser';
+import { randomBytes } from 'node:crypto';
 import Redis from 'ioredis';
 import { createPool } from '@conversaflow/database';
 import { loadConfig, type Config } from './core/config';
@@ -10,8 +11,8 @@ import { MemoryMailer, SmtpMailer, type Mailer } from './core/mailer';
 import { RateLimiter } from './core/rate-limit';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 import {
-  AuditController, AuthController, BillingController, FilesController, HealthController, MeController, MembersController,
-  PlatformController, SettingsController, TenantsController,
+  AuditController, AuthController, BillingController, ChannelsController, FilesController, HealthController, InboxController,
+  MeController, MembersController, PlatformController, SettingsController, TenantsController, WebhooksController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -21,6 +22,8 @@ import { AuditService } from './modules/audit.service';
 import { AuthService } from './modules/auth.service';
 import { EntitlementsService } from './modules/entitlements.service';
 import { FilesService } from './modules/files.service';
+import { SandboxAdapter } from './modules/channels';
+import { InboxService } from './modules/inbox.service';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
 import { SettingsService } from './modules/settings.service';
@@ -52,7 +55,10 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
         : new SignatureScanner()),
     keys: overrides.keys ?? {
       fileLinks: Buffer.from(config.FILE_URL_SIGNING_KEY, 'base64'),
+      sandboxWebhook: config.SANDBOX_WEBHOOK_SECRET ?? randomBytes(32).toString('hex'),
+      sandboxVerifyToken: config.SANDBOX_VERIFY_TOKEN ?? randomBytes(24).toString('hex'),
     },
+    channels: overrides.channels ?? (config.CHANNEL_SANDBOX_ENABLED ? { sandbox: new SandboxAdapter() } : {}),
   };
 }
 
@@ -64,12 +70,13 @@ export class AppModule {
       module: AppModule,
       controllers: [
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
-        AuditController, FilesController, SettingsController, PlatformController,
+        AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
+        InboxController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
-        service(AuditService), service(FilesService), service(SettingsService),
+        service(AuditService), service(FilesService), service(SettingsService), service(InboxService),
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },
@@ -79,7 +86,8 @@ export class AppModule {
 }
 
 export async function createApp(deps: Deps, opts: { logSink?: LogSink } = {}): Promise<INestApplication> {
-  const app = await NestFactory.create(AppModule.forRoot(deps), { logger: ['error', 'warn'] });
+  // rawBody: webhook signatures are checked over the exact bytes received (CF-EXT-001).
+  const app = await NestFactory.create(AppModule.forRoot(deps), { logger: ['error', 'warn'], rawBody: true });
   app.use(requestLog(opts.logSink ?? (deps.config.NODE_ENV === 'test' ? () => undefined : undefined)));
   app.use(cookieParser());
   // API responses are data, never pages: nothing in them may run, be framed or be sniffed (ADR-028, review F3).

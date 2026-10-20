@@ -4,6 +4,7 @@ import type { Config } from './config';
 import type { Mailer } from './mailer';
 import type { RateLimiter } from './rate-limit';
 import type { FileScanner, ObjectStorage } from './storage';
+import type { ChannelAdapter, Provider } from '../modules/channels';
 
 /** Everything a service needs, built once at start-up (and by tests with fakes where useful). */
 export interface Deps {
@@ -19,7 +20,9 @@ export interface Deps {
   mailer: Mailer;
   storage: ObjectStorage;
   scanner: FileScanner;
-  keys: { fileLinks: Buffer };
+  keys: { fileLinks: Buffer; sandboxWebhook: string; sandboxVerifyToken: string };
+  /** Messaging adapters by provider. Only those configured here can send. */
+  channels: Partial<Record<Provider, ChannelAdapter>>;
 }
 
 /** The signed-in session, resolved from the cookie on every request. */

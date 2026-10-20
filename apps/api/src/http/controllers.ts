@@ -19,7 +19,14 @@ import { MembersService } from '../modules/members.service';
 import { PlatformService } from '../modules/platform.service';
 import { SettingsService } from '../modules/settings.service';
 import { TenantsService } from '../modules/tenants.service';
-import { AllowPendingMfa, CurrentActor, CurrentSession, Public, RequirePermission, SESSION_COOKIE, type CfRequest } from './guard';
+import { InboxService } from '../modules/inbox.service';
+import { verifySignature } from '../modules/channels';
+import type { Deps } from '../core/context';
+import { DEPS } from './tokens';
+import { AppError } from '../core/errors';
+import {
+  AllowPendingMfa, CurrentActor, CurrentSession, Public, RequirePermission, SESSION_COOKIE, SignedWebhook, type CfRequest,
+} from './guard';
 
 const client = (req: CfRequest): ClientInfo => ({ ip: req.ip ?? 'unknown', userAgent: req.headers['user-agent'] });
 
@@ -405,5 +412,78 @@ export class PlatformController {
   @Get('tenants/:id/members')
   async supportMembers(@CurrentSession() s: AuthSession, @Param('id') id: string) {
     return this.platform.supportView(await this.platform.requireStaff(s), id, 'members');
+  }
+}
+
+@Controller('v1/channels')
+export class ChannelsController {
+  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+
+  @RequirePermission('tenant.read') @Get()
+  list(@CurrentActor() actor: TenantActor) {
+    return this.inbox.listChannels(actor);
+  }
+
+  @RequirePermission('channels.manage') @Post() @HttpCode(201)
+  connect(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
+    return this.inbox.connectChannel(actor, body);
+  }
+}
+
+/**
+ * Sandbox webhook, shaped like Meta's: GET answers the subscription check, POST carries signed events.
+ * The live Cloud API endpoint will follow the same pattern with Meta's app secret.
+ */
+@Controller('v1/webhooks/sandbox')
+export class WebhooksController {
+  constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(DEPS) private readonly deps: Deps) {}
+
+  @SignedWebhook() @Get()
+  verify(@Query() q: Record<string, string>, @Res() res: Response) {
+    if (!this.deps.channels.sandbox) throw Errors.notFound('Webhook');
+    if (q['hub.mode'] !== 'subscribe' || q['hub.verify_token'] !== this.deps.keys.sandboxVerifyToken || !q['hub.challenge']) {
+      throw new AppError(403, 'forbidden', 'Verification failed.');
+    }
+    res.status(200).type('text/plain').send(String(q['hub.challenge']).slice(0, 200));
+  }
+
+  @SignedWebhook() @Post() @HttpCode(200)
+  async receive(@Req() req: CfRequest & { rawBody?: Buffer }, @Body() body: unknown) {
+    if (!this.deps.channels.sandbox) throw Errors.notFound('Webhook');
+    const sig = req.headers['x-hub-signature-256'];
+    if (!verifySignature(this.deps.keys.sandboxWebhook, req.rawBody, typeof sig === 'string' ? sig : undefined)) {
+      throw new AppError(401, 'invalid_signature', 'Signature check failed.');
+    }
+    return this.inbox.ingest('sandbox', body);
+  }
+}
+
+@Controller('v1/conversations')
+export class InboxController {
+  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+
+  @RequirePermission('inbox.reply') @Get()
+  list(@CurrentActor() actor: TenantActor, @Query() q: unknown) {
+    return this.inbox.list(actor, q);
+  }
+
+  @RequirePermission('inbox.reply') @Get(':id')
+  get(@CurrentActor() actor: TenantActor, @Param('id') id: string) {
+    return this.inbox.get(actor, id);
+  }
+
+  @RequirePermission('inbox.reply') @Post(':id/assign') @HttpCode(200)
+  assign(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.assign(actor, id, body);
+  }
+
+  @RequirePermission('inbox.reply') @Post(':id/notes') @HttpCode(201)
+  note(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.addNote(actor, id, body);
+  }
+
+  @RequirePermission('inbox.reply') @Post(':id/reply') @HttpCode(201)
+  reply(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.reply(actor, id, body);
   }
 }

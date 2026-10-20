@@ -13,11 +13,17 @@ export const SESSION_COOKIE = 'cf_session';
 const PUBLIC = 'cf:public';
 const PERMISSION = 'cf:permission';
 const ALLOW_PENDING_MFA = 'cf:allow-pending-mfa';
+const SIGNED_WEBHOOK = 'cf:signed-webhook';
 
 /** No sign-in needed (sign-up, login, password reset). */
 export const Public = () => SetMetadata(PUBLIC, true);
 /** Requires an active company and this permission there. Checked on the server for every request. */
 export const RequirePermission = (permission: Permission) => SetMetadata(PERMISSION, permission);
+/**
+ * A provider webhook: no session and no CSRF header, because the caller is a server, not a browser. The handler MUST
+ * verify the provider's signature over the raw body before reading anything (CF-EXT-001).
+ */
+export const SignedWebhook = () => SetMetadata(SIGNED_WEBHOOK, true);
 /** Reachable while the second sign-in step (MFA) is still outstanding. */
 export const AllowPendingMfa = () => SetMetadata(ALLOW_PENDING_MFA, true);
 
@@ -53,6 +59,7 @@ export class AccessGuard implements CanActivate {
 
     // Cross-site request forgery: state-changing calls must carry a custom header (which browsers will not
     // send cross-site without a CORS pre-flight we do not allow) and, when present, our own Origin.
+    if (meta<boolean>(SIGNED_WEBHOOK)) return true;
     if (!SAFE_METHODS.has(req.method)) {
       if (req.headers['x-requested-with'] !== 'conversaflow') throw new AppError(403, 'csrf', 'Request blocked.');
       const origin = req.headers.origin;
