@@ -1,7 +1,7 @@
 // Unit tests for the dependency-audit decision rules (node --test). Run: pnpm test:scripts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { evaluate } from './audit-deps.mjs';
+import { evaluate } from './audit-rules.mjs';
 
 const today = '2026-10-20';
 const adv = (id, severity, pkg = 'pkg') => ({

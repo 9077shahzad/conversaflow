@@ -21,9 +21,9 @@ export function middleware(req: NextRequest) {
   // Unknown top-level paths (no /en or /ar prefix) are shown the localised not-found page, rendered per request
   // with a nonce, instead of Next.js's prerendered one (recheck R4-5). The address bar keeps the original path.
   const first = pathname.split('/')[1] ?? '';
-  const rewriteTo = !isLocale(first) && !first.startsWith('_next')
-    ? new URL(`/${(req.headers.get('accept-language') ?? '').toLowerCase().startsWith('ar') ? 'ar' : 'en'}/__not-found`, req.url)
-    : null;
+  const preferred = (req.headers.get('accept-language') ?? '').toLowerCase().startsWith('ar') ? 'ar' : 'en';
+  const locale = isLocale(first) ? first : preferred;
+  const rewriteTo = !isLocale(first) && first !== '_next' ? new URL(`/${preferred}/__not-found`, req.url) : null;
   // Every other response (pages, not-found pages, prefetches) gets a fresh nonce. Next.js reads the policy from the
   // request headers and stamps the nonce on its own scripts; the same policy is sent to the browser.
   const nonce = newNonce();
@@ -31,6 +31,7 @@ export function middleware(req: NextRequest) {
   const headers = new Headers(req.headers);
   headers.set('x-nonce', nonce);
   headers.set('content-security-policy', csp);
+  headers.set('x-cf-locale', locale); // fixed value: 'en' or 'ar' only
   const res = rewriteTo ? NextResponse.rewrite(rewriteTo, { request: { headers } }) : NextResponse.next({ request: { headers } });
   res.headers.set('content-security-policy', csp);
   return res;

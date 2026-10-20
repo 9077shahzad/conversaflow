@@ -175,6 +175,8 @@ describe('candidate 2 follow-ups (independent recheck R4-3, R4-4)', () => {
     for (const sql of [
       "UPDATE entitlement_overrides SET expires_at = now() + interval '5 years' WHERE tenant_id = $1",
       'UPDATE entitlement_overrides SET expires_at = NULL WHERE tenant_id = $1',
+      // Review of candidate 2, L2: nor can it add a new, long-lived override.
+      "INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES ($1, 'seats', 50, 'long-lived', now() + interval '100 years')",
     ]) await expect(asOps(sql), sql).rejects.toMatchObject({ code: '42501' });
     const before = (await asOwner(t, tenant, (tx) => tx.query('SELECT expires_at FROM entitlement_overrides WHERE tenant_id = $1', [tenant]))).rows[0].expires_at;
     expect(new Date(before).getTime()).toBeGreaterThan(Date.now() + 80 * 86_400_000);

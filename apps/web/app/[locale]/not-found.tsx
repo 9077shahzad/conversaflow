@@ -1,16 +1,16 @@
-'use client';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { headers } from 'next/headers';
 import { AuthLayout } from '@/components/AuthLayout';
 import { isLocale, t, type Locale } from '@/lib/i18n';
 
 /**
- * Not-found page rendered per request inside the locale layout, so it carries the page nonce and no inline styles
- * (independent recheck R4-5). Unknown top-level paths are routed here by middleware.ts with status 404.
+ * Not-found page, rendered on the server per request inside the locale layout: it carries the page nonce, has no
+ * inline styles, and its heading is in the HTML before any script runs (recheck R4-5; review of candidate 2).
+ * middleware.ts passes the language in x-cf-locale, because not-found pages receive no route parameters.
  */
-export default function NotFound() {
-  const params = useParams<{ locale?: string }>();
-  const locale: Locale = params.locale && isLocale(params.locale) ? params.locale : 'en';
+export default async function NotFound() {
+  const requested = (await headers()).get('x-cf-locale') ?? 'en';
+  const locale: Locale = isLocale(requested) ? requested : 'en';
   const d = t(locale);
   return (
     <AuthLayout locale={locale}>

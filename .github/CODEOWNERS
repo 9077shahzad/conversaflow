@@ -3,11 +3,29 @@
 # team (Muhammad Shahzad plus a second Meronatic owner), then turn on "Require review from Code Owners" for main.
 #
 # Approving a dependency-audit exception is an edit to docs/security/audit-exceptions.json. This rule makes that edit
-# impossible to merge without an owner's review (independent recheck R4-2).
-/docs/security/                    @MERONATIC-ORG/security-owners
-# The same protection for what decides the security checks themselves.
-/.github/                          @MERONATIC-ORG/security-owners
-/scripts/audit-deps.mjs            @MERONATIC-ORG/security-owners
-/scripts/verify-clean-checkout.sh  @MERONATIC-ORG/security-owners
-/packages/database/migrations/     @MERONATIC-ORG/security-owners
-/packages/database/src/check-rls.ts @MERONATIC-ORG/security-owners
+# impossible to merge without an owner's review (recheck R4-2). The same applies to everything that decides what the
+# security checks run, or how access and the browser security policy are enforced (review of candidate 2, L3).
+
+# Exceptions and security records
+/docs/security/                         @MERONATIC-ORG/security-owners
+# CI, this file, and what the CI steps call
+/.github/                               @MERONATIC-ORG/security-owners
+/package.json                           @MERONATIC-ORG/security-owners
+/pnpm-lock.yaml                         @MERONATIC-ORG/security-owners
+/turbo.json                             @MERONATIC-ORG/security-owners
+/scripts/audit-deps.mjs                 @MERONATIC-ORG/security-owners
+/scripts/audit-rules.mjs                @MERONATIC-ORG/security-owners
+/scripts/audit-deps.test.mjs            @MERONATIC-ORG/security-owners
+/scripts/scan-secrets.mjs               @MERONATIC-ORG/security-owners
+/scripts/verify-clean-checkout.sh       @MERONATIC-ORG/security-owners
+/scripts/with-local-services.sh         @MERONATIC-ORG/security-owners
+# Database: migrations, roles and the isolation guard
+/packages/database/migrations/          @MERONATIC-ORG/security-owners
+/packages/database/src/check-rls.ts     @MERONATIC-ORG/security-owners
+/packages/database/package.json         @MERONATIC-ORG/security-owners
+# Access control and the browser security policy
+/apps/api/src/http/guard.ts             @MERONATIC-ORG/security-owners
+/apps/api/src/app.ts                    @MERONATIC-ORG/security-owners
+/apps/web/middleware.ts                 @MERONATIC-ORG/security-owners
+/apps/web/lib/csp.ts                    @MERONATIC-ORG/security-owners
+/apps/web/next.config.mjs               @MERONATIC-ORG/security-owners

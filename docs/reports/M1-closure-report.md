@@ -155,11 +155,11 @@ archived. Candidate 2 fixes:
 
 | Item | Fix in candidate 2 | Status |
 | --- | --- | --- |
-| R4-1 CI audit red on braces | Tailwind CSS 4 removed braces entirely (ADR-031); no exception needed; strict audit passes | Fixed — awaiting independent recheck |
+| R4-1 CI audit red on braces | Tailwind CSS 4 removed braces entirely (ADR-031); no exception needed; strict audit passes | **Verified** by the review of `e18d89f` |
 | R4-2 exception approval is a plain repo edit | `.github/CODEOWNERS` prepared for `docs/security/`, CI, migrations and security scripts; exception rules now require owner and review date (14 unit tests) | Prepared — **enforcement pending GitHub configuration** |
-| R4-3 enrolment race returned 500 | Unique-rule conflicts return 409; test with three simultaneous requests | Fixed — awaiting independent recheck |
-| R4-4 override expiry could be extended | Migration 0014: the operations role can only set an expiry no later than now | Fixed — awaiting independent recheck |
-| R4-5 static not-found page blocked by the policy | Localised not-found page rendered per request with the nonce; unknown paths routed to it with status 404; tests | Fixed — awaiting independent recheck |
+| R4-3 enrolment race returned 500 | Unique-rule conflicts return 409; test with three simultaneous requests | **Verified** by the review of `e18d89f` |
+| R4-4 override expiry could be extended | Migration 0014: the operations role can only set an expiry no later than now | **Verified** by the review of `e18d89f` |
+| R4-5 static not-found page blocked by the policy | Localised not-found page rendered per request with the nonce; unknown paths routed to it with status 404; tests | **Verified** by the review of `e18d89f` |
 
 ### Remaining findings — complete numbered list
 
@@ -170,8 +170,28 @@ archived. Candidate 2 fixes:
 | 3 | No procedure to reset two-step sign-in when a user loses the authenticator and all recovery codes | Found while preparing the risk note, 20 Oct | Low (availability; unsafe manual workaround) | Open | M8: two-person, audited reset in the console |
 | 4 | Pilot two-step rule is enforced in the API, not in the database | Targeted review I-4 | Informational | Accepted by design (ADR-029) | — |
 | 5 | Code-owner review of security files not enforced until GitHub is configured | R4-2 | Informational | Prepared | Owner: GitHub steps (A3) |
+| 6a | Not-found responses are sent as Next.js's error shell; the localised page appears once scripts run (status 404 and nonces correct) | Review of `e18d89f` | Informational | Accepted (framework behaviour in Next.js 15) | Revisit with a Next.js upgrade |
+| 6b | Next.js's own trailing-slash and double-slash redirects (308, no body, same origin) carry no security policy | Review of `e18d89f` | Informational | Accepted (sent before middleware) | — |
 | 6 | The CI guard would not notice a new definer function granted to a login role that writes pilot or override tables | Targeted review, item 4 | Informational | Open | Extend the guard to list functions each login role can run |
 | 7 | A malformed prefetch request (prefetch header without RSC) makes Next.js return a 500; the response carries the full policy | Targeted review F3 notes | Informational | Accepted (framework behaviour) | — |
 | 8 | `base32_decode` unused on the verification path | R2-2 | Informational | No action | — |
 | 9 | Authenticators set up before migration 0010 cannot pass TOTP (local databases only) | R2-3 | Informational | No action | — |
 | 10 | Hosted verification not yet possible: official signatures, file revocation, storage permissions, session expiry, backup restore | Owner conditions | — | Pending hosting approval | Owner: hosting decision (A4) |
+
+### Independent review of candidate 2 at `e18d89f` (20 Oct 2026)
+
+**Commit reviewed:** `e18d89fdf750f3c2fbd07e48d0310ab581f0799a` (fresh clone, frozen lockfile).
+**Reviewer's result:** 230/230 API tests (the pilot suite three more times); browser checks 10/10 on two runs;
+`test:scripts` 14/14; strict audit with no advisories; seed script under the operations role.
+**Verdict:** R4-1, R4-3, R4-4 and R4-5 verified; the Tailwind 4 lockfile has registry sources only with integrity
+hashes; no open redirect or route confusion through the new rewrite. No Critical, High or Medium findings.
+
+| # | Finding | Severity | Fix (final candidate 2 commit) | Status |
+| --- | --- | --- | --- | --- |
+| L1 | The audit script could exit 0 without running when started through a symlinked absolute path | Low | Decision rules moved to `scripts/audit-rules.mjs`; the audit script always runs (no main-module check). Tested through a symlink with the registry unreachable: exit 1 | Fixed — awaiting recheck |
+| L2 | The operations role could insert a new, long-lived seat override | Low | Migration 0015: inserted overrides must expire within 181 days; test added | Fixed — awaiting recheck |
+| L3 | CODEOWNERS missed files that decide what CI runs | Low | Added root `package.json`, lockfile, `turbo.json`, audit rules and tests, secret scan, local-services script, database `package.json`, guard, API app, middleware, CSP and Next config | Prepared — enforcement pending GitHub |
+| I-a | `/_nextfoo` skipped the not-found rewrite (prefix match) | Informational | Exact match on `_next`; test added | Fixed — awaiting recheck |
+| I-b | Not-found responses are Next.js's error shell until scripts run | Informational | Not-found page is now a server component; the shell is framework behaviour | Accepted (item 6a) |
+| I-c | Next.js's own 308 redirects carry no policy | Informational | — | Accepted (item 6b) |
+

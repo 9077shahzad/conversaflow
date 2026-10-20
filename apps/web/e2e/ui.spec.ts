@@ -175,7 +175,7 @@ test('not-found pages are rendered per request: 404 status, nonce on every scrip
   const context = await browser.newContext();
   await context.addInitScript(RECORD_CSP);
   const page = await context.newPage();
-  for (const [path, heading] of [['/nope', 'Page not found'], ['/en/no-such-page', 'Page not found'], ['/ar/لا-توجد', 'الصفحة غير موجودة']] as const) {
+  for (const [path, heading] of [['/nope', 'Page not found'], ['/_nextfoo', 'Page not found'], ['/en/no-such-page', 'Page not found'], ['/ar/لا-توجد', 'الصفحة غير موجودة']] as const) {
     const res = await page.goto(path);
     expect(res!.status(), path).toBe(404);
     const nonce = /'nonce-([A-Za-z0-9+/=]+)'/.exec(res!.headers()['content-security-policy'] ?? '')?.[1];
@@ -183,6 +183,9 @@ test('not-found pages are rendered per request: 404 status, nonce on every scrip
     const html = await res!.text();
     for (const tag of html.match(/<script\b[^>]*>/g) ?? []) expect(tag, `${path}: ${tag}`).toContain(`nonce="${nonce}"`);
     expect(html, path).not.toMatch(/\sstyle="/);
+    // Next.js 15 sends not-found responses of per-request pages as its error shell, with the localised page in the
+    // data stream; the content appears once scripts run (recorded as an informational framework limit).
+    expect(html, path).toContain(heading);
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(heading);
     expect(await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp), path).toEqual([]);
   }
