@@ -109,6 +109,14 @@ const REVIEWED_APP_POLICIES: Record<string, string> = {
   'users.users_self_update': '843978d964e680ac6bf8348a5ea6f7b6',
 };
 const STANDARD_COMPANY_RULE = '(tenant_id = app_tenant_id())';
+/**
+ * Non-built-in functions called by any row-security policy, pinned to md5(pg_get_functiondef || owner). Replacing
+ * app_tenant_id() would change what every company policy means without changing its text (review S2d).
+ */
+const REVIEWED_POLICY_FUNCTIONS: Record<string, string> = {
+  'app_tenant_id()': 'a95dafefef52596f5626256da15e70a6',
+  'app_user_id()': '105e6a33eb37c1cb5d012bcaa8223a86',
+};
 /** The only columns cf_channel may read (migration 0022). */
 const CHANNEL_ROUTING_COLUMNS = ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'];
 /** The only function cf_channel may own, pinned to the md5 of its reviewed definition. */
@@ -119,6 +127,9 @@ const CHANNEL_FUNCTIONS: Record<string, string> = {
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
   await client.connect();
+  // Fixed search path, so a function or operator planted in an earlier schema (e.g. "$user") cannot make a policy
+  // print as the standard rule while calling something else (review S2d).
+  await client.query('SET search_path = pg_catalog, public');
   const problems: string[] = [];
   try {
     const tenantTables = await client.query<{ table: string; rls: boolean; forced: boolean; policies: number }>(`
@@ -380,6 +391,25 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       if (!(p.key in REVIEWED_APP_POLICIES)) problems.push(`policy ${p.key} widens what the business role can see; it is not the standard company rule and not on the reviewed list`);
       else if (REVIEWED_APP_POLICIES[p.key] !== p.hash) problems.push(`policy ${p.key} has changed since it was reviewed`);
     }
+    // General rule 6 (review S2d): functions and operators used inside policies must be reviewed built-ins or pinned.
+    const policyFns = await client.query<{ fn: string; hash: string }>(`
+      SELECT DISTINCT pr.oid::regprocedure::text AS fn, md5(pg_get_functiondef(pr.oid) || pg_get_userbyid(pr.proowner)) AS hash
+      FROM pg_policy p JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_proc'::regclass
+      JOIN pg_proc pr ON pr.oid = d.refobjid WHERE pr.pronamespace <> 'pg_catalog'::regnamespace`);
+    for (const f of policyFns.rows) {
+      if (!(f.fn in REVIEWED_POLICY_FUNCTIONS)) problems.push(`function ${f.fn} is used by a row-security policy; it is not on the reviewed list`);
+      else if (REVIEWED_POLICY_FUNCTIONS[f.fn] !== f.hash) problems.push(`function ${f.fn} used by row-security policies has changed since it was reviewed (definition or owner)`);
+    }
+    for (const [fn, hash] of Object.entries(REVIEWED_POLICY_FUNCTIONS)) {
+      const r = await client.query<{ hash: string | null }>(
+        `SELECT (SELECT md5(pg_get_functiondef(p.oid) || pg_get_userbyid(p.proowner)) FROM pg_proc p WHERE p.oid = to_regprocedure($1)) AS hash`, [fn]);
+      if (r.rows[0]!.hash !== hash) problems.push(`function ${fn} used by row-security policies has changed since it was reviewed (definition or owner)`);
+    }
+    const policyOps = await client.query<{ op: string }>(`
+      SELECT DISTINCT o.oid::regoperator::text AS op
+      FROM pg_policy p JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_operator'::regclass
+      JOIN pg_operator o ON o.oid = d.refobjid WHERE o.oprnamespace <> 'pg_catalog'::regnamespace`);
+    for (const o of policyOps.rows) problems.push(`operator ${o.op} used by a row-security policy is not built in; not allowed`);
     // General rule 4: no view or materialised view may be built over a company table (views run with their owner's
     // rights and would bypass company row security for whoever can read the view).
     const companyViews = await client.query<{ v: string; t: string }>(`

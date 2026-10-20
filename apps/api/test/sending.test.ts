@@ -421,6 +421,29 @@ describe('strengthened CI guard (open Low finding)', () => {
     expect(await guard()).toEqual([]);
   });
 
+  it('review S2d: replacing the company-context function, or shadowing it in another schema, is flagged', async () => {
+    const original = (await t.ownerDb.query<{ src: string }>("SELECT pg_get_functiondef('public.app_tenant_id()'::regprocedure) AS src")).rows[0]!.src;
+    try {
+      await t.ownerDb.query(`CREATE OR REPLACE FUNCTION public.app_tenant_id() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$`);
+      expect(await guard()).toContain('function app_tenant_id() used by row-security policies has changed since it was reviewed (definition or owner)');
+    } finally {
+      await t.ownerDb.query(original);
+    }
+    expect(await guard()).toEqual([]);
+    try {
+      await t.ownerDb.query('CREATE SCHEMA zz_shadow');
+      await t.ownerDb.query(`CREATE FUNCTION zz_shadow.app_tenant_id() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$`);
+      await t.ownerDb.query('CREATE POLICY zz_shadowed ON contacts FOR SELECT TO cf_app USING (tenant_id = zz_shadow.app_tenant_id())');
+      expect(await guard()).toEqual(expect.arrayContaining([
+        'function zz_shadow.app_tenant_id() is used by a row-security policy; it is not on the reviewed list',
+        'policy contacts.zz_shadowed widens what the business role can see; it is not the standard company rule and not on the reviewed list',
+      ]));
+    } finally {
+      await reset(['DROP POLICY IF EXISTS zz_shadowed ON contacts', 'DROP SCHEMA IF EXISTS zz_shadow CASCADE']);
+    }
+    expect(await guard()).toEqual([]);
+  });
+
   it('review S2c: a restrictive policy or another standard company policy is allowed', async () => {
     try {
       await t.ownerDb.query('CREATE POLICY zz_narrow ON messages AS RESTRICTIVE FOR SELECT TO cf_app USING (true)');
