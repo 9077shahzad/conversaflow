@@ -8,6 +8,9 @@ import { MfaChallengeRequest, MfaConfirmRequest, VerifyEmailRequest } from '@con
 import type { AuthSession, TenantActor } from '../core/context';
 import { Errors } from '../core/errors';
 import { parse } from '../core/validate';
+import { z } from 'zod';
+
+const MfaActivateRequest = z.object({ code: z.string().trim().min(8).max(20) });
 import { AuditService } from '../modules/audit.service';
 import { AuthService, type ClientInfo } from '../modules/auth.service';
 import { EntitlementsService } from '../modules/entitlements.service';
@@ -63,9 +66,15 @@ export class AuthController {
     return this.auth.beginTotpSetup(session);
   }
 
-  @Post('mfa/totp/confirm')
+  @Post('mfa/totp/confirm') @HttpCode(202)
   totpConfirm(@Body() body: unknown, @CurrentSession() session: AuthSession) {
     return this.auth.confirmTotp(session, parse(MfaConfirmRequest, body).code);
+  }
+
+  /** The code from the confirmation email (M7), entered in the session that started set-up. */
+  @Post('mfa/totp/activate') @HttpCode(201)
+  totpActivate(@Body() body: unknown, @CurrentSession() session: AuthSession) {
+    return this.auth.activateTotp(session, parse(MfaActivateRequest, body).code);
   }
 
   @AllowPendingMfa() @Post('logout') @HttpCode(204)
@@ -154,6 +163,16 @@ export class MembersController {
   @RequirePermission('members.invite') @Post('invitations') @HttpCode(201)
   invite(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
     return this.members.invite(actor, body);
+  }
+
+  @RequirePermission('members.invite') @Get('invitations')
+  invitations(@CurrentActor() actor: TenantActor) {
+    return this.members.listInvitations(actor);
+  }
+
+  @RequirePermission('members.invite') @Delete('invitations/:id') @HttpCode(204)
+  async revokeInvitation(@CurrentActor() actor: TenantActor, @Param('id') id: string) {
+    await this.members.revokeInvitation(actor, id);
   }
 
   @Post('invitations/accept')
@@ -331,6 +350,21 @@ export class PlatformController {
   @Put('tenants/:id/features/:key') @HttpCode(204)
   async setFlag(@CurrentSession() s: AuthSession, @Param('id') id: string, @Param('key') key: string, @Body() body: unknown) {
     await this.platform.setFeatureFlag(await this.platform.requireStaff(s, 'platform_owner'), id, key, body);
+  }
+
+  @Post('mfa-resets') @HttpCode(201)
+  async requestMfaReset(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.requestMfaReset(await this.platform.requireStaff(s, 'platform_owner'), body);
+  }
+
+  @Post('mfa-resets/:id/approve') @HttpCode(200)
+  async approveMfaReset(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    return this.platform.approveMfaReset(await this.platform.requireStaff(s, 'platform_owner'), id);
+  }
+
+  @Post('mfa-resets/:id/reject') @HttpCode(204)
+  async rejectMfaReset(@CurrentSession() s: AuthSession, @Param('id') id: string) {
+    await this.platform.rejectMfaReset(await this.platform.requireStaff(s, 'platform_owner'), id);
   }
 
   @Post('tenants/:id/pilot') @HttpCode(201)

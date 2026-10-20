@@ -28,6 +28,7 @@
 /packages/database/src/check-rls.ts     @MERONATIC-ORG/security-owners
 /packages/database/package.json         @MERONATIC-ORG/security-owners
 /packages/database/src/migrate.ts       @MERONATIC-ORG/security-owners
+/packages/database/src/client.ts        @MERONATIC-ORG/security-owners
 # Access control and the browser security policy
 /apps/api/src/http/guard.ts             @MERONATIC-ORG/security-owners
 /apps/api/src/app.ts                    @MERONATIC-ORG/security-owners

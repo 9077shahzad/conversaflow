@@ -104,10 +104,21 @@ export async function newUser(t: TestApp, label: string): Promise<Client> {
   return c;
 }
 
-export async function enableMfa(c: Client): Promise<void> {
+/** Reads the 8-digit confirmation code from the newest email sent to `email` (M7). */
+export async function emailedMfaCode(t: TestApp, email: string): Promise<string> {
+  await t.deliver();
+  const m = t.mailer.lastTo(email)?.text.match(/confirmation code is (\d{4}) (\d{4})/);
+  if (!m) throw new Error(`No confirmation code mailed to ${email}`);
+  return `${m[1]}${m[2]}`;
+}
+
+/** Full set-up (M7): authenticator code, then the emailed confirmation code. Returns the recovery codes. */
+export async function enableMfa(c: Client): Promise<string[]> {
   const setup = await c.post('/v1/auth/mfa/totp/setup').expect(201);
   c.mfaSecret = setup.body.secret;
-  await c.post('/v1/auth/mfa/totp/confirm', { code: authenticator.generate(c.mfaSecret!) }).expect(201);
+  await c.post('/v1/auth/mfa/totp/confirm', { code: authenticator.generate(c.mfaSecret!) }).expect(202);
+  const res = await c.post('/v1/auth/mfa/totp/activate', { code: await emailedMfaCode(c.t, c.email) }).expect(201);
+  return res.body.recoveryCodes;
 }
 
 export async function newCompany(c: Client, label: string, planCode = 'starter'): Promise<string> {

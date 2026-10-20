@@ -212,3 +212,32 @@ left uncovered**, including files added later. L3: **verified** (enforcement sti
 Optional for the next candidate: add `packages/database/src/client.ts` (sets the company context row security
 relies on) to the security-code owners, alongside the guard and middleware (remaining findings list, item 11).
 
+## Candidate 3 — M7, M8, M9 and the two remaining review gaps (20 Oct 2026)
+
+Candidate 2 is preserved (`rc2-tested` = `58d156f`, `rc2-packaged` = `bec9ee8`, archived).
+
+| Item | Change | Evidence | Status |
+| --- | --- | --- | --- |
+| M7 | Authenticator activates only after an 8-digit code emailed to the verified address is entered in the session that started set-up (migration 0016, ADR-032) | `m7-m9.test.ts`: flow; session binding, single use, 15-minute expiry; guessing limit; E1 replay blocked; the sign-in role cannot read, create or redirect codes or change the address; a leaked code is useless in a forged session | Built — awaiting independent recheck |
+| M8 | Two-person, identity-checked, audited reset; every session ends; user notified (migration 0017, ADR-033, runbook) | Tests: support agent refused; document numbers refused; requester cannot approve; second owner approves; factors gone, sessions ended, notice, audit, re-enrolment with M7; one open request; rejection; expiry; no reset of own account; no login role can run the reset | Built — awaiting independent recheck. **Usable only with a second platform owner** |
+| M9 | Pilot invitations 72 hours; list and revoke; single use (ADR-034) | Tests: 72 h vs 7 days; revoked link refused at once; list never shows tokens; second use and expired link refused | Built — awaiting independent recheck |
+| Item 6 | CI guard flags privileged functions that could write pilot or override records (ADR-035) | Test with planted functions (direct and dynamic SQL) | Built — awaiting independent recheck |
+| Item 11 | `packages/database/src/client.ts` under code-owner coverage | CODEOWNERS | Prepared — enforcement pending GitHub |
+| Browsers | Unsupported-browser notice in both languages; Firefox and WebKit configured for CI | Browser check: notice hidden in Chromium; built CSS rule inspected | Built; Firefox/WebKit first run pending GitHub; real-device check pending staging |
+
+### Remaining findings — complete numbered list (candidate 3)
+
+| # | Finding | Severity | Status | What closes it |
+| --- | --- | --- | --- | --- |
+| 1 | Takeover before the user finishes set-up now needs the sign-in credential, database network access **and** the user's mailbox or cooperation (was: credential alone) | Accepted residual (pending owner acceptance) | Reduced by M7 and M9 | Signed acceptance; M6 before general availability |
+| 2 | The sign-in credential can lock a user out of two-step sign-in for one hour | Low | Open | M1–M3; M6 |
+| 3 | Recovery after losing authenticator and all codes | — | **Closed by M8**, but the process needs a second platform owner to be usable | Owner: name a second platform owner |
+| 4 | Pilot two-step rule enforced in the API, not the database | Informational | Accepted (ADR-029) | — |
+| 5 | Code-owner review not enforced until GitHub is configured | Informational | Prepared | Owner: GitHub set-up |
+| 6 | CI guard blind to privileged functions writing pilot/override records | — | **Closed** (ADR-035) | — |
+| 7 | Framework-level items: Next.js's own redirects and error shell; malformed prefetch 500 | Informational | Accepted | Revisit with Next.js upgrades |
+| 8 | `base32_decode` unused; pre-0010 factors cannot pass TOTP (local only) | Informational | No action | — |
+| 9 | Hosted verification (signatures, revocation, storage, session expiry, backup restore) | — | Pending | Owner: hosting decision |
+| 10 | Firefox/WebKit browser checks not yet run; real-device check pending | — | Configured | GitHub set-up (CI), then staging |
+| 11 | Database-context code outside code-owner coverage | — | **Closed** (enforcement pending GitHub) | — |
+

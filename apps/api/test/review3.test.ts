@@ -148,9 +148,7 @@ describe('N2: platform staff sessions honour user status, idle and absolute limi
 describe('N3: a recovery code works exactly once, even when two requests race', () => {
   it('two simultaneous uses of one code: exactly one succeeds', async () => {
     const c = await newUser(t, 'r3race');
-    const setup = await c.post('/v1/auth/mfa/totp/setup').expect(201);
-    const confirm = await c.post('/v1/auth/mfa/totp/confirm', { code: authenticator.generate(setup.body.secret) }).expect(201);
-    const code: string = confirm.body.recoveryCodes[0];
+    const code: string = (await enableMfa(c))[0]!;
     const [a, b] = [await forgeSession(c.userId!), await forgeSession(c.userId!)];
     const use = (token: string) => withContext(identity, { tenantId: null, userId: c.userId! }, async (tx) =>
       (await tx.query('SELECT auth_mfa_verify($1, NULL, $2) AS ok', [sha256(token), sha256(code)])).rows[0].ok as boolean);

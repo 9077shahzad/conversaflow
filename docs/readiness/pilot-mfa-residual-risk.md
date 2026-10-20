@@ -1,105 +1,79 @@
-# Pilot sign-in risk — what remains, and the acceptance still pending
+# Pilot sign-in risk — what remains after M7–M9, and the acceptance still pending
 
-Prepared 20 Oct 2026, revised for candidate 2.
+Revised for candidate 3, 20 Oct 2026.
 
-- **Approved:** mandatory two-step sign-in for every pilot user.
-- **Pending:** risk acceptance. This note explains the remaining risk before any signature is requested.
+- **Approved and built:** mandatory two-step sign-in for every pilot user.
+- **Built in candidate 3:** M7, M8 and M9.
+- **Pending:** risk acceptance. No signature is requested until you have read this note.
 
-It relates to:
-- ADR-027: the sign-in database credential;
-- ADR-029: pilot enrolment;
-- ADR-030: security notices;
-- recheck item R2-1.
+## 1. What changed
 
-## 1. The one remaining account-takeover path
+| Before candidate 3 | Now |
+| --- | --- |
+| A holder of the sign-in database credential could register their own authenticator on an account that had not yet set one up, and get a fully verified session | They can start set-up, but finishing needs an 8-digit code emailed to the account's **verified address**. The code is created only by the notification service, read from the stored address inside the database, valid for 15 minutes, single-use, and works only in the session that started set-up. The sign-in credential cannot read, create or redirect it, or change the address (all tested) |
+| No safe way to recover a user who lost the authenticator and all recovery codes | Two-person, identity-checked, audited reset that ends every session and tells the user (M8). **Usable only once a second platform owner exists** |
+| Pilot invitations valid for 7 days, no way to cancel one | Pilot invitations valid for 72 hours, single use, revocable at once (M9) |
 
-Two-step sign-in protects against a stolen or guessed **password**. What remains concerns the **sign-in database
-credential**: the password the API uses to reach the database when it checks sign-ins.
+## 2. The account-takeover path that remains
 
-**An attacker needs all three of these at once:**
+An attacker now needs **all four** of these at once:
 1. the sign-in database credential;
 2. a network route to the database;
-3. a target account that has **not yet** set up two-step sign-in.
-
-**The steps:**
-1. Look up the target's account from their email address.
-2. Open a session for that account directly in the database. This skips the password check, which runs in the API.
-3. Start two-step set-up and register the attacker's own authenticator app.
-4. Confirm it with a code from that app. The session is now fully verified, and the attacker can act as that user,
-   with that user's role in the company.
+3. an account that has not yet finished two-step set-up;
+4. **the user's mailbox**, or the user's cooperation in reading the emailed code aloud.
 
 **What the real user sees:**
-- They are signed out of every other session at the moment the attacker confirms set-up.
-- They receive the email "Two-step sign-in turned on", in English and Arabic, at their stored address.
-- They cannot set up two-step sign-in themselves, because it is already on.
+- the confirmation email ("Your code to finish setting up two-step sign-in", which says never to share it);
+- if the attacker succeeds: being signed out everywhere, the "Two-step sign-in turned on" notice, and being unable
+  to set up two-step sign-in themselves.
 
-These signals are **detection, not prevention** (mitigation M5, kept as a detection measure).
+The notices remain **detection** measures.
 
-**What the attacker cannot do with that credential:**
-- take over an account that already has two-step sign-in (a session stops at the code step);
-- read company data, files, two-step secrets or recovery codes;
-- mark a session as verified without a correct code;
-- act in the platform console;
-- create password-reset or email-verification links.
+**Accounts that already have two-step sign-in cannot be taken over this way.** With onboarding on a call (M4), the
+window before set-up is minutes. Invitations now lapse after 72 hours.
 
-All of this is tested, and the second independent recheck verified it at `6972acb`.
+## 3. Other exposure from the same credential (no takeover)
 
-**Other effects of the same credential (no takeover):**
-- **Lockout:** it could lock a user out of two-step sign-in for one hour by forcing 10 wrong codes.
-- **Password guessing:** it could read password hashes and attempt slow offline guessing (Argon2id). For pilot users a
-  cracked password alone opens nothing, because the second step is mandatory.
-- **Sessions:** it could sign users out.
+| # | Effect | Severity | Mitigation |
+| --- | --- | --- | --- |
+| R1 | Lock a user out of two-step sign-in for one hour, by forcing 10 wrong codes | Low | M1–M3 protect the credential; M6 removes it |
+| R2 | Read password hashes (Argon2id) and attempt slow offline guessing. A cracked password alone opens no pilot account | Low | M1–M3; strong password rules already enforced |
+| R3 | Sign users out, or keep a session's idle timer fresh (never past the 12-hour limit) | Low | M1–M3; M6 |
+| R4 | Start set-up on someone's account, which sends them an unexpected confirmation email | Nuisance | The email tells them to ignore it and reset their password |
 
-## 2. Protections during enrolment
+## 4. The reset process itself (M8)
 
-| Step | Protection in place |
-| --- | --- |
-| Sign-up | Email must be verified through a link only the notification service can create (the sign-in credential cannot) |
-| Invitation | Only people with permission to invite (Owners and Admins by default), and only once they have two-step sign-in, can invite. The link is single-use and expires after 7 days. It works only for the invited, verified email address |
-| Entering a pilot company | Nothing in the company is reachable until two-step sign-in is set up and used in that session. File links issued earlier also stop working |
-| Setting up two-step sign-in | Decided inside the database. Needs a real code. The secret is stored sealed. Set-up cannot be restarted over an existing one. All other sessions end. A notice is emailed |
-| The window that matters | From account creation until the user's own set-up. With onboarding on a call (M4), this is minutes |
+The reset is a powerful action, so it needs two different platform owners and an identity check recorded without
+document numbers. It is fully audited, ends every session and emails the user.
 
-## 3. Protections during recovery
+The remaining risk is two owners colluding or both being deceived; the runbook's "never" rules reduce the second.
+**Until a second platform owner is named, the reset cannot be used at all**, and a user who loses everything stays
+locked out.
 
-| Situation | What happens today |
-| --- | --- |
-| Forgotten password | A reset link goes to the stored address (single use, one hour). All sessions end. Two-step sign-in stays on, so the reset alone does not open the account |
-| Phone lost, recovery codes kept | Each of the 10 recovery codes works once, even if two requests race. Using one emails a notice |
-| Phone and all recovery codes lost | **Gap: there is no reset procedure yet.** Recovery would need a manual database operation, which is unsafe without a defined process. See M8 |
-| Someone else enabled two-step sign-in on the account | The user gets the notice email and cannot sign in. Recovery needs the M8 procedure |
+## 5. Mitigations, now and next
 
-## 4. Mitigations
+| # | Mitigation | Status |
+| --- | --- | --- |
+| M1 | Sign-in credential in the cloud secrets manager, readable only by the API service, rotated every 90 days and when staff change | Planned for staging (needs hosting decision) |
+| M2 | Database on a private network only, TLS required | Planned for staging |
+| M3 | Alert on any sign-in-role connection from outside the API service | To configure with hosting |
+| M4 | Pilot teams set up two-step sign-in on the onboarding call; platform staff confirm none is pending before data is loaded | Ready to adopt |
+| M5 | Email notices on set-up, recovery-code use and reset | **Built** (detection) |
+| M7 | Emailed confirmation code, bound to the session, before an authenticator activates | **Built** (candidate 3) |
+| M8 | Two-person, audited reset of two-step sign-in | **Built**; needs a second platform owner to be usable |
+| M9 | Pilot invitations: single use, revocable, 72 hours | **Built** (candidate 3) |
+| M6 | Move password checking into the database, so the credential alone never opens a session | Not built; about 3–5 days plus review; recommended before general availability |
 
-| # | Mitigation | Reduces | Status | Effort |
-| --- | --- | --- | --- | --- |
-| M1 | Sign-in credential held in the cloud secrets manager, readable only by the API service, rotated every 90 days and when staff change | All | Planned for staging | Included in hosting |
-| M2 | Database on a private network only, TLS required | All (removes requirement 2 for outsiders) | Planned for staging | Included |
-| M3 | Alert on any sign-in-role connection from outside the API service | All (detection) | To configure with hosting | About 1 hour |
-| M4 | Pilot teams set up two-step sign-in on the onboarding call; platform staff confirm none is pending before data is loaded | Takeover window | Ready to adopt | Part of onboarding |
-| M5 | Email notice on set-up and on recovery-code use, raised inside the database | Takeover (**detection**) | **Built and tested** | — |
-| M7 | **A new authenticator activates only after the user clicks a link emailed to their stored address.** The sign-in credential cannot create or read that link | Takeover (**prevention** unless the attacker also controls the mailbox) | Not built | About 1–2 days plus review |
-| M8 | Two-person, identity-checked, audited reset of two-step sign-in by platform owners, through the console | Recovery gap | Not built | About 1 day plus review |
-| M9 | Pilot invitations expire after 72 hours instead of 7 days | Takeover window | Not built (one setting) | Under an hour |
-| M6 | Move password checking into the database, so the credential alone never opens a session | Takeover, lockout, sign-out | Not built | About 3–5 days plus review |
+## 6. The acceptance (pending)
 
-**Recommendation:**
-- Build M7, M8 and M9 before the first pilot invitation; about 3 days in total.
-- Adopt M1–M4 with staging and onboarding.
-- Schedule M6 before general availability.
+When you are ready, the proposed wording is:
 
-With M7, takeover would need the database credential, network access **and** the user's mailbox. The acceptance
-below would then cover a far narrower risk.
-
-## 5. The acceptance (pending: not requested until you decide on M7–M9)
-
-Proposed wording, to be confirmed once you have chosen the mitigations:
-
-> For the controlled pilot only, I accept that a person holding the sign-in database credential and with network
-> access to the database could take over a pilot account that has not yet completed two-step set-up [and, once M7
-> is in place, who also controls that user's mailbox], could lock a user out of two-step sign-in for up to one hour,
-> and could attempt offline guessing of password hashes. This acceptance is conditional on M1–M5 [and M7–M9] being
-> in place before the first invitation. It ends at the close of the pilot or before general availability, whichever
-> comes first, when M6 is reviewed.
+> For the controlled pilot only, I accept that a person who holds the sign-in database credential, has network
+> access to the database **and** controls a pilot user's mailbox (or obtains the emailed code from the user) could
+> take over that user's account before the user finishes two-step set-up. I also accept that the same credential
+> could lock a user out of two-step sign-in for up to one hour and allow offline guessing of password hashes. This
+> acceptance is conditional on M1–M5 and M7–M9 being in place before the first invitation, and on a second platform
+> owner being named before the reset process (M8) is relied on. It ends at the close of the pilot or before general
+> availability, whichever comes first, when M6 is reviewed.
 >
 > Name, date: ______________________

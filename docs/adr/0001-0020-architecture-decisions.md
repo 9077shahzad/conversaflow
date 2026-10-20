@@ -165,3 +165,57 @@ about 2 px shorter each (form-control base styles). Accessibility and readabilit
 
 Consequence: Tailwind 4 needs Safari 16.4+ (iOS 16.4, March 2023), Chrome 111+ or Firefox 128+. Older browsers show
 the pages without styling. If pilot companies need older devices, revert this and approve a time-limited exception.
+
+## ADR-032 — New authenticators activate only with a code sent to the verified email address (M7)
+
+Owner decision 20 Oct 2026. Migration 0016. Set-up is three steps:
+1. Start set-up (unchanged).
+2. Enter a first authenticator code (`auth_mfa_confirm_code`). The factor is marked code-verified for that session
+   and an email request is queued.
+3. Enter the 8-digit code from that email in the **same session** (`auth_mfa_activate`). The factor is confirmed,
+   recovery codes are stored as hashes, the session is marked verified, every other session ends and the "turned
+   on" notice is sent.
+
+Only the notifier role can issue the code (`auth_mfa_issue_activation`). It reads the destination inside the database
+from the account's stored, **verified** address, never from the request. The code expires after 15 minutes, works
+once, is bound to the session that started set-up, and counts towards the guessing limit (10 wrong attempts an hour).
+The old one-step `auth_mfa_confirm` is withdrawn.
+
+The sign-in role cannot read, create or redirect codes, change the address or its verified flag, or queue the
+email. The CI guard checks the code issuer and treats the new tables as credentials.
+
+Residual: someone who controls both the sign-in credential and the user's mailbox, or who persuades the user to
+read the code to them, can still enrol their own authenticator. The email says never to share the code.
+
+## ADR-033 — Two-person reset of two-step sign-in (M8)
+
+Migration 0017. One platform owner records the identity check (a method from a fixed list, plus a short reference;
+six or more digits in a row are refused, so document numbers cannot be stored) and requests the reset. A
+**different** platform owner approves it within 24 hours.
+
+On approval, in the same transaction, `auth_mfa_reset_execute` (owned by cf_auth, runnable only by the
+operations role) does four things:
+- removes the user's authenticators, recovery codes, pending confirmation codes and attempt history;
+- ends every session;
+- queues a notice to the stored address;
+- writes the request and approval to the platform audit trail.
+
+Staff cannot request or approve a reset of their own account, and only one open request per user is allowed. No
+login role can run the reset directly (CI guard).
+
+**It cannot be used until a second platform owner exists** (runbook `docs/runbooks/mfa-reset.md`).
+
+## ADR-034 — Pilot invitations: single use, revocable, 72 hours (M9)
+
+Invitations to a company with a running pilot expire after 72 hours; other companies keep 7 days. Invitations were
+already single use and bound to the invited, verified address. People allowed to invite can now list pending
+invitations (tokens are never returned) and revoke one, which takes effect at once and is audited.
+
+## ADR-035 — CI guard: privileged functions that could write pilot or seat-override records
+
+The guard now lists, for every login role, the SECURITY DEFINER functions it can run whose owner can write
+`pilot_enrolments` or `entitlement_overrides`. It flags any whose body names those tables, calls the allowed
+writers, or runs dynamic SQL. The only exceptions are `platform_enrol_pilot` and `platform_end_pilot`, which only
+the console role may run. Tested with a planted function, written both directly and through dynamic SQL.
+`packages/database/src/client.ts` (company context for row security) is added to code-owner coverage, with
+enforcement still pending GitHub configuration.

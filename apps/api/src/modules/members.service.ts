@@ -7,7 +7,9 @@ import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { assertSeatAvailable } from './entitlements.service';
 
-const INVITE_TTL_DAYS = 7;
+const INVITE_TTL_HOURS = 7 * 24;
+/** M9: invitations to a pilot company expire after 72 hours. */
+const PILOT_INVITE_TTL_HOURS = 72;
 
 export class MembersService {
   constructor(private readonly deps: Deps) {}
@@ -35,6 +37,27 @@ export class MembersService {
     return found;
   }
 
+  /** Pending invitations of the company (no tokens are ever returned). */
+  async listInvitations(actor: TenantActor) {
+    return withContext(this.deps.db, actor, async (tx) => (await tx.query(
+      `SELECT i.id, i.email, r.key AS "roleKey", i.created_at AS "createdAt", i.expires_at AS "expiresAt"
+       FROM invitations i JOIN roles r ON r.id = i.role_id
+       WHERE i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now() ORDER BY i.created_at DESC`)).rows);
+  }
+
+  /** M9: revoke a pending invitation; its link stops working at once. */
+  async revokeInvitation(actor: TenantActor, id: string): Promise<void> {
+    if (!isUuid(id)) throw Errors.notFound('Invitation');
+    await withContext(this.deps.db, actor, async (tx) => {
+      const r = await tx.query('UPDATE invitations SET revoked_at = now() WHERE id = $1 AND accepted_at IS NULL AND revoked_at IS NULL', [id]);
+      if (r.rowCount !== 1) throw Errors.notFound('Invitation');
+      await AuditService.record(tx, {
+        tenantId: actor.tenantId, actorUserId: actor.userId, action: 'member.invitation_revoked', targetType: 'invitation',
+        targetId: id, ip: actor.ip, metadata: {},
+      });
+    });
+  }
+
   async invite(actor: TenantActor, input: unknown): Promise<{ invitationId: string; expiresAt: Date }> {
     const body = parse(InviteRequest, input);
     if (body.roleKey === 'owner' && !actor.roles.includes('owner')) throw Errors.forbidden('Only an Owner can invite another Owner.');
@@ -49,22 +72,24 @@ export class MembersService {
       );
       if (existing.rowCount) throw Errors.conflict('already_member', 'This person is already a member.');
       await tx.query('UPDATE invitations SET revoked_at = now() WHERE email = $1 AND accepted_at IS NULL AND revoked_at IS NULL', [body.email]);
+      const pilot = (await tx.query<{ r: boolean }>('SELECT tenant_requires_mfa() AS r')).rows[0]!.r;
+      const ttlHours = pilot ? PILOT_INVITE_TTL_HOURS : INVITE_TTL_HOURS;
       const { rows } = await tx.query<{ id: string; expires_at: Date }>(
         `INSERT INTO invitations (tenant_id, email, role_id, token_hash, invited_by, expires_at)
-         VALUES ($1, $2, $3, $4, $5, now() + make_interval(days => $6)) RETURNING id, expires_at`,
-        [actor.tenantId, body.email, role.rows[0].id, sha256(token), actor.userId, INVITE_TTL_DAYS],
+         VALUES ($1, $2, $3, $4, $5, now() + make_interval(hours => $6)) RETURNING id, expires_at`,
+        [actor.tenantId, body.email, role.rows[0].id, sha256(token), actor.userId, ttlHours],
       );
       await AuditService.record(tx, {
         tenantId: actor.tenantId, actorUserId: actor.userId, action: 'member.invited', targetType: 'invitation',
         targetId: rows[0]!.id, ip: actor.ip, metadata: { role: body.roleKey },
       });
       const company = await tx.query<{ legal_name: string }>('SELECT legal_name FROM tenants WHERE id = $1', [actor.tenantId]);
-      return { invitationId: rows[0]!.id, expiresAt: rows[0]!.expires_at, company: company.rows[0]!.legal_name };
+      return { invitationId: rows[0]!.id, expiresAt: rows[0]!.expires_at, company: company.rows[0]!.legal_name, ttlHours };
     });
     await this.deps.mailer.send({
       to: body.email,
       subject: `You are invited to ${result.company} on ConversaFlow`,
-      text: `Accept the invitation within ${INVITE_TTL_DAYS} days: ${this.deps.config.APP_ORIGIN}/invite?token=${token}`,
+      text: `Accept the invitation within ${result.ttlHours === PILOT_INVITE_TTL_HOURS ? '72 hours' : '7 days'}. The link works once: ${this.deps.config.APP_ORIGIN}/invite?token=${token}`,
     });
     return { invitationId: result.invitationId, expiresAt: result.expiresAt };
   }

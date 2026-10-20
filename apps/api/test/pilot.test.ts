@@ -4,9 +4,7 @@
  *  - each pilot company gets a separate 10-seat allowance; the standard trial allowance stays unchanged.
  * Only a platform owner can enrol or end a pilot. Companies can read their enrolment but not change it.
  */
-import { authenticator } from 'otplib';
 import { createPool, withContext } from '@conversaflow/database';
-import { sha256 } from '../src/core/crypto';
 import { checkIsolation } from '@conversaflow/database/dist/check-rls';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -207,10 +205,9 @@ describe('security notices (mitigation M5, migration 0012)', () => {
     const u = await newUser(t, 'notice');
     await t.deliver();
     const before = t.mailer.sent.length;
-    const setup = await u.post('/v1/auth/mfa/totp/setup').expect(201);
-    const codes: string[] = (await u.post('/v1/auth/mfa/totp/confirm', { code: authenticator.generate(setup.body.secret) }).expect(201)).body.recoveryCodes;
+    const codes = await enableMfa(u);
     await t.deliver();
-    const mail = t.mailer.sent.slice(before).find((m) => m.to === u.email);
+    const mail = t.mailer.sent.slice(before).find((m) => m.to === u.email && m.subject === 'Two-step sign-in turned on');
     expect(mail?.subject).toBe('Two-step sign-in turned on');
     expect(mail?.text).toContain('If this was not you');
     expect(mail?.text).toContain('تم تفعيل التحقق بخطوتين');
@@ -225,23 +222,9 @@ describe('security notices (mitigation M5, migration 0012)', () => {
     expect(t.mailer.lastTo(u.email)?.subject).toBe('Recovery code used');
   }, 45_000);
 
-  it('the sign-in role can neither queue a forged notice nor enable two-step sign-in silently', async () => {
+  it('the sign-in role cannot queue a forged notice', async () => {
     await expect(withContext(t.deps.identityDb, { tenantId: null, userId: null }, (tx) =>
       tx.query("SELECT auth_request_email('mfa_enabled', 'victim@example.test')"))).rejects.toMatchObject({ code: '42501' });
-    // Replays E1 from the residual-risk note: a forged session for a user without two-step sign-in enrols the
-    // attacker's authenticator. It succeeds (the accepted residual) but the real owner is emailed.
-    const victim = await newUser(t, 'e1victim');
-    await t.deliver();
-    const token = 'forged-' + Math.random().toString(36).slice(2);
-    await withContext(t.deps.identityDb, { tenantId: null, userId: victim.userId! }, (tx) =>
-      tx.query('SELECT auth_open_session($1, $2, NULL, NULL, NULL, 12)', [victim.userId, sha256(token)]));
-    const secret: string = await withContext(t.deps.identityDb, { tenantId: null, userId: victim.userId! }, async (tx) =>
-      (await tx.query('SELECT auth_mfa_begin($1) AS s', [sha256(token)])).rows[0].s);
-    const hashes = Array.from({ length: 10 }, (_, i) => sha256(`rc-${i}-${token}`));
-    const ok = await withContext(t.deps.identityDb, { tenantId: null, userId: victim.userId! }, async (tx) =>
-      (await tx.query('SELECT auth_mfa_confirm($1, $2, $3) AS ok', [sha256(token), authenticator.generate(secret), hashes])).rows[0].ok);
-    expect(ok).toBe(true);
-    await t.deliver();
-    expect(t.mailer.lastTo(victim.email)?.subject).toBe('Two-step sign-in turned on');
+    // The E1 takeover replay now lives in m7-m9.test.ts, where M7 blocks it.
   });
 });

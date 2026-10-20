@@ -13,7 +13,15 @@ export default defineConfig({
   workers: 1,
   reporter: [['list']],
   globalSetup: './e2e/global-setup.ts',
-  use: { baseURL: `http://127.0.0.1:${WEB}`, launchOptions },
+  use: { baseURL: `http://127.0.0.1:${WEB}` },
+  // Supported browsers (ADR-031): Chromium everywhere; Firefox and WebKit (Safari's engine) in CI, where
+  // PW_ALL_BROWSERS=1 and the browsers are installed. This build machine has Chromium only.
+  projects: [
+    { name: 'chromium', use: { browserName: 'chromium', launchOptions } },
+    ...(process.env.PW_ALL_BROWSERS === '1'
+      ? [{ name: 'firefox', use: { browserName: 'firefox' as const } }, { name: 'webkit', use: { browserName: 'webkit' as const } }]
+      : []),
+  ],
   webServer: [
     {
       command: `node ../api/dist/main.js`,

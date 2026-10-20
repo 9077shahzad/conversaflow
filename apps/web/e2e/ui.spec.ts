@@ -191,3 +191,13 @@ test('not-found pages are rendered per request: 404 status, nonce on every scrip
   }
   await context.close();
 });
+
+test('the unsupported-browser notice exists in both languages and stays hidden in a supported browser', async ({ page }) => {
+  for (const [locale, words] of [['en', 'too old for ConversaFlow'], ['ar', 'متصفحك قديم']] as const) {
+    await page.goto(`/${locale}/sign-in`);
+    const notice = page.locator('.browser-notice');
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText(words);
+    await expect(notice).toBeHidden();
+  }
+});

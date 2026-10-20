@@ -121,9 +121,7 @@ describe('two-step verification (TOTP)', () => {
 
   it('recovery codes work exactly once', async () => {
     const c = await newUser(t, 'recover');
-    const setup = await c.post('/v1/auth/mfa/totp/setup').expect(201);
-    const confirm = await c.post('/v1/auth/mfa/totp/confirm', { code: authenticator.generate(setup.body.secret) }).expect(201);
-    const codes: string[] = confirm.body.recoveryCodes;
+    const codes = await enableMfa(c);
     expect(codes).toHaveLength(10);
 
     await clearRateLimits(t);

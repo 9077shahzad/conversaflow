@@ -19,6 +19,13 @@ const SupportRequest = z.object({
   minutes: z.number().int().min(5).max(240),
 });
 const FlagRequest = z.object({ enabled: z.boolean() });
+const MfaResetRequest = z.object({
+  email: z.string().trim().email().max(320),
+  reason: z.string().trim().min(20, 'Explain the situation (at least 20 characters)').max(1000),
+  identityMethod: z.enum(['video_call_photo_id', 'callback_known_number', 'company_owner_confirmation', 'in_person']),
+  identityReference: z.string().trim().min(10).max(200)
+    .refine((v) => !/[0-9]{6,}/.test(v), 'Do not record document or account numbers; describe the check instead'),
+});
 const PilotRequest = z.object({
   seats: z.number().int().min(1).max(50).default(10),
   days: z.number().int().min(7).max(180).default(90),
@@ -99,6 +106,26 @@ export class PlatformService {
   async endPilot(staff: StaffActor, tenantId: string) {
     if (!isUuid(tenantId)) throw Errors.notFound('Company');
     await this.run(staff, (tx) => tx.query('SELECT platform_end_pilot($1, $2)', [staff.token, tenantId]));
+  }
+
+  /** M8 step 1: a platform owner records the identity check and requests a two-step reset for a user. */
+  async requestMfaReset(staff: StaffActor, input: unknown) {
+    const b = parse(MfaResetRequest, input);
+    const id = await this.run(staff, async (tx) => (await tx.query<{ id: string }>(
+      'SELECT platform_request_mfa_reset($1, $2, $3, $4, $5) AS id', [staff.token, b.email, b.reason, b.identityMethod, b.identityReference])).rows[0]!.id);
+    return { requestId: id, status: 'awaiting_second_approver', expiresInHours: 24 };
+  }
+
+  /** M8 step 2: a DIFFERENT platform owner approves; the reset happens in the same transaction. */
+  async approveMfaReset(staff: StaffActor, requestId: string) {
+    if (!isUuid(requestId)) throw Errors.notFound('Request');
+    await this.run(staff, (tx) => tx.query('SELECT platform_approve_mfa_reset($1, $2)', [staff.token, requestId]));
+    return { status: 'reset_done' };
+  }
+
+  async rejectMfaReset(staff: StaffActor, requestId: string) {
+    if (!isUuid(requestId)) throw Errors.notFound('Request');
+    await this.run(staff, (tx) => tx.query('SELECT platform_reject_mfa_reset($1, $2)', [staff.token, requestId]));
   }
 
   async requestSupport(staff: StaffActor, input: unknown) {

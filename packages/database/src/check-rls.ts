@@ -10,7 +10,9 @@
 import pg from 'pg';
 
 const LOGIN_ROLES = ['cf_app', 'cf_identity', 'cf_notify', 'cf_platform'];
-const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests', 'auth_keys', 'mfa_attempts'];
+const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests', 'auth_keys', 'mfa_attempts', 'mfa_activation_codes', 'mfa_reset_requests'];
+/** The only privileged functions allowed to write pilot or seat-override records, both token-bound to a platform owner. */
+const PILOT_WRITERS_ALLOWED = ['platform_enrol_pilot', 'platform_end_pilot'];
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
@@ -119,11 +121,43 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       if (rows[0]!.pilot) problems.push(`${roleName} can write pilot enrolments`);
       if (rows[0]!.ovr) problems.push(`${roleName} can write limit overrides`);
     }
+    // ...nor through a privileged function: any SECURITY DEFINER function a login role can run whose owner can write
+    // those tables is flagged unless it is one of the token-bound console actions (independent review, item 6).
+    const pilotWriters = await client.query<{ who: string; fn: string }>(`
+      SELECT r.rolname AS who, p.oid::regprocedure::text AS fn
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      CROSS JOIN pg_roles r
+      WHERE n.nspname = 'public' AND p.prosecdef AND p.prorettype <> 'trigger'::regtype
+        AND r.rolname = ANY($1::text[])
+        AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+        AND (has_table_privilege(p.proowner, 'pilot_enrolments', 'INSERT,UPDATE,DELETE,TRUNCATE')
+             OR has_any_column_privilege(p.proowner, 'pilot_enrolments', 'INSERT,UPDATE')
+             OR has_table_privilege(p.proowner, 'entitlement_overrides', 'INSERT,UPDATE,DELETE,TRUNCATE')
+             OR has_any_column_privilege(p.proowner, 'entitlement_overrides', 'INSERT,UPDATE'))
+        AND NOT (p.proname = ANY($2::text[]))
+        -- the body touches those tables, calls an allowed writer, or runs dynamic SQL that could hide either
+        AND (p.prosrc ~* '(pilot_enrolments|entitlement_overrides|platform_enrol_pilot|platform_end_pilot)'
+             OR p.prosrc ~* '\\mEXECUTE\\M\\s+(format|''|\\$|[a-z_]+\\s*(\\|\\||;))')`, [LOGIN_ROLES, PILOT_WRITERS_ALLOWED]);
+    for (const w of pilotWriters.rows) problems.push(`${w.who} can run ${w.fn}, a privileged function able to write pilot or override records`);
+    const allowedRunners = await client.query<{ who: string; fn: string }>(`
+      SELECT r.rolname AS who, p.proname AS fn FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
+      WHERE n.nspname = 'public' AND p.proname = ANY($2::text[]) AND r.rolname = ANY($1::text[]) AND r.rolname <> 'cf_platform'
+        AND has_function_privilege(r.oid, p.oid, 'EXECUTE')`, [LOGIN_ROLES, PILOT_WRITERS_ALLOWED]);
+    for (const w of allowedRunners.rows) problems.push(`${w.who} can run ${w.fn}; only the platform console role may`);
     if (billing.rows[0]!.sess) problems.push('cf_identity can insert sessions directly; it must use auth_open_session');
     const minting = await client.query<{ who: string }>(`
       SELECT r.rolname AS who FROM pg_roles r
       WHERE r.rolname IN ('cf_app', 'cf_identity') AND has_function_privilege(r.oid, 'auth_issue_token(uuid,text,bytea,interval)', 'EXECUTE')`);
     for (const m of minting.rows) problems.push(`${m.who} can mint email tokens; only cf_notify may`);
+    const codeMinting = await client.query<{ who: string }>(`
+      SELECT r.rolname AS who FROM pg_roles r
+      WHERE r.rolname = ANY($1::text[]) AND r.rolname <> 'cf_notify'
+        AND has_function_privilege(r.oid, 'auth_mfa_issue_activation(uuid,bytea)', 'EXECUTE')`, [LOGIN_ROLES]);
+    for (const m of codeMinting.rows) problems.push(`${m.who} can issue two-step confirmation codes; only cf_notify may`);
+    const resetRunners = await client.query<{ who: string }>(`
+      SELECT r.rolname AS who FROM pg_roles r
+      WHERE r.rolname = ANY($1::text[]) AND has_function_privilege(r.oid, 'auth_mfa_reset_execute(uuid)', 'EXECUTE')`, [LOGIN_ROLES]);
+    for (const m of resetRunners.rows) problems.push(`${m.who} can reset two-step sign-in directly; only the two-person console action may`);
     const notifyReads = await client.query<{ t: string }>(`
       SELECT c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'auth_email_requests'

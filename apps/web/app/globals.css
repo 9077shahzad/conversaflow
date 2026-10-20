@@ -49,3 +49,21 @@ html[lang='en'] body { line-height: 1.55; }
   background: radial-gradient(60% 50% at 80% 10%, rgba(16, 185, 129, 0.35), transparent),
     radial-gradient(50% 60% at 10% 90%, rgba(14, 116, 144, 0.55), transparent);
 }
+
+/* Unsupported-browser notice (ADR-031). Visible by default; hidden in browsers that support relative colour syntax,
+   which arrived with Safari 16.4, Firefox 128 and Chrome 119, closely matching Tailwind CSS 4's minimum versions. */
+.browser-notice {
+  display: block;
+  margin: 0;
+  padding: 12px 16px;
+  background: #fef3c7;
+  color: #0f172a;
+  border-bottom: 1px solid #f59e0b;
+  font-size: 16px;
+  line-height: 1.5;
+}
+@supports (color: rgb(from red r g b)) {
+  .browser-notice {
+    display: none;
+  }
+}

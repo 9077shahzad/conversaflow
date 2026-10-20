@@ -154,14 +154,27 @@ export class AuthService {
   }
 
   /**
-   * Confirms TOTP with a first code and returns single-use recovery codes (shown once). The database stores only
-   * their hashes, marks this session verified and signs out every other session (opened without MFA).
+   * Step 2 of set-up: checks the first authenticator code. Nothing is switched on yet: the database emails a
+   * confirmation code to the account's verified address (M7), to be entered in this same session.
    */
-  async confirmTotp(session: AuthSession, code: string): Promise<{ recoveryCodes: string[] }> {
+  async confirmTotp(session: AuthSession, code: string): Promise<{ status: 'confirmation_email_sent'; expiresInMinutes: number }> {
+    const ok = await this.mfaCall(session, async (tx, tokenHash) =>
+      (await tx.query<{ ok: boolean }>('SELECT auth_mfa_confirm_code($1, $2) AS ok', [tokenHash, code])).rows[0]!.ok);
+    if (!ok) throw Errors.badRequest('That code is not correct. Check the time on your phone and try again.');
+    return { status: 'confirmation_email_sent', expiresInMinutes: 15 };
+  }
+
+  /**
+   * Step 3 of set-up: the code from the confirmation email. Switches two-step verification on, returns single-use
+   * recovery codes (shown once; only their hashes are stored), and signs out every other session.
+   */
+  async activateTotp(session: AuthSession, emailCode: string): Promise<{ recoveryCodes: string[] }> {
+    const digits = String(emailCode ?? '').replace(/\D/g, '');
+    if (digits.length !== 8) throw Errors.badRequest('Enter the 8-digit code from the confirmation email.');
     const codes = Array.from({ length: RECOVERY_CODES }, () => randomToken(8).replace(/[-_]/g, 'x').slice(0, 10).toLowerCase());
     const ok = await this.mfaCall(session, async (tx, tokenHash) =>
-      (await tx.query<{ ok: boolean }>('SELECT auth_mfa_confirm($1, $2, $3) AS ok', [tokenHash, code, codes.map((c) => sha256(c))])).rows[0]!.ok);
-    if (!ok) throw Errors.badRequest('That code is not correct. Check the time on your phone and try again.');
+      (await tx.query<{ ok: boolean }>('SELECT auth_mfa_activate($1, $2, $3) AS ok', [tokenHash, sha256(digits), codes.map((c) => sha256(c))])).rows[0]!.ok);
+    if (!ok) throw Errors.badRequest('That confirmation code is not correct or has expired. Request a new one by entering an authenticator code again.');
     return { recoveryCodes: codes };
   }
 
