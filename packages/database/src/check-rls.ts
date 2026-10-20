@@ -17,14 +17,15 @@ const PILOT_WRITERS_ALLOWED = ['platform_enrol_pilot(text,uuid,integer,integer,t
 const PILOT_TABLE_WRITERS = ['cf_owner', 'cf_pilot'];
 /**
  * Privileged trigger functions reviewed and allowed although their owner could write those tables. Each is pinned to
- * the md5 of its reviewed body, so replacing the body with one that writes fails the check until it is reviewed again.
+ * the md5 of its whole reviewed definition plus owner, so changing the body, search_path, security mode, language or
+ * owner fails the check until it is reviewed again.
  * All four only read and raise an error; none writes.
  */
 const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
-  'subscription_new_is_trial()': '46f9f782f26c9571854b68cbf2e024a9',
-  'subscription_requires_published_version()': 'b77f1d37d8a42636a07a6edc4e5d0eb7',
-  'plan_version_frozen()': '6565841f7b428834066e9bf433ef6b4f',
-  'plan_entitlement_frozen()': 'abf040ce198e92bf76e9d8325e40d5b9',
+  'subscription_new_is_trial()': '163ea6cbdfa8f6081168bc31f0b289ba',
+  'subscription_requires_published_version()': '91d8dcefb333593401818e36724de217',
+  'plan_version_frozen()': 'd73bdba3ac8a68ba549b73a4f67572e0',
+  'plan_entitlement_frozen()': '43b3204094b27f3fd863f73862cde1e0',
 };
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
@@ -170,7 +171,9 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
       -- on ANY table: a privileged function may write a table no login role can (final recheck of candidate 3, G2)
       WHERE NOT t.tgisinternal AND p.prosecdef AND pg_get_userbyid(p.proowner) = ANY($1::text[])
-        AND coalesce($2::jsonb ->> (p.oid::regprocedure::text), '') <> md5(p.prosrc)`, [[...writers], JSON.stringify(REVIEWED_TRIGGER_FUNCTIONS)]);
+        -- pinned to the whole definition (body, settings such as search_path, SECURITY DEFINER, language) and the
+        -- owner, so changing any of them fails the check (targeted recheck of 6f78a89)
+        AND coalesce($2::jsonb ->> (p.oid::regprocedure::text), '') <> md5(pg_get_functiondef(p.oid) || pg_get_userbyid(p.proowner))`, [[...writers], JSON.stringify(REVIEWED_TRIGGER_FUNCTIONS)]);
     for (const x of pilotTriggers.rows) problems.push(`trigger ${x.trg} on ${x.tbl} runs as a role able to write pilot or override records`);
     // Rules run with the table owner's rights; none are used, so any rule is flagged. Views over the two tables too.
     const rules = await client.query<{ rule: string; tbl: string }>(`

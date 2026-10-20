@@ -287,6 +287,9 @@ describe('M9: pilot invitations are single use, revocable and last 72 hours', ()
     await expect(withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
       tx.query("INSERT INTO invitations (tenant_id, email, role_id, token_hash, invited_by, expires_at, created_at) SELECT $1, 'x@example.test', id, '\\x01', $2, now() + interval '1 day', now() + interval '1 year' FROM roles LIMIT 1",
         [tenant, o.userId]))).rejects.toMatchObject({ code: '42501' });
+    // ...nor delete and re-insert it to get a fresh 72 hours on the same link (recheck of 6f78a89).
+    await expect(withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
+      tx.query('DELETE FROM invitations WHERE id = $1', [inv.body.invitationId]))).rejects.toMatchObject({ code: '42501' });
   });
 
   it('a revoked invitation stops working at once; the list never shows tokens', async () => {
@@ -381,6 +384,18 @@ describe('CI guard: privileged functions that could write pilot or override reco
       await owner.query('DROP FUNCTION IF EXISTS test_trg()');
       await owner.query('DROP SCHEMA IF EXISTS zz_other CASCADE');
       await owner.query('REVOKE EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) FROM cf_identity');
+      await owner.end();
+    }
+    expect(await checkIsolation(process.env.DATABASE_URL!)).toEqual([]);
+  });
+
+  it('a reviewed trigger function loses its approval if its settings change (search_path)', async () => {
+    const owner = createPool(process.env.DATABASE_URL!, 1);
+    try {
+      await owner.query('ALTER FUNCTION subscription_new_is_trial() SET search_path = pg_temp, public');
+      expect((await checkIsolation(process.env.DATABASE_URL!)).some((p) => p.includes('runs as a role able to write pilot or override records'))).toBe(true);
+    } finally {
+      await owner.query('ALTER FUNCTION subscription_new_is_trial() SET search_path = public, pg_temp');
       await owner.end();
     }
     expect(await checkIsolation(process.env.DATABASE_URL!)).toEqual([]);
