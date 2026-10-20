@@ -21,6 +21,8 @@ export interface SendInput {
    * outcome we did not learn (timeout, crash) can still be matched to its delivery status without re-sending it.
    */
   callbackData: string;
+  /** Aborted when the sender gives up waiting (SEND_LIMITS.providerTimeoutMs); a real adapter must cancel the request. */
+  signal?: AbortSignal;
 }
 
 export interface ChannelAdapter {
@@ -48,7 +50,9 @@ export type SandboxStep =
   | { notAccepted: string }
   | { uncertain: string }
   /** The provider accepts the message, but the reply is lost on the way back (so we only know "uncertain"). */
-  | { acceptedButLost: string };
+  | { acceptedButLost: string }
+  /** The provider takes this long to answer (to test the sender's timeout). */
+  | { slowMs: number };
 
 /** Local double: records what would have been sent. Tests read `sent`; nothing leaves the process. */
 export class SandboxAdapter implements ChannelAdapter {
@@ -61,6 +65,12 @@ export class SandboxAdapter implements ChannelAdapter {
 
   async sendText(input: SendInput): Promise<SendResult> {
     const step = this.script.shift() ?? 'ok';
+    if (typeof step === 'object' && 'slowMs' in step) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, step.slowMs);
+        input.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('aborted')); });
+      });
+    }
     if (typeof step === 'object' && 'reject' in step) throw new ChannelSendError(step.reject, 'Sandbox provider refused the message.', 'rejected');
     if (typeof step === 'object' && 'notAccepted' in step) throw new ChannelSendError(step.notAccepted, 'Sandbox provider is busy; message not accepted.', 'not_accepted');
     if (typeof step === 'object' && 'uncertain' in step) throw new ChannelSendError(step.uncertain, 'No answer from the sandbox provider.', 'uncertain');
@@ -172,12 +182,13 @@ export const STATUS_RANK: Record<string, number> = { queued: 0, submitting: 0, u
  * forms of alef and yaa. A standalone "إلغاء" (cancel) is deliberately NOT an opt-out: customers use it to cancel
  * bookings.
  */
-const OPT_OUT = ['stop', 'stop all', 'unsubscribe', 'إيقاف', 'توقف', 'إلغاء الاشتراك', 'الغاء الاشتراك', 'وقف الرسائل'];
+const OPT_OUT = ['stop', 'stop all', 'unsubscribe', 'إيقاف', 'أوقف', 'توقف', 'إلغاء الاشتراك', 'الغاء الاشتراك', 'وقف الرسائل'];
 const OPT_IN = ['start', 'subscribe', 'ابدأ', 'اشتراك', 'تفعيل الرسائل'];
 
 export function normaliseCommand(text: string): string {
   return text
     .normalize('NFKC')
+    .replace(/\p{Cf}/gu, '')                                   // invisible format marks: RLM/LRM/ALM, embeddings, ZWNJ, BOM (review S1)
     .toLowerCase()
     .replace(/[\u064B-\u065F\u0670\u0640]/g, '')          // Arabic diacritics and tatweel
     .replace(/[\u0622\u0623\u0625\u0671]/g, '\u0627')     // آ أ إ ٱ → ا

@@ -91,6 +91,9 @@ promised window is about to be missed (CF-EXT-018 warns staff; CF-EXT-023 sugges
 1. The supervisor sees a conversation going badly (repeat contact, complaint).
 2. Taking over is explicit, recorded, and stops any AI replies (FR-206); the customer is not asked to repeat
    themselves because a summary is shown (CF-EXT-009).
+3. The supervisor can **pause replies** with a reason and an expiry (or until released). Everyone else's replies — and
+   any of their messages still waiting to be sent — are refused while the pause lasts; the reason is shown to the team.
+   Internal notes keep working and never block replies.
 
-**Requirements:** CF-EXT-002, 008, 009. **Acceptance:** 2, 5. **Status:** human takeover between people built and
-tested in slice 1; AI pause comes with the AI agent.
+**Requirements:** CF-EXT-002, 008, 009. **Acceptance:** 2, 5. **Status:** takeover (slice 1) and reply pause (slice 2) built and
+tested locally; AI pause comes with the AI agent.

@@ -133,6 +133,11 @@ describe('reliable sending', () => {
     await expect(app((tx) => tx.query('INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenant, q.messageId]))).rejects.toMatchObject({ code: '23505' });
     const before = sandbox.sent.length;
     const s = new Sender(t.deps.db, t.deps.channels);
+    // Without a live lease nobody may process it.
+    expect(await s.processJob(tenant, q.jobId)).toBe('nothing_to_do');
+    // Only one of several callers obtains the lease; even if all three then try, it is sent once.
+    const leases = await Promise.all([s.leaseNow(tenant, q.jobId), s.leaseNow(tenant, q.jobId), s.leaseNow(tenant, q.jobId)]);
+    expect(leases.filter(Boolean)).toHaveLength(1);
     const results = await Promise.all([s.processJob(tenant, q.jobId), s.processJob(tenant, q.jobId), s.processJob(tenant, q.jobId)]);
     expect(results.filter((r) => r === 'sent')).toHaveLength(1);
     expect(sandbox.sent.length).toBe(before + 1);
@@ -195,6 +200,21 @@ describe('reliable sending', () => {
     expect(again.body.error.code).toBe('already_retried');
     const audit = (await owner.get('/v1/audit-events').expect(200)).body as Array<{ action: string; targetId: string }>;
     expect(audit.some((e) => e.action === 'message.retried' && e.targetId === res.body.id)).toBe(true);
+  });
+
+  it('a provider slower than the timeout: the call is cancelled and shown as uncertain, long before the lease ends', async () => {
+    const conv = await newConversation();
+    const q = await queueOnly(conv.id, 'Slow provider', ids.agent!);
+    sandbox.script.push({ slowMs: 2_000 });
+    const before = sandbox.sent.length;
+    const s = new Sender(t.deps.db, t.deps.channels, {}, 200);
+    expect(await s.leaseNow(tenant, q.jobId)).toBe(true);
+    const started = Date.now();
+    expect(await s.processJob(tenant, q.jobId)).toBe('uncertain');
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(await msg(conv.id, q.messageId)).toMatchObject({ status: 'uncertain', errorCode: 'provider_timeout' });
+    await new Promise((r) => setTimeout(r, 2_100));
+    expect(sandbox.sent.length).toBe(before); // the cancelled call never completed
   });
 
   it('accepted but the answer was lost: "uncertain" until the status webhook settles it, sent once', async () => {
@@ -276,7 +296,8 @@ describe('pause replies / supervisor handling', () => {
 describe('opt-out commands (owner decision 3)', () => {
   it.each([
     'STOP', 'Stop.', 'stop!!!', 'STOP 🛑', '🛑 stop 🛑', 'Stop ✋🏽', 'stop 👍🏻', '"stop"', 'Unsubscribe.', 'stop all!',
-    'إيقاف', 'ايقاف', 'إِيقاف', 'إيـقـاف', 'إيقاف 🙏', 'إيقاف!!', 'توقف.', 'إلغاء الاشتراك', 'الغاء الاشتراك ✋',
+    'إيقاف', 'ايقاف', 'إِيقاف', 'إيـقـاف', 'إيقاف 🙏', 'إيقاف!!', 'توقف.', 'إلغاء الاشتراك', 'الغاء الاشتراك ✋', 'أوقف', 'اوقف!',
+    '\u200fإيقاف', 'إيقاف\u200f', '\u202bSTOP\u202c', 'ST\u200cOP', '\ufeffstop', '\u2067إيقاف\u2069 🙏',
   ])('"%s" is an opt-out', (text) => expect(consentKeyword(text)).toBe('opt_out'));
 
   it.each(['START', 'Start 👍', 'ابدأ', 'ابدا ✅', 'اشتراك!'])('"%s" is an opt-in', (text) => expect(consentKeyword(text)).toBe('opt_in'));
@@ -346,6 +367,34 @@ describe('strengthened CI guard (open Low finding)', () => {
     } finally {
       await reset(['REVOKE SELECT ON contacts FROM PUBLIC', 'REVOKE SELECT (body) ON messages FROM cf_identity',
         'DROP FUNCTION IF EXISTS zz_auth_peek()', 'REVOKE cf_ops FROM cf_dispatch']);
+    }
+    expect(await guard()).toEqual([]);
+  });
+
+  it('review S2a: an owner policy plus a view over a company table is flagged', async () => {
+    try {
+      await t.ownerDb.query('CREATE POLICY zz_own ON messages FOR SELECT TO CURRENT_USER USING (true)');
+      await t.ownerDb.query('CREATE VIEW zz_msgs AS SELECT id, tenant_id, body, conversation_id FROM messages');
+      await t.ownerDb.query('GRANT SELECT ON zz_msgs TO cf_app');
+      const problems = await guard();
+      expect(problems).toEqual(expect.arrayContaining([
+        'policy zz_own on company table messages applies to <owner>; it is not on the reviewed list',
+        'view zz_msgs reads company table messages; views over company tables are not allowed',
+      ]));
+    } finally {
+      await reset(['DROP VIEW IF EXISTS zz_msgs', 'DROP POLICY IF EXISTS zz_own ON messages']);
+    }
+    expect(await guard()).toEqual([]);
+  });
+
+  it('review S2b: replacing the body of a reviewed privileged function is flagged', async () => {
+    const original = (await t.ownerDb.query<{ src: string }>("SELECT pg_get_functiondef('platform_list_mfa_resets(text)'::regprocedure) AS src")).rows[0]!.src;
+    try {
+      await t.ownerDb.query(`CREATE OR REPLACE FUNCTION platform_list_mfa_resets(p_token text) RETURNS jsonb
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$ SELECT '[]'::jsonb $$`);
+      expect(await guard()).toContain('platform_list_mfa_resets(text) has changed since it was reviewed (definition or owner)');
+    } finally {
+      await t.ownerDb.query(original);
     }
     expect(await guard()).toEqual([]);
   });

@@ -219,7 +219,7 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
                   {out && <> · {name(m.sentByMembershipId)} · <span className={m.status === 'failed' || m.status === 'uncertain' ? 'font-semibold text-red-700' : ''}>{d.statuses[m.status] ?? m.status}</span></>}
                 </p>
                 {out && (m.status === 'failed' || m.status === 'uncertain') && (
-                  <DeliveryProblem m={m} conv={conv} locale={locale} busy={busy} blocked={pausedForMe || conv.contact.optedOut || !conv.windowOpen}
+                  <DeliveryProblem m={m} conv={conv} locale={locale} busy={busy} blocked={pausedForMe || conv.contact.optedOut || !conv.windowOpen || assignedOther}
                     onRetry={(confirm) => act(() => api(`/v1/messages/${m.id}/retry`, { method: 'POST', body: { seenActivity: conv.activitySeq, clientMessageId: newKey(), confirmPossibleDuplicate: confirm } }))} />
                 )}
               </div>

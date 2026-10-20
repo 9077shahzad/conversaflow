@@ -25,10 +25,26 @@ until a measured need appears.
 | AX-1 (ADR-038) | **Channel adapters behind one interface**, starting with a sandbox adapter that never uses the network and is refused in production. Webhook payloads use Meta's documented shape, so the Cloud API adapter reuses the parser | Lets Wave 1 be built and tested before Meta onboarding; keeps the real adapter small | Meta Tech Provider approval |
 | AX-2 (ADR-039) | **Webhook routing through one SECURITY DEFINER lookup** (`channel_route`) owned by `cf_channel`, which can read only the routing columns of active connections. After routing, everything runs as `cf_app` inside that company's context | A verified webhook names a number, not a company. This keeps cross-company reads to one audited lookup | — |
 | AX-5 | **Provider timestamps capped at receipt time**; webhook bodies up to 3 MB on the webhook route only (larger → 413); `cf_channel` pinned by the CI guard to five routing columns and one reviewed function | Review of slice 1 (M2, M4, M5) | — |
+| AX-6 | **Reply pause** stored on the conversation (who, reason, when, until or manual); enforced for replies, retries and at send time; ordinary notes never block | Owner decision 20 Oct 2026 | — |
 | AX-3 (ADR-040) | **Events are recorded and applied in the same request for slice 1**, with a unique key per provider event so repeats are no-ops. Meta retries for up to 7 days and does not guarantee order, so de-duplication and order tolerance are required either way | Simplest correct start. The next slice moves *applying* to the worker (record first, acknowledge, process asynchronously), as Meta recommends for high volume | Before live traffic; before campaigns |
 | AX-4 (ADR-041) | **Reply collision check by an arrival counter** (`seenActivity` must equal `conversations.activity_seq`, compared under a row lock; every recorded message bumps it, including a late customer message with an older timestamp — review M1) plus optimistic versions for assignment; replying claims an unassigned conversation; taking over needs `inbox.assign` and an explicit flag, and is audited | Two agents can never send conflicting replies without knowing; ownership is always visible | — |
 
-## Reliable processing (next slice)
+## Reliable sending (built in slice 2, `138869e`)
+
+- One `send_jobs` row per outbound message (unique), leased through `dispatch_claim` (owned by NOLOGIN `cf_dispatch`,
+  which sees scheduling columns only). Each job is processed as `cf_app` inside its company's context.
+- **Before** the provider call, the message is marked `submitting` and committed. Outcomes: `sent`; `failed` (definite
+  refusal); back to `queued` with back-off (definitely not accepted; at most 5 attempts, then `failed` and job `dead`);
+  `uncertain` (unknown outcome). A job found in `submitting` after a stop becomes `uncertain`: **never resent
+  automatically**.
+- Every send carries our message id as Meta's `biz_opaque_callback_data` (echoed in status webhooks — Meta status
+  webhook reference, read 20 Oct 2026, page undated), so an uncertain send is settled by its status without resending.
+- Conditions are re-checked at the moment of sending (opt-out, pause, channel, 24-hour window).
+- A person may retry a failed message, or an uncertain one after confirming a possible duplicate; the retry is a new
+  message linked to the original, at most one per original, audited.
+- Inbound webhook processing stays in-request: it is idempotent and Meta retries on failure for up to 7 days.
+
+## Reliable processing (remaining)
 
 - **Outbox pattern.** A business change and the event announcing it are written in the same transaction
   (`outbox_events`). The worker publishes and applies them, so nothing is lost if a process stops halfway.

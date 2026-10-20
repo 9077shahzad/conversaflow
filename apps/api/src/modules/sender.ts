@@ -17,7 +17,11 @@ import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type Provider } fro
  * have the message, so it is marked `uncertain`, never sent again automatically. A later status webhook carrying our
  * callback reference settles it. A person can retry a failed or uncertain message; that creates a new message.
  */
-export const SEND_LIMITS = { maxAttempts: 5, leaseSeconds: 120, baseBackoffSeconds: 5 };
+/**
+ * The provider timeout is well below the lease, so a job is never picked up again while its provider call could still
+ * be running (review S3): by the time a lease expires, the previous call has finished, timed out or its process died.
+ */
+export const SEND_LIMITS = { maxAttempts: 5, leaseSeconds: 120, baseBackoffSeconds: 5, providerTimeoutMs: 30_000 };
 export const SERVICE_WINDOW_MS = 24 * 3600_000;
 
 /** Test hooks that simulate a process stopping at a given point. Never set in production code paths. */
@@ -36,6 +40,7 @@ export class Sender {
     private readonly db: Db,
     private readonly channels: Partial<Record<Provider, ChannelAdapter>>,
     readonly faults: SendFaults = {},
+    private readonly providerTimeoutMs = SEND_LIMITS.providerTimeoutMs,
   ) {}
 
   /** Worker entry point: leases due jobs across companies and processes them. Returns how many were processed. */
@@ -68,6 +73,10 @@ export class Sender {
                 m.sent_by_membership_id, m.conversation_id
          FROM send_jobs j JOIN messages m ON m.id = j.message_id WHERE j.id = $1 FOR UPDATE OF j, m`, [jobId])).rows[0];
       if (!row || row.job_state === 'done' || row.job_state === 'dead') return { done: 'nothing_to_do' as const };
+      // Only the holder of a live lease may process a job (leaseNow or dispatch_claim). Explicit, as the review noted.
+      const lease = (await tx.query<{ live: boolean }>(
+        `SELECT state = 'leased' AND lease_until > now() AS live FROM send_jobs WHERE id = $1`, [jobId])).rows[0]!;
+      if (!lease.live) return { done: 'nothing_to_do' as const };
 
       if (row.status === 'submitting') {
         // A previous attempt stopped after it may have reached the provider. Never send again automatically.
@@ -114,9 +123,22 @@ export class Sender {
     try {
       const adapter = this.channels[prepared.provider];
       if (!adapter) throw new ChannelSendError('provider_not_available', 'Provider not available.', 'rejected');
-      providerMessageId = (await adapter.sendText({
-        providerNumberId: prepared.number, to: prepared.to, body: prepared.row.body ?? '', callbackData: prepared.row.message_id,
-      })).providerMessageId;
+      const abort = new AbortController();
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          reject(new ChannelSendError('provider_timeout', 'No answer from the provider in time.', 'uncertain'));
+        }, this.providerTimeoutMs);
+      });
+      try {
+        providerMessageId = (await Promise.race([adapter.sendText({
+          providerNumberId: prepared.number, to: prepared.to, body: prepared.row.body ?? '', callbackData: prepared.row.message_id,
+          signal: abort.signal,
+        }), timeout])).providerMessageId;
+      } finally {
+        clearTimeout(timer);
+      }
     } catch (err) {
       // Anything we cannot classify is treated as uncertain: it may have been accepted.
       failure = err instanceof ChannelSendError ? err : new ChannelSendError('send_error', 'Unexpected send error.', 'uncertain');

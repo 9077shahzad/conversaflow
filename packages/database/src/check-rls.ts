@@ -43,27 +43,53 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
 };
 /**
  * Privileged (SECURITY DEFINER) functions that a login role may run although their owner can read company tables.
- * Each was reviewed; a new one fails the check until it is reviewed and added here.
+ * Each was reviewed and is pinned to md5(pg_get_functiondef || owner): a new function, or a changed body, setting,
+ * security mode or owner, fails the check until it is reviewed again and its fingerprint updated here (review S2b).
  */
-const REVIEWED_DEFINERS = [
+const REVIEWED_DEFINERS: Record<string, string> = {
   // cf_auth: sign-in, sessions, two-step sign-in (ADR-018, ADR-027, M7)
-  'auth_verify_email(bytea)', 'auth_mfa_issue_activation(uuid,bytea)', 'auth_mfa_activate(bytea,bytea,bytea[])',
-  'auth_session_lookup(bytea,interval)', 'auth_open_session(uuid,bytea,uuid,inet,text,integer)', 'auth_user_for_email(citext)',
-  'auth_mfa_begin(bytea)', 'auth_mfa_verify(bytea,text,bytea)', 'auth_request_email(text,citext)',
-  'auth_issue_token(uuid,text,bytea,interval)', 'auth_mfa_confirm_code(bytea,text)', 'auth_invitation_lookup(bytea)',
-  'auth_reset_password(bytea,text)', 'auth_register_user(citext,text,text,text)', 'auth_credentials_by_email(citext)',
+  'auth_verify_email(bytea)': 'fba376647d794ccc1a6e46d6497e0eee',
+  'auth_mfa_issue_activation(uuid,bytea)': '349aaf88e8d5a8951ff37b53b3d1707e',
+  'auth_mfa_activate(bytea,bytea,bytea[])': '2f71e3429db7daeaed600503c15784e4',
+  'auth_session_lookup(bytea,interval)': '5900a8b97a701c9a79ff13fd8cf98ef5',
+  'auth_open_session(uuid,bytea,uuid,inet,text,integer)': '2b0d7510860af5262ee599de3db704fb',
+  'auth_user_for_email(citext)': '3f6eda7e87db1958124199f0ece2f757',
+  'auth_mfa_begin(bytea)': '1302c15bb8a72ceb5c28cd2089404ff5',
+  'auth_mfa_verify(bytea,text,bytea)': 'f677e0b99f8f78369c0368aa959aa9d9',
+  'auth_request_email(text,citext)': '67cd6499e436b77501b04d82670e9e09',
+  'auth_issue_token(uuid,text,bytea,interval)': '23ef60aa60df3cde5b6b08fbb6b8f5ac',
+  'auth_mfa_confirm_code(bytea,text)': '7874df0c51d552488181c35533eba72c',
+  'auth_invitation_lookup(bytea)': 'd9388ceb82588097360d86f371feda98',
+  'auth_reset_password(bytea,text)': 'f3b28604b33f291693b20a51daba280d',
+  'auth_register_user(citext,text,text,text)': 'ddb234e8bed7d21f6f94c7f57e1a6de0',
+  'auth_credentials_by_email(citext)': '1e4d86ed8eeaa294cbd6833d2a24ae8c',
   // cf_ops: token-bound platform console functions
-  'platform_publish_plan_version(text,uuid)', 'platform_set_feature_flag(text,uuid,text,boolean)', 'platform_session_staff(text)',
-  'platform_tenant_directory(text)', 'platform_request_support(text,uuid,text,integer)', 'platform_approve_support(text,uuid)',
-  'platform_revoke_support(text,uuid)', 'platform_support_view(text,uuid,text)', 'platform_request_mfa_reset(text,citext,text,text,text)',
-  'platform_reject_mfa_reset(text,uuid)', 'platform_approve_mfa_reset(text,uuid)', 'platform_list_mfa_resets(text)',
+  'platform_publish_plan_version(text,uuid)': 'c8dc325566e3323e5e9c3e57b3dc32e9',
+  'platform_set_feature_flag(text,uuid,text,boolean)': 'd644f2d6ea9877f3af6bf1db690c9984',
+  'platform_session_staff(text)': '40c37f4461174fd710e6272300c1b458',
+  'platform_tenant_directory(text)': '0d48e18c89740b0d69e1d3021622a6a7',
+  'platform_request_support(text,uuid,text,integer)': '0f7fe23e05998bcda60c251081a6b754',
+  'platform_approve_support(text,uuid)': 'f75b34b0c0eba9efef3dc91aa4f2c8d8',
+  'platform_revoke_support(text,uuid)': '4813c745f3e35d9540f2c1c43614c23d',
+  'platform_support_view(text,uuid,text)': '550184596db8ae12c98afc345210866b',
+  'platform_request_mfa_reset(text,citext,text,text,text)': '71df91e25aa0a5f7bd763cbbbc0e8089',
+  'platform_reject_mfa_reset(text,uuid)': '84f902e85b14f150aa28bf3f3974b8fa',
+  'platform_approve_mfa_reset(text,uuid)': '366d7f9c2dea44eb48383f20dbcfaf53',
+  'platform_list_mfa_resets(text)': '445d72949f31ccfb0b54225f88914af0',
   // cf_pilot: pilot console functions (pinned separately as pilot writers)
-  'platform_enrol_pilot(text,uuid,integer,integer,text)', 'platform_end_pilot(text,uuid)',
+  'platform_enrol_pilot(text,uuid,integer,integer,text)': '6d9de15d286d796bc0a3ce2cac3872b4',
+  'platform_end_pilot(text,uuid)': '69b709e495681c1089cc0496251b5535',
   // cf_owner: billing and plan triggers (pinned by definition in REVIEWED_TRIGGER_FUNCTIONS)
-  'subscription_requires_published_version()', 'plan_version_frozen()', 'subscription_new_is_trial()', 'plan_entitlement_frozen()',
+  'subscription_requires_published_version()': '91d8dcefb333593401818e36724de217',
+  'plan_version_frozen()': 'd73bdba3ac8a68ba549b73a4f67572e0',
+  'subscription_new_is_trial()': '163ea6cbdfa8f6081168bc31f0b289ba',
+  'plan_entitlement_frozen()': '43b3204094b27f3fd863f73862cde1e0',
   // cf_channel and cf_dispatch: webhook routing and send-job leasing (migrations 0022, 0024)
-  'channel_route(text,text)', 'dispatch_claim(integer,integer)',
-];
+  'channel_route(text,text)': '1df6e4008edea1274471be11593aa226',
+  'dispatch_claim(integer,integer)': '69cd1d0ac8475917c80b9676b32d79b4',
+};
+/** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
+const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
 /** The only columns cf_channel may read (migration 0022). */
 const CHANNEL_ROUTING_COLUMNS = ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'];
 /** The only function cf_channel may own, pinned to the md5 of its reviewed definition. */
@@ -296,16 +322,39 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       if (!(COMPANY_TABLE_READERS[r.who] ?? []).includes(r.t)) problems.push(`${r.who} can read company table ${r.t}; it is not on the reviewed list`);
     }
     // General rule 2: privileged functions a login role can run, whose owner can read company tables.
-    const exposed = await client.query<{ fn: string; owner: string }>(`
-      SELECT DISTINCT p.oid::regprocedure::text AS fn, pg_get_userbyid(p.proowner) AS owner
+    const exposed = await client.query<{ fn: string; owner: string; hash: string }>(`
+      SELECT DISTINCT p.oid::regprocedure::text AS fn, pg_get_userbyid(p.proowner) AS owner,
+             md5(pg_get_functiondef(p.oid) || pg_get_userbyid(p.proowner)) AS hash
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prosecdef
         AND (pg_get_userbyid(p.proowner) = ANY($1::text[]) OR pg_get_userbyid(p.proowner) = current_user)
         AND EXISTS (SELECT 1 FROM pg_roles l WHERE l.rolname = ANY($2::text[]) AND has_function_privilege(l.oid, p.oid, 'EXECUTE'))`,
       [Object.keys(COMPANY_TABLE_READERS), LOGIN_ROLES]);
     for (const f of exposed.rows) {
-      if (!REVIEWED_DEFINERS.includes(f.fn)) problems.push(`${f.fn} (owned by ${f.owner}) is a privileged function a login role can run; it is not on the reviewed list`);
+      if (!(f.fn in REVIEWED_DEFINERS)) problems.push(`${f.fn} (owned by ${f.owner}) is a privileged function a login role can run; it is not on the reviewed list`);
+      else if (REVIEWED_DEFINERS[f.fn] !== f.hash) problems.push(`${f.fn} has changed since it was reviewed (definition or owner)`);
     }
+    // General rule 3: policies on company tables may only target the business role, listed readers on their listed
+    // tables, or the reviewed owner policies used by triggers (review S2a: an owner policy is the gateway for a view).
+    const policies = await client.query<{ t: string; pol: string; who: string }>(`
+      SELECT c.relname AS t, p.polname AS pol,
+             CASE WHEN r.r = 0 THEN 'PUBLIC' WHEN pg_get_userbyid(r.r) = current_user THEN '<owner>' ELSE pg_get_userbyid(r.r) END AS who
+      FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid CROSS JOIN LATERAL unnest(p.polroles) AS r(r)
+      WHERE EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)`);
+    for (const p of policies.rows) {
+      const ok = p.who === 'cf_app'
+        || (COMPANY_TABLE_READERS[p.who] ?? []).includes(p.t)
+        || (p.who === '<owner>' && OWNER_POLICY_TABLES.includes(p.t));
+      if (!ok) problems.push(`policy ${p.pol} on company table ${p.t} applies to ${p.who}; it is not on the reviewed list`);
+    }
+    // General rule 4: no view or materialised view may be built over a company table (views run with their owner's
+    // rights and would bypass company row security for whoever can read the view).
+    const companyViews = await client.query<{ v: string; t: string }>(`
+      SELECT DISTINCT v.oid::regclass::text AS v, t.relname AS t
+      FROM pg_class v JOIN pg_rewrite rw ON rw.ev_class = v.oid JOIN pg_depend d ON d.objid = rw.oid JOIN pg_class t ON t.oid = d.refobjid
+      WHERE v.relkind IN ('v', 'm') AND t.oid <> v.oid AND t.relkind IN ('r', 'p')
+        AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)`);
+    for (const v of companyViews.rows) problems.push(`view ${v.v} reads company table ${v.t}; views over company tables are not allowed`);
 
     const definers = await client.query<{ name: string; owner: string; config: string[] | null }>(`
       SELECT p.proname AS name, pg_get_userbyid(p.proowner) AS owner, p.proconfig AS config
