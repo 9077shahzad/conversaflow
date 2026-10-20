@@ -147,3 +147,31 @@ Open informational items (no code change after `3966c4c`, so the tested, reviewe
 | R4-4 | The operations role could extend an override's expiry (only the function's "expire now" path uses it; role cannot log in) | Tighten the policy to expiry no later than now, in the next migration |
 | R4-5 | The static not-found page's scripts are blocked (fails safe) | Make the not-found page render per request, in the next web change |
 
+
+## Candidate 2 — follow-ups closed, and the complete list of remaining findings (20 Oct 2026)
+
+Candidate 1 (tested `rc1-tested` = `3966c4c`, packaged `rc1-packaged` = `92e9c2e`) is preserved as git tags and
+archived. Candidate 2 fixes:
+
+| Item | Fix in candidate 2 | Status |
+| --- | --- | --- |
+| R4-1 CI audit red on braces | Tailwind CSS 4 removed braces entirely (ADR-031); no exception needed; strict audit passes | Fixed — awaiting independent recheck |
+| R4-2 exception approval is a plain repo edit | `.github/CODEOWNERS` prepared for `docs/security/`, CI, migrations and security scripts; exception rules now require owner and review date (14 unit tests) | Prepared — **enforcement pending GitHub configuration** |
+| R4-3 enrolment race returned 500 | Unique-rule conflicts return 409; test with three simultaneous requests | Fixed — awaiting independent recheck |
+| R4-4 override expiry could be extended | Migration 0014: the operations role can only set an expiry no later than now | Fixed — awaiting independent recheck |
+| R4-5 static not-found page blocked by the policy | Localised not-found page rendered per request with the nonce; unknown paths routed to it with status 404; tests | Fixed — awaiting independent recheck |
+
+### Remaining findings — complete numbered list
+
+| # | Finding | Source | Severity | Status | What closes it |
+| --- | --- | --- | --- | --- | --- |
+| 1 | The sign-in database credential can open a session for a user without two-step sign-in and enrol its own authenticator (account takeover before the user's own set-up) | ADR-027, second recheck | Accepted residual (pending owner acceptance) | Detection in place (M5); prevention options M7, M9 not built | Owner decision on M7–M9, then signed acceptance; M6 before general availability |
+| 2 | The same credential can lock a user out of two-step sign-in for one hour | R2-1 | Low | Open, within item 1 | M1–M3 (protect the credential); M6 |
+| 3 | No procedure to reset two-step sign-in when a user loses the authenticator and all recovery codes | Found while preparing the risk note, 20 Oct | Low (availability; unsafe manual workaround) | Open | M8: two-person, audited reset in the console |
+| 4 | Pilot two-step rule is enforced in the API, not in the database | Targeted review I-4 | Informational | Accepted by design (ADR-029) | — |
+| 5 | Code-owner review of security files not enforced until GitHub is configured | R4-2 | Informational | Prepared | Owner: GitHub steps (A3) |
+| 6 | The CI guard would not notice a new definer function granted to a login role that writes pilot or override tables | Targeted review, item 4 | Informational | Open | Extend the guard to list functions each login role can run |
+| 7 | A malformed prefetch request (prefetch header without RSC) makes Next.js return a 500; the response carries the full policy | Targeted review F3 notes | Informational | Accepted (framework behaviour) | — |
+| 8 | `base32_decode` unused on the verification path | R2-2 | Informational | No action | — |
+| 9 | Authenticators set up before migration 0010 cannot pass TOTP (local databases only) | R2-3 | Informational | No action | — |
+| 10 | Hosted verification not yet possible: official signatures, file revocation, storage permissions, session expiry, backup restore | Owner conditions | — | Pending hosting approval | Owner: hosting decision (A4) |

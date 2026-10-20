@@ -28,6 +28,7 @@ SCREENS = [
     ('Forgot password', 'Password reset request page', None, ['forgot']),
     ('Verify email', 'Page opened from the verification email', None, ['verify']),
     ('Reset password', 'Page opened from the reset email', None, ['reset']),
+    ('Page not found', 'Shown when an address does not exist', None, ['notFound']),
     ('All app screens', 'Side menu, top bar, shared buttons and messages', 'dashboard', ['nav', 'common', 'brand.by']),
     ('Dashboard', 'Home page after sign-in', 'dashboard', ['dashboard']),
     ('Company settings', 'Business hours, languages, response targets, holidays', 'company-settings', ['company', 'days', 'languageNames']),

@@ -52,6 +52,8 @@ def inputs_sheet(wb):
         ('Included automation runs / month', [1000, 5000, 25000, 50000], '#,##0', 'BRD v1.1; Enterprise is custom — 50,000 assumed', False),
         ('Support allowance included (hours / month)', [0.25, 0.75, 3, 6], NUM,
          'Proposed: Starter 15 min (email), Growth 45 min (email and chat); Business and Enterprise unchanged', True),
+        ('Support allowance — Business 2-hour scenario (hours / month)', [0.25, 0.75, 2, 6], NUM,
+         'Scenario B: identical to the proposal except Business includes 2 hours instead of 3', True),
         ('Support customers expect (hours / month)', [0.5, 1.5, 3, 6], NUM, 'Same demand as the previous model, so the comparison is fair', True),
         ('Share of time above the allowance bought as extra support', [0.4, 0.4, 0.4, 0.4], PCT,
          'Assumption: the rest is handled by the help centre or not requested', False),
@@ -105,9 +107,9 @@ def inputs_sheet(wb):
     return A, G
 
 
-def margin_sheet(wb, A, G):
-    m = wb.create_sheet('Margin')
-    m.cell(row=1, column=1, value='Growth scale — 100 companies, per company per month (support costed at the hourly rate on Assumptions)').font = Font(name=F, bold=True, size=12)
+def margin_sheet(wb, A, G, allowance_label='Support allowance included (hours / month)', name='Margin', title='Proposal — growth scale, 100 companies, per company per month'):
+    m = wb.create_sheet(name)
+    m.cell(row=1, column=1, value=f'{title} (support costed at the hourly rate on Assumptions; entitlements on the Support entitlements sheet)').font = Font(name=F, bold=True, size=12)
     heads = ['Plan', 'Monthly price', 'Annual, per month', 'Hosting', 'Included usage', 'Included support (cost)',
              'Extra support (revenue)', 'Extra support (cost)', 'Onboarding fee (per month)', 'Onboarding time (cost per month)',
              'Card fees, monthly billing', 'Card fees, annual billing', 'Margin, monthly billing', 'Margin %, monthly',
@@ -124,7 +126,7 @@ def margin_sheet(wb, A, G):
     first = 3
     for i, p in enumerate(PLANS):
         r = first + i
-        allow, demand, uptake = A('Support allowance included (hours / month)', p), A('Support customers expect (hours / month)', p), A('Share of time above the allowance bought as extra support', p)
+        allow, demand, uptake = A(allowance_label, p), A('Support customers expect (hours / month)', p), A('Share of time above the allowance bought as extra support', p)
         excess = f'MAX(0,{demand}-{allow})*{uptake}'
         share_paid = A('Share of new companies paying for onboarding', p)
         onb_hours = f'({share_paid}*{A("Onboarding time when paid (hours)", p)}+(1-{share_paid})*{A("Onboarding time otherwise (hours)", p)})'
@@ -207,7 +209,7 @@ def pilot_sheet(wb, G):
     p.column_dimensions['B'].width = 16
     p.column_dimensions['C'].width = 16
     p.column_dimensions['D'].width = 70
-    p.cell(row=1, column=1, value='Pilot subsidy — what the pilot costs Meronatic, and a proposed spending cap').font = Font(name=F, bold=True, size=13)
+    p.cell(row=1, column=1, value='Pilot subsidy — what the pilot costs Meronatic, and a proposed spending cap (90 days and the caps are proposals)').font = Font(name=F, bold=True, size=13)
     p.cell(row=2, column=1, value='Proposed pilot terms: no ConversaFlow fee; Meta message fees paid by each pilot company directly.').font = NOTE
     head(p, 4, ['Input', '3 companies', '5 companies', 'Note'])
     inputs = [
@@ -283,19 +285,26 @@ def pilot_sheet(wb, G):
         n += 1
 
 
-def offer_sheet(wb):
-    o = wb.create_sheet('Support offer')
-    o.column_dimensions['A'].width = 30
+def entitlements_sheet(wb):
+    o = wb.create_sheet('Support entitlements')
+    o.column_dimensions['A'].width = 34
     for c in 'BCDE':
-        o.column_dimensions[c].width = 34
-    o.cell(row=1, column=1, value='Proposed support offer per plan (draft for your decision)').font = Font(name=F, bold=True, size=13)
+        o.column_dimensions[c].width = 36
+    o.cell(row=1, column=1, value='What each plan includes, what it excludes, and how the margin counts it (proposal for your decision)').font = Font(name=F, bold=True, size=13)
     head(o, 3, ['', *PLANS], 22)
     rows = [
-        ('Included support each month', '15 minutes by email, next business day', '45 minutes by email and chat, same business day', '3 hours, priority, named contact', '6 hours, priority, named contact'),
-        ('Onboarding', 'Self-service guide; assisted set-up optional at $99', 'Paid onboarding $199, one-off (about 3 hours)', 'Paid onboarding $399 (about 6 hours)', 'Paid onboarding from $799 (about 12 hours)'),
-        ('Extra support', '$60 per hour, in 30-minute steps', '$60 per hour, in 30-minute steps', '$60 per hour, in 30-minute steps', 'Included in the contract or $60 per hour'),
-        ('Help centre and guides', 'Yes', 'Yes', 'Yes', 'Yes'),
-        ('Annual billing (10 × monthly)', 'On hold until you approve', 'On hold until you approve', 'On hold until you approve', 'On hold until you approve'),
+        ('Included support time each month', '15 minutes', '45 minutes', '3 hours (scenario B: 2 hours)', '6 hours'),
+        ('Channels', 'Email', 'Email and chat', 'Email, chat, and a call by appointment', 'Email, chat, calls; named contact'),
+        ('First response (business hours, Sun–Thu, Gulf time)', 'Next business day', 'Same business day', 'Within 4 business hours', 'Within 2 business hours'),
+        ('What included time covers', 'How-to questions; help with settings; checking a fault in ConversaFlow', 'As Starter, plus help with team set-up and message-template wording', 'As Growth, plus a monthly 30-minute review call', 'As Business, plus quarterly review; terms by contract'),
+        ('Faults in ConversaFlow itself', 'Always free; never counted against the allowance', 'Always free', 'Always free', 'Always free'),
+        ('Unused time', 'Does not carry over', 'Does not carry over', 'Does not carry over', 'By contract'),
+        ('Onboarding', 'Self-service guide; assisted set-up $99 (optional, about 1.5 h)', '$199 one-off (about 3 h)', '$399 one-off (about 6 h)', 'From $799 (about 12 h)'),
+        ('Extra support beyond the allowance', '$60 an hour, 30-minute steps, agreed before work starts', 'Same', 'Same', 'In contract or $60 an hour'),
+        ('Not included in any plan', 'Building custom integrations or automations; writing or running campaigns; Meta account, billing or policy disputes (handled with Meta); training beyond onboarding; data migration from other tools (quoted); on-site visits; out-of-hours support (Enterprise by contract)', 'Same', 'Same', 'Same, unless the contract says otherwise'),
+        ('How the margin counts it', 'Cost = included time actually used × hourly cost; extra time sold at $60 and costed at the hourly rate; onboarding fee and time spread over 24 months', 'Same', 'Same; scenario B uses 2 hours', 'Same'),
+        ('Support customers are assumed to ask for', '30 minutes a month', '1.5 hours a month', '3 hours a month', '6 hours a month'),
+        ('Share of time above the allowance assumed bought', '40%', '40%', '40% (only in scenario B; with 3 h nothing is above)', 'None above'),
     ]
     for i, row in enumerate(rows, start=4):
         for j, v in enumerate(row, start=1):
@@ -303,8 +312,12 @@ def offer_sheet(wb):
             c.border = BORDER
             c.font = BOLD if j == 1 else BLACK
             c.alignment = Alignment(wrap_text=True, vertical='top')
-        o.row_dimensions[i].height = 34
-    o.cell(row=10, column=1, value='All figures are proposals for your decision. Nothing is published or offered to customers.').font = NOTE
+        o.row_dimensions[i].height = 90 if row[0].startswith('Not included') else (48 if len(max(row, key=len)) > 60 else 30)
+    n = 4 + len(rows) + 1
+    for t in ['All of this is a proposal. Nothing is published or offered; annual pricing approval is on hold.',
+              'The hourly figures on this sheet are descriptions; the numbers the margin uses are the blue inputs on Assumptions.']:
+        o.cell(row=n, column=1, value=t).font = NOTE
+        n += 1
 
 
 def readme(wb):
@@ -323,7 +336,8 @@ def readme(wb):
         ('', None),
         ('How to use', Font(name=F, bold=True, size=12)),
         ('• Change only blue numbers (Assumptions and Pilot subsidy). Yellow marks the inputs with the biggest effect.', None),
-        ('• Margin compares annual and monthly billing per plan, before and after the rework, and across support costs.', None),
+        ('• Margin shows the proposal (Business 3 hours); Margin - Business 2h shows scenario B. Both compare monthly and annual billing, before and after the rework, and across support costs.', None),
+        ('• Support entitlements lists what each plan includes and excludes, and how the margin counts it.', None),
         ('', None),
         ('Excluded', Font(name=F, bold=True, size=12)),
         ('• Meta message fees (paid by customers directly), usage overages, AI credits (later phase), sales commission, taxes and development cost.', None),
@@ -340,9 +354,13 @@ def main(out):
     readme(wb)
     A, G = inputs_sheet(wb)
     margin_sheet(wb, A, G)
+    margin_sheet(wb, A, G, 'Support allowance — Business 2-hour scenario (hours / month)', 'Margin - Business 2h',
+                 'Scenario B (Business includes 2 hours) — growth scale, 100 companies, per company per month')
+    entitlements_sheet(wb)
     pilot_sheet(wb, G)
-    offer_sheet(wb)
-    wb.move_sheet('Margin', offset=-2)
+    order = ['Read me', 'Margin', 'Margin - Business 2h', 'Support entitlements', 'Assumptions', 'Pilot subsidy']
+    wb._sheets = [wb[n] for n in order]
+    wb.active = 0
     wb.save(out)
     print(out)
 
