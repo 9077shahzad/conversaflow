@@ -218,10 +218,10 @@ Candidate 2 is preserved (`rc2-tested` = `58d156f`, `rc2-packaged` = `bec9ee8`, 
 
 | Item | Change | Evidence | Status |
 | --- | --- | --- | --- |
-| M7 | Authenticator activates only after an 8-digit code emailed to the verified address is entered in the session that started set-up (migration 0016, ADR-032) | `m7-m9.test.ts`: flow; session binding, single use, 15-minute expiry; guessing limit; E1 replay blocked; the sign-in role cannot read, create or redirect codes or change the address; a leaked code is useless in a forged session | Built — awaiting independent recheck |
-| M8 | Two-person, identity-checked, audited reset; every session ends; user notified (migration 0017, ADR-033, runbook) | Tests: support agent refused; document numbers refused; requester cannot approve; second owner approves; factors gone, sessions ended, notice, audit, re-enrolment with M7; one open request; rejection; expiry; no reset of own account; no login role can run the reset | Built — awaiting independent recheck. **Usable only with a second platform owner** |
-| M9 | Pilot invitations 72 hours; list and revoke; single use (ADR-034) | Tests: 72 h vs 7 days; revoked link refused at once; list never shows tokens; second use and expired link refused | Built — awaiting independent recheck |
-| Item 6 | CI guard flags privileged functions that could write pilot or override records (ADR-035) | Test with planted functions (direct and dynamic SQL) | Built — awaiting independent recheck |
+| M7 | Authenticator activates only after an 8-digit code emailed to the verified address is entered in the session that started set-up (migration 0016, ADR-032) | `m7-m9.test.ts`: flow; session binding, single use, 15-minute expiry; guessing limit; E1 replay blocked; the sign-in role cannot read, create or redirect codes or change the address; a leaked code is useless in a forged session | Built — **verified** by the review of `c6c51b8` |
+| M8 | Two-person, identity-checked, audited reset; every session ends; user notified (migration 0017, ADR-033, runbook) | Tests: support agent refused; document numbers refused; requester cannot approve; second owner approves; factors gone, sessions ended, notice, audit, re-enrolment with M7; one open request; rejection; expiry; no reset of own account; no login role can run the reset | Built — **verified** by the review of `c6c51b8` (two Low items fixed since). **Usable only with a second platform owner** |
+| M9 | Pilot invitations 72 hours; list and revoke; single use (ADR-034) | Tests: 72 h vs 7 days; revoked link refused at once; list never shows tokens; second use and expired link refused | Built — **verified** by the review of `c6c51b8` |
+| Item 6 | CI guard flags privileged functions that could write pilot or override records (ADR-035) | Test with planted functions (direct and dynamic SQL) | Built — **verified** by the review of `c6c51b8` |
 | Item 11 | `packages/database/src/client.ts` under code-owner coverage | CODEOWNERS | Prepared — enforcement pending GitHub |
 | Browsers | Unsupported-browser notice in both languages; Firefox and WebKit configured for CI | Browser check: notice hidden in Chromium; built CSS rule inspected | Built; Firefox/WebKit first run pending GitHub; real-device check pending staging |
 
@@ -240,4 +240,24 @@ Candidate 2 is preserved (`rc2-tested` = `58d156f`, `rc2-packaged` = `bec9ee8`, 
 | 9 | Hosted verification (signatures, revocation, storage, session expiry, backup restore) | — | Pending | Owner: hosting decision |
 | 10 | Firefox/WebKit browser checks not yet run; real-device check pending | — | Configured | GitHub set-up (CI), then staging |
 | 11 | Database-context code outside code-owner coverage | — | **Closed** (enforcement pending GitHub) | — |
+
+### Independent review of candidate 3 at `c6c51b8` (20 Oct 2026)
+
+**Commit reviewed:** `c6c51b88dbaabaa860291108751528952a18eca5` (fresh clone, frozen lockfile).
+**Reviewer's result:** 243/243 API tests; browser checks 11/11 twice (Chromium only; Firefox and WebKit verified by
+reading the configuration); `test:scripts` 14/14; strict audit with no advisories; own probes as the sign-in role,
+a three-way activation race (one success, exactly 10 recovery codes), and cross-company invitation revocation.
+**Verdict:** "M7's core property holds: someone with the sign-in database credentials can neither change where the
+confirmation code goes nor activate an authenticator without the emailed code." No Critical, High or Medium.
+
+| # | Finding | Severity | Fix (migration 0018 and API) | Status |
+| --- | --- | --- | --- | --- |
+| L-A | Identity-reference filter bypassed with spaced, dashed, Arabic-Indic or full-width digits | Low | Six or more digits of any script in a run, with separators, refused in the database and the API | Fixed — awaiting recheck |
+| L-B | Second approver could not see the request before approving | Low | `GET /v1/platform/mfa-resets` (platform owners): reason, method, reference, requester | Fixed — awaiting recheck |
+| L-C | Invitations sent before enrolment kept 7 days; 72-hour rule only in application code | Low | Enrolment cuts pending invitations to 72 h; database trigger caps pilot invitations | Fixed — awaiting recheck |
+| L-D | CI guard missed a writer reached through a helper, and `concat()` dynamic SQL | Low | Dedicated owner role `cf_pilot`; guard works by owner and allowed signatures, following function chains | Fixed — awaiting recheck |
+| I | The notifier credential chooses and sends the code (inherent to sending mail) | Informational | Activation still needs the enrolling session | Accepted |
+| I | No cap on confirmation emails | Informational | Capped at 5 per user per hour | Fixed — awaiting recheck |
+| I | Password unchanged after a reset | Informational | Runbook advises a password change | Documented |
+| I | Not-found pages do not show the browser notice | Informational | Cosmetic | Accepted |
 

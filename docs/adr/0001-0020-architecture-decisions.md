@@ -219,3 +219,22 @@ writers, or runs dynamic SQL. The only exceptions are `platform_enrol_pilot` and
 the console role may run. Tested with a planted function, written both directly and through dynamic SQL.
 `packages/database/src/client.ts` (company context for row security) is added to code-owner coverage, with
 enforcement still pending GitHub configuration.
+
+## ADR-036 — Fixes from the independent review of candidate 3
+
+Migration 0018:
+
+- **L-D:** a new NOLOGIN role, `cf_pilot`, owns the only two functions allowed to write pilot enrolments and seat
+  overrides, and alone holds those write rights; the operations role lost them. The CI guard now works by owner,
+  not by reading function bodies. It works out every role that can write those tables directly or through any
+  chain of privileged functions, then flags any privileged function a login role can run whose owner is in that
+  set, unless its full signature is one of the two allowed. It also flags any role other than `cf_pilot` (and the
+  table owner) that gains write rights. A wrapper calling a writer helper and dynamic SQL built with `concat()` are
+  both caught (tests).
+- **L-C:** enrolling a pilot cuts the company's pending invitations to 72 hours. A trigger caps every invitation of a
+  company with a running pilot at 72 hours on insert and update, so the business role cannot lengthen one.
+- **L-A:** identity references refuse six or more digits of any script in a run, even with spaces, dashes, dots or
+  slashes.
+- **L-B:** `platform_list_mfa_resets` (platform owners) shows open requests with reason, identity method, reference
+  and requester, so the second owner reviews before approving.
+- **Informational:** confirmation-code emails are capped at 5 per user per hour.

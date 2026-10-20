@@ -12,7 +12,9 @@ import pg from 'pg';
 const LOGIN_ROLES = ['cf_app', 'cf_identity', 'cf_notify', 'cf_platform'];
 const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_codes', 'auth_tokens', 'auth_email_requests', 'auth_keys', 'mfa_attempts', 'mfa_activation_codes', 'mfa_reset_requests'];
 /** The only privileged functions allowed to write pilot or seat-override records, both token-bound to a platform owner. */
-const PILOT_WRITERS_ALLOWED = ['platform_enrol_pilot', 'platform_end_pilot'];
+const PILOT_WRITERS_ALLOWED = ['platform_enrol_pilot(text,uuid,integer,integer,text)', 'platform_end_pilot(text,uuid)'];
+/** Roles that may hold write rights on pilot enrolments and seat overrides: the table owner and cf_pilot (migration 0018). */
+const PILOT_TABLE_WRITERS = ['cf_owner', 'cf_pilot'];
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
@@ -73,9 +75,9 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
     // Every SECURITY DEFINER function that acts for a person must be owned by cf_auth or cf_ops (never a login role).
     const badOwners = await client.query<{ sig: string; owner: string }>(`
       SELECT p.oid::regprocedure::text AS sig, pg_get_userbyid(p.proowner) AS owner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-      WHERE n.nspname = 'public' AND p.prosecdef AND pg_get_userbyid(p.proowner) NOT IN ('cf_auth', 'cf_ops')
+      WHERE n.nspname = 'public' AND p.prosecdef AND pg_get_userbyid(p.proowner) NOT IN ('cf_auth', 'cf_ops', 'cf_pilot')
         AND (p.proname LIKE 'auth\\_%' OR p.proname LIKE 'platform\\_%')`);
-    for (const f of badOwners.rows) problems.push(`${f.sig} is owned by ${f.owner}; must be cf_auth or cf_ops`);
+    for (const f of badOwners.rows) problems.push(`${f.sig} is owned by ${f.owner}; must be cf_auth, cf_ops or cf_pilot`);
     // The platform console role has NO direct table access except reading the plan catalogue and flags.
     const platformTables = await client.query<{ t: string }>(`
       SELECT c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -121,27 +123,39 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       if (rows[0]!.pilot) problems.push(`${roleName} can write pilot enrolments`);
       if (rows[0]!.ovr) problems.push(`${roleName} can write limit overrides`);
     }
-    // ...nor through a privileged function: any SECURITY DEFINER function a login role can run whose owner can write
-    // those tables is flagged unless it is one of the token-bound console actions (independent review, item 6).
+    // ...nor through a privileged function, however indirect (review of candidate 3, L-D). Writers = roles with write
+    // rights on those tables, plus (repeatedly) owners of privileged functions that a writer-owned function lets
+    // them run. Any privileged function a login role can run whose owner is a writer is flagged, unless it is one of
+    // the two allowed signatures. No reading of function bodies, so helpers and dynamic SQL cannot hide a write.
+    const writers = new Set((await client.query<{ r: string }>(
+      // PostgreSQL's built-in pg_* roles are skipped: any account granted one shows up here as a writer itself.
+      `SELECT r.rolname AS r FROM pg_roles r WHERE NOT r.rolsuper AND r.rolname NOT LIKE 'pg\\_%' AND (has_table_privilege(r.oid, 'pilot_enrolments', 'INSERT,UPDATE,DELETE,TRUNCATE')
+         OR has_any_column_privilege(r.oid, 'pilot_enrolments', 'INSERT,UPDATE')
+         OR has_table_privilege(r.oid, 'entitlement_overrides', 'INSERT,UPDATE,DELETE,TRUNCATE')
+         OR has_any_column_privilege(r.oid, 'entitlement_overrides', 'INSERT,UPDATE'))`)).rows.map((x) => x.r));
+    for (const w of writers) {
+      if (!PILOT_TABLE_WRITERS.includes(w) && !LOGIN_ROLES.includes(w)) problems.push(`${w} can write pilot enrolments or seat overrides; only cf_pilot may`);
+    }
+    for (let grew = true; grew;) {
+      grew = false;
+      const { rows } = await client.query<{ r: string }>(`
+        SELECT DISTINCT r.rolname AS r FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
+        WHERE n.nspname = 'public' AND p.prosecdef AND p.prorettype <> 'trigger'::regtype AND NOT r.rolsuper
+          AND pg_get_userbyid(p.proowner) = ANY($1::text[]) AND NOT (p.oid::regprocedure::text = ANY($2::text[]))
+          AND has_function_privilege(r.oid, p.oid, 'EXECUTE')`, [[...writers], PILOT_WRITERS_ALLOWED]);
+      for (const x of rows) if (!writers.has(x.r)) { writers.add(x.r); grew = true; }
+    }
     const pilotWriters = await client.query<{ who: string; fn: string }>(`
       SELECT r.rolname AS who, p.oid::regprocedure::text AS fn
-      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-      CROSS JOIN pg_roles r
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
       WHERE n.nspname = 'public' AND p.prosecdef AND p.prorettype <> 'trigger'::regtype
-        AND r.rolname = ANY($1::text[])
-        AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
-        AND (has_table_privilege(p.proowner, 'pilot_enrolments', 'INSERT,UPDATE,DELETE,TRUNCATE')
-             OR has_any_column_privilege(p.proowner, 'pilot_enrolments', 'INSERT,UPDATE')
-             OR has_table_privilege(p.proowner, 'entitlement_overrides', 'INSERT,UPDATE,DELETE,TRUNCATE')
-             OR has_any_column_privilege(p.proowner, 'entitlement_overrides', 'INSERT,UPDATE'))
-        AND NOT (p.proname = ANY($2::text[]))
-        -- the body touches those tables, calls an allowed writer, or runs dynamic SQL that could hide either
-        AND (p.prosrc ~* '(pilot_enrolments|entitlement_overrides|platform_enrol_pilot|platform_end_pilot)'
-             OR p.prosrc ~* '\\mEXECUTE\\M\\s+(format|''|\\$|[a-z_]+\\s*(\\|\\||;))')`, [LOGIN_ROLES, PILOT_WRITERS_ALLOWED]);
+        AND r.rolname = ANY($1::text[]) AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+        AND pg_get_userbyid(p.proowner) = ANY($2::text[])
+        AND NOT (p.oid::regprocedure::text = ANY($3::text[]))`, [LOGIN_ROLES, [...writers], PILOT_WRITERS_ALLOWED]);
     for (const w of pilotWriters.rows) problems.push(`${w.who} can run ${w.fn}, a privileged function able to write pilot or override records`);
     const allowedRunners = await client.query<{ who: string; fn: string }>(`
-      SELECT r.rolname AS who, p.proname AS fn FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
-      WHERE n.nspname = 'public' AND p.proname = ANY($2::text[]) AND r.rolname = ANY($1::text[]) AND r.rolname <> 'cf_platform'
+      SELECT r.rolname AS who, p.oid::regprocedure::text AS fn FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
+      WHERE n.nspname = 'public' AND p.oid::regprocedure::text = ANY($2::text[]) AND r.rolname = ANY($1::text[]) AND r.rolname <> 'cf_platform'
         AND has_function_privilege(r.oid, p.oid, 'EXECUTE')`, [LOGIN_ROLES, PILOT_WRITERS_ALLOWED]);
     for (const w of allowedRunners.rows) problems.push(`${w.who} can run ${w.fn}; only the platform console role may`);
     if (billing.rows[0]!.sess) problems.push('cf_identity can insert sessions directly; it must use auth_open_session');

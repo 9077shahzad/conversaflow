@@ -1,30 +1,61 @@
-# GitHub setup checklist — Meronatic-owned organisation
+# GitHub set-up — Meronatic-owned organisation (owner steps)
 
-Proposed repository: **`conversaflow`** (private). Push approval stays pending until you confirm the organisation.
+Proposed private repository: **`conversaflow`**. Push approval stays pending until you confirm the repository URL.
+Free plan; about 20 minutes. Paid GitHub features need separate approval.
 
-## You (owner) — about 20 minutes
+**Recommended organisation name:** `meronatic-group`, matching MERONATIC SOLUTIONS GROUP, LLC. Fallback:
+`meronatic-solutions`. The name `meronatic` is already taken by an existing GitHub account. If that account is
+yours, keep it as your personal login; do not convert it.
 
-- [ ] Sign in with a Meronatic-controlled admin account (shared company mailbox, not personal); turn on two-factor authentication.
-- [ ] Create the organisation (Free plan is enough) at github.com/organizations/plan, e.g. `meronatic`.
-- [ ] Organisation **Settings → Authentication security**: require two-factor authentication for everyone.
-- [ ] Add a second Meronatic owner, so access never depends on one person.
-- [ ] Create repository **`conversaflow`**: Private, empty (no README, licence or .gitignore).
-- [ ] Repository **Settings → Branches**: protect `main` — pull request required, status check `CI / checks` required, no force-push, no deletion.
-- [ ] Repository **Settings → Code security**: Dependabot alerts and security updates on (free).
-- [ ] Create a team **security-owners** with you and the second Meronatic owner. Tell me its name, and I replace the placeholder in `.github/CODEOWNERS` in the first pull request.
-- [ ] Repository **Settings → Branches → main**: also tick **Require review from Code Owners**. Edits to `docs/security/` (including approving an audit exception), CI, migrations and the security scripts then need an owner's approval. Until this is ticked, the code-owner rule is **not enforced**.
-- [ ] Tell me the organisation name and approve the push.
+## Your seven steps
 
-## Me (after your approval)
+1. **Secure the admin login.** Sign in to GitHub with a Meronatic-controlled account (a company mailbox, not a
+   personal one). Turn on two-factor authentication: Settings → Password and authentication.
+2. **Create the organisation.** Go to github.com/organizations/plan, choose **Free**, name it `meronatic-group`,
+   contact email = the company mailbox, and "This organisation belongs to: a business" → MERONATIC SOLUTIONS
+   GROUP, LLC.
+3. **Lock down membership.** Organisation Settings → Authentication security: **Require two-factor
+   authentication**. Settings → Member privileges: base permission **No permission**; repository creation
+   **disabled** for members. Then invite a second Meronatic owner as **Owner**.
+4. **Create the team.** Teams → New team **`security-owners`**: you and the second owner.
+5. **Create the repository.** New repository **`conversaflow`**: **Private**, completely empty (no README,
+   licence or .gitignore). Then, in its Settings:
+   - Features: Wikis off, Projects off.
+   - Pull requests: allow squash merging only; turn on "Automatically delete head branches".
+   - Actions → General: "Allow GitHub Actions" for this repository; workflow permissions **Read repository contents**.
+6. **Protect `main`.** Settings → Rules → Rulesets → New branch ruleset, target `main`:
+   - Require a pull request before merging, with 1 approval.
+   - Tick **Require review from Code Owners**.
+   - Require status checks to pass: **`CI / checks`** (it appears after the first run).
+   - Block force pushes; restrict deletions.
+   - Settings → Code security: turn on Dependabot alerts and Dependabot security updates (free).
+7. **Send me the details below** and approve the push. I connect through GitHub's own approval screen, never with
+   a password or token in chat or code.
 
-- [ ] Request access through the GitHub connection (you approve on GitHub; no password or token in chat or code).
-- [ ] Push the history from the bundle; confirm the commit hash on GitHub matches the handover.
-- [ ] Watch the first pipeline run end to end; preserve the run log and screenshot artefact in `docs/reports/evidence/`.
-- [ ] Run the full pipeline once more from a **clean checkout and fresh database** using the restricted database roles, and record the result.
+## What I need back from you
+
+| Item | Example |
+| --- | --- |
+| Repository URL | `https://github.com/meronatic-group/conversaflow` |
+| Organisation name | `meronatic-group` |
+| Code-owner team name | `security-owners` |
+| GitHub usernames of the two owners | `@your-username`, `@second-owner` |
+| Confirmation | "2FA required, `main` protected with code-owner review, push approved" |
+
+## After your approval (my steps)
+
+- Connect through GitHub's approval, push the full history and tags, and confirm on GitHub that the commit hashes
+  match the release manifest.
+- Replace the placeholder `@MERONATIC-ORG/security-owners` in `.github/CODEOWNERS` with the real team, in the first
+  pull request.
+- Watch the first CI run (Chromium, Firefox and WebKit browser checks included) and keep its logs in
+  `docs/reports/evidence/`.
 
 ## Rules that stay in force
 
-- Developers get **Write** on the repository only, never Admin.
-- No secrets in the repository: `.env` is ignored, `.env.example` holds placeholders, CI fails on a secret-scan hit.
-- CI needs **no repository secrets** today; its database passwords are throwaway values for temporary containers.
-- Paid GitHub features (Team plan, Advanced Security) need separate approval.
+- Developers get **Write** on the repository, never Admin.
+- No secrets in the repository: `.env` is ignored, `.env.example` holds placeholders, and CI fails on a secret-scan
+  hit.
+- CI needs no repository secrets today.
+- Code-owner review covers security records, CI, database migrations, security scripts, configuration files and
+  access-control code. It is enforced only once step 6 is done.

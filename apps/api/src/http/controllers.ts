@@ -352,6 +352,11 @@ export class PlatformController {
     await this.platform.setFeatureFlag(await this.platform.requireStaff(s, 'platform_owner'), id, key, body);
   }
 
+  @Get('mfa-resets')
+  async listMfaResets(@CurrentSession() s: AuthSession) {
+    return this.platform.listMfaResets(await this.platform.requireStaff(s, 'platform_owner'));
+  }
+
   @Post('mfa-resets') @HttpCode(201)
   async requestMfaReset(@CurrentSession() s: AuthSession, @Body() body: unknown) {
     return this.platform.requestMfaReset(await this.platform.requireStaff(s, 'platform_owner'), body);

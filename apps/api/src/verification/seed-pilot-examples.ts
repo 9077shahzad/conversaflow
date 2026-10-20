@@ -99,7 +99,7 @@ async function main() {
   const mailer = new MemoryMailer();
   const deps = buildDeps(config, { mailer });
   const notify = createPool(process.env.DATABASE_NOTIFY_URL!, 1);
-  // Operations connection (migration owner, acting as cf_ops): used only to record each company's pilot enrolment.
+  // Operations connection (migration owner, acting as cf_pilot): used only to record each company's pilot enrolment.
   const ops = createPool(process.env.DATABASE_URL!, 1);
   const notifier = new Notifier(notify, mailer, config.APP_ORIGIN);
   const auth = new AuthService(deps);
@@ -129,7 +129,7 @@ async function main() {
     // two-step sign-in required for everyone. The standard trial cap of 3 seats is untouched. Written here as the
     // platform-operations role because a seed has no staff session; the console uses platform_enrol_pilot.
     await withContext(ops, { tenantId: null, userId: null }, async (tx) => {
-      await tx.query('SET LOCAL ROLE cf_ops');
+      await tx.query('SET LOCAL ROLE cf_pilot');
       const ovr = await tx.query<{ id: string }>(
         "INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, granted_by, expires_at) VALUES ($1, 'seats', 10, 'Pilot seat allowance: synthetic example', $2, now() + interval '90 days') RETURNING id",
         [tenant.id, owner.userId]);

@@ -166,7 +166,7 @@ describe('candidate 2 follow-ups (independent recheck R4-3, R4-4)', () => {
     const asOps = async (sql: string) => {
       const c = await t.ownerDb.connect();
       try {
-        await c.query('BEGIN'); await c.query('SET LOCAL ROLE cf_ops');
+        await c.query('BEGIN'); await c.query('SET LOCAL ROLE cf_pilot');
         const r = await c.query(sql, [tenant]); await c.query('COMMIT'); return r;
       } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
     };

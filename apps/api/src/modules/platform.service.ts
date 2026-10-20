@@ -24,7 +24,8 @@ const MfaResetRequest = z.object({
   reason: z.string().trim().min(20, 'Explain the situation (at least 20 characters)').max(1000),
   identityMethod: z.enum(['video_call_photo_id', 'callback_known_number', 'company_owner_confirmation', 'in_person']),
   identityReference: z.string().trim().min(10).max(200)
-    .refine((v) => !/[0-9]{6,}/.test(v), 'Do not record document or account numbers; describe the check instead'),
+    // Six or more digits of any script in a run, even with spaces, dashes, dots or slashes (review of candidate 3, L-A).
+    .refine((v) => !/(\p{Nd}[\s./-]?){6,}/u.test(v), 'Do not record document or account numbers; describe the check instead'),
 });
 const PilotRequest = z.object({
   seats: z.number().int().min(1).max(50).default(10),
@@ -114,6 +115,11 @@ export class PlatformService {
     const id = await this.run(staff, async (tx) => (await tx.query<{ id: string }>(
       'SELECT platform_request_mfa_reset($1, $2, $3, $4, $5) AS id', [staff.token, b.email, b.reason, b.identityMethod, b.identityReference])).rows[0]!.id);
     return { requestId: id, status: 'awaiting_second_approver', expiresInHours: 24 };
+  }
+
+  /** M8: open reset requests with their reason and identity check, so the second owner can review before approving. */
+  async listMfaResets(staff: StaffActor) {
+    return this.run(staff, async (tx) => (await tx.query<{ rows: unknown }>('SELECT platform_list_mfa_resets($1) AS rows', [staff.token])).rows[0]!.rows);
   }
 
   /** M8 step 2: a DIFFERENT platform owner approves; the reset happens in the same transaction. */

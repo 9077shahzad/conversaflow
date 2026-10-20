@@ -81,7 +81,8 @@ async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Prom
     );
     await client.query(rows[0]!.sql);
   }
-  for (const owner of ['cf_auth', 'cf_ops']) {
+  // cf_pilot (migration 0018) alone may write pilot enrolments and seat overrides, through two console functions.
+  for (const owner of ['cf_auth', 'cf_ops', 'cf_pilot']) {
     // eslint-disable-next-line no-restricted-syntax
     if (!(await exists(owner))) await client.query(`CREATE ROLE ${pg.escapeIdentifier(owner)} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   }
@@ -89,7 +90,7 @@ async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Prom
   const { rows: me } = await client.query<{ u: string; db: string }>('SELECT current_user AS u, current_database() AS db');
   // Identifiers come from the server itself and are escaped; GRANT cannot take bind parameters.
   // eslint-disable-next-line no-restricted-syntax
-  await client.query(`GRANT cf_auth, cf_ops TO ${pg.escapeIdentifier(me[0]!.u)}`);
+  await client.query(`GRANT cf_auth, cf_ops, cf_pilot TO ${pg.escapeIdentifier(me[0]!.u)}`);
   for (const [role] of loginRoles) {
     // eslint-disable-next-line no-restricted-syntax
     await client.query(`GRANT CONNECT ON DATABASE ${pg.escapeIdentifier(me[0]!.db)} TO ${pg.escapeIdentifier(role)}`);

@@ -90,6 +90,14 @@ describe('M7: an authenticator activates only with the code emailed to the verif
     await c.post('/v1/auth/mfa/totp/activate', { code: await emailedMfaCode(t, c.email) }).expect(429);
   });
 
+  it('at most 5 confirmation emails per user per hour', async () => {
+    const c = await newUser(t, 'm7cap');
+    const setup = await c.post('/v1/auth/mfa/totp/setup').expect(201);
+    c.mfaSecret = setup.body.secret;
+    for (let i = 0; i < 5; i++) await c.post('/v1/auth/mfa/totp/confirm', { code: await nextTotp(c) }).expect(202);
+    await c.post('/v1/auth/mfa/totp/confirm', { code: await nextTotp(c) }).expect(429);
+  }, 240_000);
+
   it('replay of E1: a forged session can start set-up but cannot finish it, and the code goes only to the real owner', async () => {
     const victim = await newUser(t, 'm7victim');
     await t.deliver();
@@ -155,9 +163,19 @@ describe('M8: two-person, identity-checked, audited reset of two-step sign-in', 
     const u = await newUser(t, 'm8user');
     await enableMfa(u);
     await agentStaff.post('/v1/platform/mfa-resets', req(u.email)).expect(403);
-    await ownerA.post('/v1/platform/mfa-resets', req(u.email, { identityReference: 'Passport number 12345678 checked' })).expect(400);
+    for (const bad of ['Passport number 12345678 checked', 'passport 123 456 789 checked', 'id 12-34-56-78-90 seen on call',
+      'iqama ١٢٣٤٥٦٧٨٩٠ seen on call', 'card １２３４５６７８ shown on call']) {
+      await ownerA.post('/v1/platform/mfa-resets', req(u.email, { identityReference: bad })).expect(400);
+    }
     const id = (await ownerA.post('/v1/platform/mfa-resets', req(u.email)).expect(201)).body.requestId;
     expect((await ownerA.post(`/v1/platform/mfa-resets/${id}/approve`).expect(403)).body.error.message).toMatch(/second platform owner/);
+    // The second owner sees the reason and the identity check before approving (review of candidate 3, L-B).
+    await agentStaff.get('/v1/platform/mfa-resets').expect(403);
+    const open = (await ownerB.get('/v1/platform/mfa-resets').expect(200)).body as Array<Record<string, unknown>>;
+    expect(open.find((r) => r.id === id)).toMatchObject({
+      user: u.email, identityMethod: 'video_call_photo_id', requestedBy: ownerA.email, requestedByYou: false,
+      identityReference: 'Video call 10:20 GST, matched profile photo and company role',
+    });
     expect(await mfaOn(u)).toBe(true); // nothing changed yet
     const appr = await ownerB.post(`/v1/platform/mfa-resets/${id}/approve`);
     expect(appr.status, JSON.stringify(appr.body)).toBe(200);
@@ -248,6 +266,22 @@ describe('M9: pilot invitations are single use, revocable and last 72 hours', ()
     expect(hoursLeft(n.body.expiresAt)).toBeGreaterThan(167.9);
   });
 
+  it('enrolling a company in the pilot cuts its pending invitations to 72 hours, and the database caps any later change', async () => {
+    const o = await newUser(t, 'm9before');
+    const tenant = await newCompany(o, 'm9beforeco', 'growth');
+    await enableMfa(o);
+    const inv = await o.post('/v1/invitations', { email: 'before-pilot@example.test', roleKey: 'agent' }).expect(201);
+    expect(hoursLeft(inv.body.expiresAt)).toBeGreaterThan(167.9);
+    await lead.post(`/v1/platform/tenants/${tenant}/pilot`, { reason: 'Invitation cut test, review L-C' }).expect(201);
+    const left = async () => hoursLeft((await withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
+      tx.query('SELECT expires_at FROM invitations WHERE id = $1', [inv.body.invitationId]))).rows[0].expires_at.toISOString());
+    expect(await left()).toBeLessThan(72.1);
+    // Even the business role cannot lengthen it while the pilot runs.
+    await withContext(t.deps.db, { tenantId: tenant, userId: o.userId! }, (tx) =>
+      tx.query("UPDATE invitations SET expires_at = now() + interval '30 days' WHERE id = $1", [inv.body.invitationId]));
+    expect(await left()).toBeLessThan(72.1);
+  });
+
   it('a revoked invitation stops working at once; the list never shows tokens', async () => {
     const invitee = await newUser(t, 'm9revoked');
     const inv = await pilotOwner.post('/v1/invitations', { email: invitee.email, roleKey: 'agent' }).expect(201);
@@ -282,21 +316,38 @@ describe('CI guard: privileged functions that could write pilot or override reco
     try {
       await owner.query(`CREATE FUNCTION test_sneaky_grant(p uuid) RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp
         AS $$ INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (p, 'seats', 99, 'x', now() + interval '1 day') $$`);
-      await owner.query('ALTER FUNCTION test_sneaky_grant(uuid) OWNER TO cf_ops');
+      await owner.query('ALTER FUNCTION test_sneaky_grant(uuid) OWNER TO cf_pilot');
       await owner.query(`CREATE FUNCTION test_sneaky_dynamic(q text) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
         AS $$ BEGIN EXECUTE format('%s', q); END $$`);
-      await owner.query('ALTER FUNCTION test_sneaky_dynamic(text) OWNER TO cf_ops');
-      await owner.query('GRANT EXECUTE ON FUNCTION test_sneaky_grant(uuid), test_sneaky_dynamic(text) TO cf_app');
+      await owner.query('ALTER FUNCTION test_sneaky_dynamic(text) OWNER TO cf_pilot');
+      // Review of candidate 3, L-D: a wrapper that only calls a writer helper, and dynamic SQL built with concat().
+      await owner.query(`CREATE FUNCTION zz_helper_grant(p uuid) RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp
+        AS $$ INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (p, 'seats', 99, 'x', now() + interval '1 day') $$`);
+      await owner.query('ALTER FUNCTION zz_helper_grant(uuid) OWNER TO cf_pilot');
+      await owner.query('REVOKE ALL ON FUNCTION zz_helper_grant(uuid) FROM PUBLIC');
+      await owner.query('GRANT EXECUTE ON FUNCTION zz_helper_grant(uuid) TO cf_ops');
+      await owner.query(`CREATE FUNCTION test_wrapper(p uuid) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+        AS $$ BEGIN PERFORM zz_helper_grant(p); END $$`);
+      await owner.query('ALTER FUNCTION test_wrapper(uuid) OWNER TO cf_ops');
+      await owner.query(`CREATE FUNCTION test_concat(p uuid) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+        AS $$ BEGIN EXECUTE (concat('INSERT INTO entitle', 'ment_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES ($1, ''seats'', 99, ''x'', now() + interval ''1 day'')')) USING p; END $$`);
+      await owner.query('ALTER FUNCTION test_concat(uuid) OWNER TO cf_pilot');
+      await owner.query('GRANT EXECUTE ON FUNCTION test_sneaky_grant(uuid), test_sneaky_dynamic(text), test_wrapper(uuid), test_concat(uuid) TO cf_app');
       await owner.query('GRANT EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) TO cf_identity');
       const problems = await checkIsolation(process.env.DATABASE_URL!);
       expect(problems).toEqual(expect.arrayContaining([
         'cf_app can run test_sneaky_grant(uuid), a privileged function able to write pilot or override records',
         'cf_app can run test_sneaky_dynamic(text), a privileged function able to write pilot or override records',
+        'cf_app can run test_wrapper(uuid), a privileged function able to write pilot or override records',
+        'cf_app can run test_concat(uuid), a privileged function able to write pilot or override records',
         'cf_identity can issue two-step confirmation codes; only cf_notify may',
       ]));
     } finally {
       await owner.query('DROP FUNCTION IF EXISTS test_sneaky_grant(uuid)');
       await owner.query('DROP FUNCTION IF EXISTS test_sneaky_dynamic(text)');
+      await owner.query('DROP FUNCTION IF EXISTS test_wrapper(uuid)');
+      await owner.query('DROP FUNCTION IF EXISTS test_concat(uuid)');
+      await owner.query('DROP FUNCTION IF EXISTS zz_helper_grant(uuid)');
       await owner.query('REVOKE EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) FROM cf_identity');
       await owner.end();
     }
