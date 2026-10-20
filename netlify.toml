@@ -1,0 +1,18 @@
+# Netlify preview of the ConversaFlow web screens only (Netlify free plan).
+# No engine, database or email is connected: forms cannot work, and the preview notice says so.
+[build]
+  command = "pnpm --filter @conversaflow/web build"
+  publish = "apps/web/.next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NEXT_TELEMETRY_DISABLED = "1"
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
+  CF_PREVIEW_NOTICE = "1"
+  # No API is connected in this preview; requests to /v1 fail by design.
+  API_URL = "http://127.0.0.1:9"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
