@@ -35,7 +35,7 @@ decisions of 20 Oct:
 
 | # | Blocker | Evidence needed | Next action |
 | --- | --- | --- | --- |
-| B1 | Independent review of each candidate's security changes | Reviewer's verdict for the exact commit | Candidate 3: recheck in progress. **Done for candidates 1 and 2.** Candidate 1: `3966c4c`. Candidate 2: reviewed at `e18d89f`, fixes rechecked at `56cdf5b`, CODEOWNERS confirmed at `58d156f` (tested). See `docs/reports/release-manifest.md` |
+| B1 | Independent review of each candidate's security changes | Reviewer's verdict for the exact commit | **Done for candidates 1 to 3.** Candidate 3: reviewed at `c6c51b8`, fixes rechecked at `42823bb`, `4e60aeb`, `6f78a89` and `f1bc095` (tested, `rc3-tested`); G4 accepted as a Low residual. Candidate 1: `3966c4c`. Candidate 2: reviewed at `e18d89f`, fixes rechecked at `56cdf5b`, CODEOWNERS confirmed at `58d156f` (tested). See `docs/reports/release-manifest.md` |
 | B2 | GitHub CI and the clean-checkout run on GitHub | A green run for the pushed commit, with logs kept | Needs A3. The same steps already run locally from a clean checkout |
 | B3 | Malware scanning in hosting | `freshclam` installs and updates official signatures; clamd runs with `TZ=UTC`; startup reports signatures current; uploads refused when signatures are missing or outdated, or the scanner is down or slow | Needs A4 |
 | B4 | File-access revocation in hosting | Links refused after removal, role change or expiry, through the real storage | Needs A4 |
@@ -45,7 +45,7 @@ decisions of 20 Oct:
 | B8 | Sign-in risk mitigations M1–M4 | Secrets manager, private database network, connection alerts, onboarding check | With staging (A4) and onboarding |
 | B11 | Browser checks in Firefox and WebKit | Green CI run with `PW_ALL_BROWSERS=1` | Configured; needs A3 |
 | B12 | Real-device browser check before pilot access | iPhone (iOS 16.4+), Android Chrome, Windows Edge, Mac Safari, both languages | Needs staging (A4); see `docs/readiness/browser-support.md` |
-| B10 | Code-owner enforcement for security files | `CODEOWNERS` with the real team, and "Require review from Code Owners" on `main` | Prepared and reviewed (nothing that decides what CI runs is uncovered); enforcement needs A3 |
+| B10 | Code-owner enforcement for security files | `CODEOWNERS` with the real team, and "Require review from Code Owners" on `main` | Prepared and reviewed (nothing that decides what CI runs is uncovered); **enforcement pending** until A3 is done and the ruleset is verified. Also the control for G4 (migrations) |
 | B9 | External security review | Report, fixes and a retest letter | Needs A5. Test 3–4 weeks before pilot access |
 
 ## C. Meta, after verification

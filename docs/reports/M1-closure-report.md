@@ -252,12 +252,51 @@ confirmation code goes nor activate an authenticator without the emailed code." 
 
 | # | Finding | Severity | Fix (migration 0018 and API) | Status |
 | --- | --- | --- | --- | --- |
-| L-A | Identity-reference filter bypassed with spaced, dashed, Arabic-Indic or full-width digits | Low | First fix (runs with separators) still bypassable (recheck of `42823bb`); final rule: at most 5 digits in total, any script (migration 0019) | Fixed — awaiting final recheck |
+| L-A | Identity-reference filter bypassed with spaced, dashed, Arabic-Indic or full-width digits | Low | First fix (runs with separators) still bypassable (recheck of `42823bb`); final rule: at most 5 digits in total, any script (migration 0019) | **Verified** by the recheck of `4e60aeb` |
 | L-B | Second approver could not see the request before approving | Low | `GET /v1/platform/mfa-resets` (platform owners): reason, method, reference, requester | **Verified** by the recheck of `42823bb` |
-| L-C | Invitations sent before enrolment kept 7 days; 72-hour rule only in application code | Low | Enrolment cuts pending invitations to 72 h; database trigger caps pilot invitations (verified at `42823bb`); cap now counted from creation so it cannot be renewed (0019) | Fixed — awaiting final recheck |
-| L-D | CI guard missed a writer reached through a helper, and `concat()` dynamic SQL | Low | Dedicated owner role `cf_pilot`; owner-based guard (verified for those two at `42823bb`). The recheck found three more gaps (another schema, a privileged trigger, a rule); the guard now covers all schemas, triggers, rules and views (ADR-037) | Fixed — awaiting final recheck |
+| L-C | Invitations sent before enrolment kept 7 days; 72-hour rule only in application code | Low | Enrolment cuts pending invitations to 72 h; database trigger caps pilot invitations (verified at `42823bb`); cap counted from creation (0019), and the creation time can no longer be set or the row deleted by the business role (0020, 0021) | **Verified** by the rechecks of `6f78a89` and `f1bc095` |
+| L-D | CI guard missed a writer reached through a helper, and `concat()` dynamic SQL | Low | Dedicated owner role `cf_pilot`; owner-based guard (verified for those two at `42823bb`). The recheck found three more gaps (another schema, a privileged trigger, a rule); the guard now covers all schemas, triggers on any table (G2), rules and views (ADR-037), and pins reviewed trigger functions to their whole definition and owner (G3) | **Verified** by the rechecks of `4e60aeb`, `6f78a89` and `f1bc095` |
 | I | The notifier credential chooses and sends the code (inherent to sending mail) | Informational | Activation still needs the enrolling session | Accepted |
 | I | No cap on confirmation emails | Informational | Capped at 5 per user per hour | **Verified** by the recheck of `42823bb` |
 | I | Password unchanged after a reset | Informational | Runbook advises a password change | Documented |
 | I | Not-found pages do not show the browser notice | Informational | Cosmetic | Accepted |
 
+### Targeted rechecks after `c6c51b8` (20 Oct 2026)
+
+| Recheck at | Verified | Still open after that recheck |
+| --- | --- | --- |
+| `42823bb` | L-B; email cap; L-C enrolment cut and trigger; L-D helper and `concat()` cases | L-A (separated digits); L-C (cap could be renewed); L-D (other schema, privileged trigger, rule) |
+| `4e60aeb` | L-A (at most 5 digits in total, any script); L-D cases C–H | L-C: business role could set `created_at`. G2: privileged trigger on a table only privileged functions write |
+| `6f78a89` | **L-C** (creation time cannot be set; cap counted from the stored creation time); **G2** for its own case (`mfa_attempts`); a replaced reviewed body is flagged; the four reviewed trigger functions write nothing | G3 (Low): the pin covered only the body, so a migration could change a reviewed function's `search_path`, owner or security mode unnoticed. Informational: business role still had DELETE on invitations |
+| `f1bc095` | **G3** (search_path, owner and other setting changes all flagged; an invoker switch correctly ignored); **invitation DELETE** refused (42501), invite/accept/revoke unaffected | G4 (accepted residual, see below) |
+
+**Fix for G3 and the informational item (migration 0021 and the guard):** reviewed trigger functions are pinned to
+the md5 of their whole definition (`pg_get_functiondef`: body, `search_path` and other settings, security mode,
+language) plus owner; the business role loses DELETE on invitations, which it never used.
+
+**G4 — accepted residual (Low).** At `f1bc095` the reviewer showed that a migration could replace a table that one of
+the four reviewed trigger functions reads (for example `trial_policy`) with a view calling a writing function; the
+reviewed function's definition is unchanged, so the guard passes. This is accepted rather than chased further:
+migrations run as the table owner, so a hostile migration could write a seat override directly, and no database
+check can prevent that. The guard's job is to catch accidental privilege drift; the control against a hostile or
+careless migration is code-owner review of `packages/database/migrations/`, which is **pending GitHub set-up**.
+If wanted later, the four functions can be schema-qualified and the guard can refuse views that call non-catalog
+functions.
+
+### Remaining findings — complete numbered list (candidate 3 final, `rc3-tested` = `f1bc095`)
+
+| # | Finding | Severity | Status | What closes it |
+| --- | --- | --- | --- | --- |
+| 1 | Takeover before the user finishes set-up needs the sign-in credential, database network access **and** the user's mailbox or cooperation | Accepted residual (pending owner acceptance) | Reduced by M7 and M9 | Signed acceptance; M6 before general availability |
+| 2 | The sign-in credential can lock a user out of two-step sign-in for one hour | Low | Open | M1–M3; M6 |
+| 3 | Reset process needs a second platform owner to be usable | — | Built (M8) | Owner: name a second platform owner |
+| 4 | Pilot two-step rule enforced in the API, not the database | Informational | Accepted (ADR-029) | — |
+| 5 | Code-owner review not enforced until GitHub is configured | Informational | Prepared, **enforcement pending** | Owner: GitHub set-up, then verification |
+| 6 | Framework-level items: Next.js's own redirects and error shell; malformed prefetch 500 | Informational | Accepted | Revisit with Next.js upgrades |
+| 7 | `base32_decode` unused; pre-0010 factors cannot pass TOTP (local only) | Informational | No action | — |
+| 8 | Hosted verification (signatures, revocation, storage, session expiry, backup restore) | — | Pending | Owner: hosting decision |
+| 9 | Firefox/WebKit browser checks not yet run; real-device check pending | — | Configured | GitHub CI, then staging |
+| 10 | G4: a hostile migration could swap a table read by a reviewed trigger function | Low | Accepted residual | Code-owner review of migrations (item 5) |
+| 11 | The notifier credential chooses and sends the code; password unchanged after a reset; not-found pages lack the browser notice | Informational | Accepted / documented | — |
+
+L-A, L-B, L-C, L-D, G2, G3, the email cap and the invitation-delete item are all **verified closed**.

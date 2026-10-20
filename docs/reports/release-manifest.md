@@ -1,57 +1,75 @@
-# Release manifest — Phase 1, candidates 1 and 2 (20 Oct 2026)
+# Release manifest — Phase 1, candidates 1 to 3 (20 Oct 2026)
 
 **Status:** development complete; local checks reported passed; GitHub CI, hosted verification and live pilot
 approval pending.
 
 Every claim below names the commit that was checked. Nothing has been pushed, deployed or connected.
 
-## Candidate 2 (current)
+## Candidate 3 (current)
+
+Built on `rc2-packaged` (`bec9ee8`). Adds M7, M8 and M9, the stronger CI guard, `client.ts` under code-owner
+coverage, and the unsupported-browser notice.
 
 | Role | Commit | What was done at exactly this commit | Evidence |
 | --- | --- | --- | --- |
-| **Reviewed (all candidate 2 changes)** | `e18d89fdf750f3c2fbd07e48d0310ab581f0799a` | Independent review of every security-relevant change since `3966c4c`. No Critical, High or Medium findings; three Low (L1–L3) and three informational | `M1-closure-report.md`, "Independent review of candidate 2" |
-| **Rechecked (fixes)** | `56cdf5b52fd502c6843fd329d2d3e9aabd28dc14` | Recheck: L1, L2, I-a and the locale header verified. L3 mostly fixed; five more files named | Closure report; `clean-checkout-56cdf5b.txt` (all checks passed) |
-| Intermediate | `aeb50787275f4d2758782d3018b804186c68ee66` | Reviewer confirmed the change from `56cdf5b` is CODEOWNERS only and found one more uncovered file (`apps/api/vitest.config.ts`). Its clean-checkout run was stopped and superseded | Closure report |
-| **Tested** | `58d156f48b4bcd502cc86b5b05de1253eb5d1d42` | **Clean-checkout run:** fresh clone, frozen lockfile, fresh database, restricted roles; results below.<br>**Reviewer confirmation:** CODEOWNERS pattern rules, with the change from `aeb5078` limited to CODEOWNERS | `clean-checkout-58d156f.txt`; closure report |
-| **Packaged** | The commit containing this file (hash in the handover message) | Documents and evidence only. Its code is identical to `58d156f` | Command below |
+| **Reviewed (all candidate 3 changes)** | `c6c51b88dbaabaa860291108751528952a18eca5` | Independent review of M7–M9, the guard and the browser work. No Critical, High or Medium findings; four Low (L-A to L-D) and four informational | `M1-closure-report.md`, "Independent review of candidate 3"; `clean-checkout-c6c51b8.txt` |
+| Rechecked (first fixes) | `42823bb6dce50c7ed7ad992146dd3af12c6ed607` | L-B and the email cap verified; L-A, L-C and L-D partly fixed | Closure report; `clean-checkout-42823bb.txt` |
+| Rechecked (second fixes) | `4e60aeba731f194edaa398a0bf27fda04fed248c` | L-A verified; L-D verified for six cases; two Low gaps left (L-C creation time, G2 trigger on a privileged-only table) | Closure report; `clean-checkout-4e60aeb.txt` |
+| Rechecked (third fixes) | `6f78a895c549b070474f5180e9e9bd527727d295` | L-C verified; G2 verified for its own case; one Low gap left (G3: the pin covered only the function body) | Closure report; `clean-checkout-6f78a89.txt` |
+| **Tested and rechecked (final)** | `f1bc0952de1c3139fe9d4806b910382f4a46296a` | **Clean-checkout run:** fresh clone, frozen lockfile, fresh database, restricted roles; results below.<br>**Targeted recheck:** G3 and the invitation-delete item verified; one Low residual (G4) accepted | `clean-checkout-f1bc095.txt`; closure report |
+| **Packaged** | The commit containing this file (hash in the handover message) | Documents and evidence only. Its code is identical to `f1bc095` | Command below |
+
+Tags: `rc3-tested` = `f1bc095`; `rc3-packaged` = the packaged commit.
 
 ```bash
-git diff --stat 58d156f HEAD -- apps packages scripts .github package.json pnpm-lock.yaml turbo.json pnpm-workspace.yaml
+git diff --stat rc3-tested rc3-packaged -- apps packages scripts .github package.json pnpm-lock.yaml turbo.json pnpm-workspace.yaml
 # expected: no output
 ```
 
-### Results at `58d156f` (clean checkout)
+### Results at `f1bc095` (clean checkout)
 
-See `docs/reports/evidence/clean-checkout-58d156f.txt`; the same results were seen at `56cdf5b` and `e18d89f`.
+See `docs/reports/evidence/clean-checkout-f1bc095.txt`.
 
 | Check | Result |
 | --- | --- |
 | Install | Frozen lockfile, installed exactly as locked |
-| Secret scan, lint, type check, build | Passed |
+| Secret scan, lint, type check, build | Passed (176 files scanned) |
 | Dependency audit (strict, all packages) | **No advisories** in production or development and build tools; no exceptions in force |
 | Audit-rule unit tests | 14/14 |
-| Migrations | 0001–0015 on a fresh database |
+| Migrations | 0001–0021 on a fresh database |
 | Isolation check (CI guard) | Passed |
 | Database roles used by the tests | cf_app, cf_identity, cf_notify, cf_platform: none superuser, none bypasses row security |
-| API tests | 230/230 in 16 files |
-| Browser checks (English and Arabic, three sizes, security policy, not-found pages) | 10/10 |
+| API tests | 247/247 in 17 files |
+| Browser checks (English and Arabic, three sizes, security policy, not-found pages, browser notice) | 11/11 in Chromium. Firefox and WebKit are configured for CI and not yet run |
 
 ### Differences
 
 | From → to | Size | Security-relevant changes | Reviewed |
 | --- | --- | --- | --- |
-| `3966c4c` → `e18d89f` | 61 files, +1,094 / −750 | **Fixes:** enrolment race returns 409; migration 0014 (overrides can only be shortened).<br>**Not-found page:** rendered per request, with the middleware rewrite.<br>**Tailwind 3 → 4:** lockfile and CSS.<br>**Audit:** rules refactored, with owner and review-date checks.<br>**CI:** script tests added; the clean-checkout script uses the strict audit.<br>**CODEOWNERS:** added | Yes, at `e18d89f` |
-| `e18d89f` → `56cdf5b` | 19 files, +228 / −101 | **L1:** `audit-rules.mjs`.<br>**L2:** migration 0015.<br>**L3:** wider CODEOWNERS.<br>**I-a:** exact `_next` match.<br>**Not-found page:** server component, with the `x-cf-locale` header | Yes, at `56cdf5b` |
-| `56cdf5b` → `58d156f` (via `aeb5078`) | `.github/CODEOWNERS` plus documents | `.github/CODEOWNERS` only: the five named paths, test folders, ClamAV set-up, then pattern rules for every `package.json`, `*.config.*`, `tsconfig*.json` and gitleaks file | Confirmed by the reviewer (diff only) |
+| `bec9ee8` → `c6c51b8` | 35 files, +1,020 / −149 | **M7:** migration 0016, emailed activation code.<br>**M8:** migration 0017, two-person reset, runbook.<br>**M9:** 72-hour, revocable invitations.<br>**Guard:** privileged pilot/override writers.<br>**CODEOWNERS:** `client.ts`.<br>**Web:** browser notice; Firefox/WebKit projects | Yes, at `c6c51b8` |
+| `c6c51b8` → `42823bb` | 19 files, +428 / −59 | Migration 0018: `cf_pilot` owner role, owner-based guard, 72-hour cap trigger, digit filter, reset review list, email cap | Yes, at `42823bb` |
+| `42823bb` → `4e60aeb` | 14 files, +168 / −12 | Migration 0019: digit total, creation-based invitation cap. Guard covers all schemas, privileged triggers, rules and views | Yes, at `4e60aeb` |
+| `4e60aeb` → `6f78a89` | 3 code files, +59 / −7 (plus evidence) | Migration 0020: business role cannot set an invitation's creation time. Guard flags any writer-owned privileged trigger on any table; reviewed trigger functions pinned to their reviewed body | Yes, at `6f78a89` |
+| `6f78a89` → `f1bc095` | 3 code files, +28 / −6 (plus evidence) | Guard pins the whole definition plus owner (G3). Migration 0021: business role loses DELETE on invitations | Yes, at `f1bc095` |
 
-### Evidence files for candidate 2
+### Evidence files for candidate 3
 
 | File | Commit | Outcome |
 | --- | --- | --- |
-| `clean-checkout-e18d89f.txt` | `e18d89f` | All checks passed |
-| `clean-checkout-56cdf5b.txt` | `56cdf5b` | All checks passed |
-| `clean-checkout-aeb5078.txt` | `aeb5078` | **Incomplete:** the run was stopped on purpose when one more CODEOWNERS path was found; superseded by `58d156f` |
-| `clean-checkout-58d156f.txt` | `58d156f` | All checks passed (the tested commit) |
+| `clean-checkout-c6c51b8.txt` | `c6c51b8` | All checks passed (243 API tests) |
+| `clean-checkout-42823bb.txt` | `42823bb` | All checks passed (245 API tests) |
+| `clean-checkout-4e60aeb.txt` | `4e60aeb` | All checks passed (245 API tests) |
+| `clean-checkout-6f78a89.txt` | `6f78a89` | All checks passed (246 API tests) |
+| `clean-checkout-f1bc095.txt` | `f1bc095` | All checks passed (247 API tests) — the tested commit |
+
+## Candidate 2 (preserved)
+
+| Role | Commit | Tag | State |
+| --- | --- | --- | --- |
+| Reviewed | `e18d89fdf750f3c2fbd07e48d0310ab581f0799a` | — | No Critical, High or Medium; L1–L3 found |
+| Rechecked | `56cdf5b52fd502c6843fd329d2d3e9aabd28dc14` | — | L1, L2 verified; L3 widened |
+| Tested | `58d156f48b4bcd502cc86b5b05de1253eb5d1d42` | `rc2-tested` | Clean checkout passed (230 API tests, 10 browser checks) |
+| Packaged | `bec9ee8` | `rc2-packaged` | Documents only on top of `rc2-tested`; zip and bundle archived |
 
 ## Candidate 1 (preserved)
 
@@ -64,16 +82,19 @@ The earlier reviewed commits `6972acb` (N1–N4) and `ee77e77` (F1–F3 found) a
 
 ## Still open (not claimed)
 
-- **GitHub:** CI on GitHub, and code-owner enforcement. Unlocked by the GitHub organisation and push approval.
+- **GitHub:** CI on GitHub (including the first Firefox and WebKit run) and **code-owner enforcement, which stays
+  pending** until the organisation, team and `main` ruleset are set up and checked.
 - **Hosted verification:**
   - official malware signatures;
   - file-access revocation;
   - storage permissions;
   - session expiry;
-  - backup restoration.
+  - backup restoration;
+  - a real-device browser check.
 
   These need a hosting decision.
-- **Reviews and approvals still to come:** the external security review, Meta verification and App Review, and the
-  pilot approval itself.
-- **Remaining findings:** the complete numbered list is in the closure report. Items 1–3 concern the sign-in
-  credential and recovery, with the M7–M9 decision pending.
+- **Reviews and approvals still to come:** the external security review, Meta verification and App Review, the
+  sign-in risk acceptance, and the pilot approval itself.
+- **Remaining findings:** the complete numbered list (11 items) is in the closure report. None is Critical, High or
+  Medium. L-A to L-D, G2 and G3 are verified closed; G4 is an accepted Low residual that relies on code-owner review
+  of migrations.
