@@ -13,6 +13,10 @@
 /package.json                           @MERONATIC-ORG/security-owners
 /pnpm-lock.yaml                         @MERONATIC-ORG/security-owners
 /turbo.json                             @MERONATIC-ORG/security-owners
+/pnpm-workspace.yaml                    @MERONATIC-ORG/security-owners
+/apps/api/package.json                  @MERONATIC-ORG/security-owners
+/apps/web/package.json                  @MERONATIC-ORG/security-owners
+/apps/web/playwright.config.ts          @MERONATIC-ORG/security-owners
 /scripts/audit-deps.mjs                 @MERONATIC-ORG/security-owners
 /scripts/audit-rules.mjs                @MERONATIC-ORG/security-owners
 /scripts/audit-deps.test.mjs            @MERONATIC-ORG/security-owners
@@ -23,9 +27,14 @@
 /packages/database/migrations/          @MERONATIC-ORG/security-owners
 /packages/database/src/check-rls.ts     @MERONATIC-ORG/security-owners
 /packages/database/package.json         @MERONATIC-ORG/security-owners
+/packages/database/src/migrate.ts       @MERONATIC-ORG/security-owners
 # Access control and the browser security policy
 /apps/api/src/http/guard.ts             @MERONATIC-ORG/security-owners
 /apps/api/src/app.ts                    @MERONATIC-ORG/security-owners
 /apps/web/middleware.ts                 @MERONATIC-ORG/security-owners
 /apps/web/lib/csp.ts                    @MERONATIC-ORG/security-owners
 /apps/web/next.config.mjs               @MERONATIC-ORG/security-owners
+# The security tests themselves, and the malware-scanner set-up
+/apps/api/test/                         @MERONATIC-ORG/security-owners
+/apps/web/e2e/                          @MERONATIC-ORG/security-owners
+/scripts/clamav/                        @MERONATIC-ORG/security-owners

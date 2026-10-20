@@ -188,10 +188,15 @@ hashes; no open redirect or route confusion through the new rewrite. No Critical
 
 | # | Finding | Severity | Fix (final candidate 2 commit) | Status |
 | --- | --- | --- | --- | --- |
-| L1 | The audit script could exit 0 without running when started through a symlinked absolute path | Low | Decision rules moved to `scripts/audit-rules.mjs`; the audit script always runs (no main-module check). Tested through a symlink with the registry unreachable: exit 1 | Fixed — awaiting recheck |
-| L2 | The operations role could insert a new, long-lived seat override | Low | Migration 0015: inserted overrides must expire within 181 days; test added | Fixed — awaiting recheck |
-| L3 | CODEOWNERS missed files that decide what CI runs | Low | Added root `package.json`, lockfile, `turbo.json`, audit rules and tests, secret scan, local-services script, database `package.json`, guard, API app, middleware, CSP and Next config | Prepared — enforcement pending GitHub |
-| I-a | `/_nextfoo` skipped the not-found rewrite (prefix match) | Informational | Exact match on `_next`; test added | Fixed — awaiting recheck |
+| L1 | The audit script could exit 0 without running when started through a symlinked absolute path | Low | Decision rules moved to `scripts/audit-rules.mjs`; the audit script always runs (no main-module check). Tested through a symlink with the registry unreachable: exit 1 | **Verified** by the recheck of `56cdf5b` |
+| L2 | The operations role could insert a new, long-lived seat override | Low | Migration 0015: inserted overrides must expire within 181 days; test added | **Verified** by the recheck of `56cdf5b` |
+| L3 | CODEOWNERS missed files that decide what CI runs | Low | Added root `package.json`, lockfile, `turbo.json`, audit rules and tests, secret scan, local-services script, database `package.json`, guard, API app, middleware, CSP and Next config. The recheck of `56cdf5b` found five more (`pnpm-workspace.yaml`, both app `package.json` files, `migrate.ts`, `playwright.config.ts`); added in the final commit with the test folders and ClamAV set-up | Prepared — enforcement pending GitHub |
+| I-a | `/_nextfoo` skipped the not-found rewrite (prefix match) | Informational | Exact match on `_next`; test added | **Verified** by the recheck of `56cdf5b` |
 | I-b | Not-found responses are Next.js's error shell until scripts run | Informational | Not-found page is now a server component; the shell is framework behaviour | Accepted (item 6a) |
 | I-c | Next.js's own 308 redirects carry no policy | Informational | — | Accepted (item 6b) |
+
+Recheck of `56cdf5b52fd502c6843fd329d2d3e9aabd28dc14`: L1, L2, I-a and the not-found locale header verified (230/230 API
+tests, browser checks 10/10 twice, `test:scripts` 14/14, strict audit with no advisories, own probes of the
+181-day bound and the locale header). L3 coverage completed afterwards as listed above; the change is to
+`.github/CODEOWNERS` only (not enforced until GitHub is configured).
 
