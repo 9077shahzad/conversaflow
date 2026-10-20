@@ -177,6 +177,7 @@ archived. Candidate 2 fixes:
 | 8 | `base32_decode` unused on the verification path | R2-2 | Informational | No action | — |
 | 9 | Authenticators set up before migration 0010 cannot pass TOTP (local databases only) | R2-3 | Informational | No action | — |
 | 10 | Hosted verification not yet possible: official signatures, file revocation, storage permissions, session expiry, backup restore | Owner conditions | — | Pending hosting approval | Owner: hosting decision (A4) |
+| 11 | `packages/database/src/client.ts` (company context for row security) is not yet under code-owner review | Check of `58d156f` | Informational | Open | Add to CODEOWNERS in the next candidate |
 
 ### Independent review of candidate 2 at `e18d89f` (20 Oct 2026)
 
@@ -204,4 +205,10 @@ Final check of `aeb50787275f4d2758782d3018b804186c68ee66` (reviewer, read-only):
 CODEOWNERS only; the eight added paths are covered; `apps/api/vitest.config.ts` was still missing (Low). Closed
 with pattern rules covering every `package.json`, `*.config.*` and `tsconfig*.json` file and the gitleaks
 configuration (including files created later), so coverage no longer depends on listing each file.
+
+Check of `58d156f48b4bcd502cc86b5b05de1253eb5d1d42` (reviewer, read-only, every tracked file run through
+gitignore-style matching): the change from `aeb5078` is CODEOWNERS only; **nothing that decides what CI runs is
+left uncovered**, including files added later. L3: **verified** (enforcement still pending GitHub configuration).
+Optional for the next candidate: add `packages/database/src/client.ts` (sets the company context row security
+relies on) to the security-code owners, alongside the guard and middleware (remaining findings list, item 11).
 

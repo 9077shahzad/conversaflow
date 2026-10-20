@@ -11,17 +11,18 @@ Every claim below names the commit that was checked. Nothing has been pushed, de
 | --- | --- | --- | --- |
 | **Reviewed (all candidate 2 changes)** | `e18d89fdf750f3c2fbd07e48d0310ab581f0799a` | Independent review of every security-relevant change since `3966c4c`. No Critical, High or Medium findings; three Low (L1–L3) and three informational | `M1-closure-report.md`, "Independent review of candidate 2" |
 | **Rechecked (fixes)** | `56cdf5b52fd502c6843fd329d2d3e9aabd28dc14` | Recheck: L1, L2, I-a and the locale header verified. L3 mostly fixed; five more files named | Closure report; `clean-checkout-56cdf5b.txt` (all checks passed) |
-| **Tested and packaged** | `aeb50787275f4d2758782d3018b804186c68ee66` | **Clean-checkout run:** fresh clone, frozen lockfile, fresh database, restricted roles; results below.<br>**Reviewer confirmation** that the change from `56cdf5b` is CODEOWNERS only, with full coverage | `clean-checkout-aeb5078.txt`; closure report |
-| Packaged (documents) | The commit containing this file (hash in the handover message) | Documents and evidence only. Its code is identical to `aeb5078` | Command below |
+| Intermediate | `aeb50787275f4d2758782d3018b804186c68ee66` | Reviewer confirmed the change from `56cdf5b` is CODEOWNERS only and found one more uncovered file (`apps/api/vitest.config.ts`). Its clean-checkout run was stopped and superseded | Closure report |
+| **Tested** | `58d156f48b4bcd502cc86b5b05de1253eb5d1d42` | **Clean-checkout run:** fresh clone, frozen lockfile, fresh database, restricted roles; results below.<br>**Reviewer confirmation:** CODEOWNERS pattern rules, with the change from `aeb5078` limited to CODEOWNERS | `clean-checkout-58d156f.txt`; closure report |
+| **Packaged** | The commit containing this file (hash in the handover message) | Documents and evidence only. Its code is identical to `58d156f` | Command below |
 
 ```bash
-git diff --stat aeb5078 HEAD -- apps packages scripts .github package.json pnpm-lock.yaml turbo.json pnpm-workspace.yaml
+git diff --stat 58d156f HEAD -- apps packages scripts .github package.json pnpm-lock.yaml turbo.json pnpm-workspace.yaml
 # expected: no output
 ```
 
-### Results at `aeb5078` (clean checkout)
+### Results at `58d156f` (clean checkout)
 
-See `docs/reports/evidence/clean-checkout-aeb5078.txt`; the same results were seen at `56cdf5b` and `e18d89f`.
+See `docs/reports/evidence/clean-checkout-58d156f.txt`; the same results were seen at `56cdf5b` and `e18d89f`.
 
 | Check | Result |
 | --- | --- |
@@ -41,7 +42,16 @@ See `docs/reports/evidence/clean-checkout-aeb5078.txt`; the same results were se
 | --- | --- | --- | --- |
 | `3966c4c` → `e18d89f` | 61 files, +1,094 / −750 | **Fixes:** enrolment race returns 409; migration 0014 (overrides can only be shortened).<br>**Not-found page:** rendered per request, with the middleware rewrite.<br>**Tailwind 3 → 4:** lockfile and CSS.<br>**Audit:** rules refactored, with owner and review-date checks.<br>**CI:** script tests added; the clean-checkout script uses the strict audit.<br>**CODEOWNERS:** added | Yes, at `e18d89f` |
 | `e18d89f` → `56cdf5b` | 19 files, +228 / −101 | **L1:** `audit-rules.mjs`.<br>**L2:** migration 0015.<br>**L3:** wider CODEOWNERS.<br>**I-a:** exact `_next` match.<br>**Not-found page:** server component, with the `x-cf-locale` header | Yes, at `56cdf5b` |
-| `56cdf5b` → `aeb5078` | 3 files | `.github/CODEOWNERS` only (plus documents) | Confirmed by the reviewer (diff only) |
+| `56cdf5b` → `58d156f` (via `aeb5078`) | `.github/CODEOWNERS` plus documents | `.github/CODEOWNERS` only: the five named paths, test folders, ClamAV set-up, then pattern rules for every `package.json`, `*.config.*`, `tsconfig*.json` and gitleaks file | Confirmed by the reviewer (diff only) |
+
+### Evidence files for candidate 2
+
+| File | Commit | Outcome |
+| --- | --- | --- |
+| `clean-checkout-e18d89f.txt` | `e18d89f` | All checks passed |
+| `clean-checkout-56cdf5b.txt` | `56cdf5b` | All checks passed |
+| `clean-checkout-aeb5078.txt` | `aeb5078` | **Incomplete:** the run was stopped on purpose when one more CODEOWNERS path was found; superseded by `58d156f` |
+| `clean-checkout-58d156f.txt` | `58d156f` | All checks passed (the tested commit) |
 
 ## Candidate 1 (preserved)
 

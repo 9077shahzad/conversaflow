@@ -33,7 +33,7 @@ decisions of 20 Oct:
 
 | # | Blocker | Evidence needed | Next action |
 | --- | --- | --- | --- |
-| B1 | Independent review of each candidate's security changes | Reviewer's verdict for the exact commit | Candidate 1 done (`3966c4c`). Candidate 2 (`e18d89f`): review in progress. See `docs/reports/release-manifest.md` |
+| B1 | Independent review of each candidate's security changes | Reviewer's verdict for the exact commit | **Done for both.** Candidate 1: `3966c4c`. Candidate 2: reviewed at `e18d89f`, fixes rechecked at `56cdf5b`, CODEOWNERS confirmed at `58d156f` (tested). See `docs/reports/release-manifest.md` |
 | B2 | GitHub CI and the clean-checkout run on GitHub | A green run for the pushed commit, with logs kept | Needs A3. The same steps already run locally from a clean checkout |
 | B3 | Malware scanning in hosting | `freshclam` installs and updates official signatures; clamd runs with `TZ=UTC`; startup reports signatures current; uploads refused when signatures are missing or outdated, or the scanner is down or slow | Needs A4 |
 | B4 | File-access revocation in hosting | Links refused after removal, role change or expiry, through the real storage | Needs A4 |
@@ -41,7 +41,7 @@ decisions of 20 Oct:
 | B6 | Session expiry in hosting | 60 minutes idle, 12 hours absolute, through the real load balancer | Needs A4 |
 | B7 | Backup restoration | A timed point-in-time restore of staging, with the data loss recorded | Needs A4 |
 | B8 | Sign-in risk mitigations M1–M4 | Secrets manager, private database network, connection alerts, onboarding check | With staging (A4) and onboarding |
-| B10 | Code-owner enforcement for security files | `CODEOWNERS` with the real team, and "Require review from Code Owners" on `main` | Prepared; needs A3 |
+| B10 | Code-owner enforcement for security files | `CODEOWNERS` with the real team, and "Require review from Code Owners" on `main` | Prepared and reviewed (nothing that decides what CI runs is uncovered); enforcement needs A3 |
 | B9 | External security review | Report, fixes and a retest letter | Needs A5. Test 3–4 weeks before pilot access |
 
 ## C. Meta, after verification
