@@ -39,7 +39,7 @@ export function AuthLayout({ locale, children }: { locale: Locale; children: Rea
       <main className="flex flex-1 items-start justify-center px-4 py-8 sm:items-center sm:px-8">
         <div className="w-full max-w-md">
           <div className="mb-6 hidden justify-end lg:flex"><LanguageSwitch locale={locale} /></div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">{children}</div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs sm:p-8">{children}</div>
         </div>
       </main>
     </div>
@@ -53,7 +53,7 @@ export function Field(props: { id: string; label: string; type?: string; autoCom
       <label htmlFor={id} className="mb-1.5 block text-sm font-semibold text-navy">{label}</label>
       <input id={id} name={id} {...rest} dir={dirLtr ? 'ltr' : undefined}
         aria-describedby={hint ? `${id}-hint` : undefined}
-        className={`block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-base text-navy placeholder:text-slate-500 focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30 ${dirLtr ? 'text-start' : ''}`} />
+        className={`block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-base text-navy placeholder:text-slate-500 focus:border-teal focus:outline-hidden focus:ring-2 focus:ring-teal/30 ${dirLtr ? 'text-start' : ''}`} />
       {hint && <p id={`${id}-hint`} className="mt-1 text-sm text-slate-600">{hint}</p>}
     </div>
   );

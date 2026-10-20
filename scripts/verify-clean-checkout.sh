@@ -33,8 +33,8 @@ step() { echo; echo "## $1"; echo "\$ $2"; }
   step 'Build' 'pnpm build'; pnpm -s build > "$WORK/build.log"
   echo 'build: all packages built'
   step 'Type check' 'pnpm typecheck'; pnpm -s typecheck > "$WORK/typecheck.log"; grep 'Tasks:' "$WORK/typecheck.log"
-  # Local evidence run: a PROPOSED exception is reported but does not stop the run. CI runs the strict audit.
-  step 'Dependency audit (all packages; production and development/build tools)' 'pnpm deps:audit:local'; pnpm -s deps:audit:local
+  step 'Dependency audit (all packages; production and development/build tools), strict' 'pnpm deps:audit'; pnpm -s deps:audit
+  step 'Unit tests for the audit rules' 'pnpm test:scripts'; pnpm -s test:scripts > "$WORK/audit-rules.log"; grep -E '^# (pass|fail)' "$WORK/audit-rules.log"
   bash scripts/with-local-services.sh bash -c '
     set -eo pipefail
     step() { echo; echo "## $1"; echo "\$ $2"; }

@@ -1,6 +1,6 @@
 # Dependency audit — production and development/build tools
 
-Audit run on 20 Oct 2026 (UTC 19 Oct), after commit `a32601a`. Command: `pnpm deps:audit`
+Updated for candidate 2 (20 Oct 2026). Command: `pnpm deps:audit`
 (`scripts/audit-deps.mjs`), which runs `pnpm audit` over **all** packages, then again over production packages
 only to label each advisory's scope.
 
@@ -11,23 +11,39 @@ only to label each advisory's scope.
 It also fails if the audit cannot run at all, for example when the registry is unreachable (independent review F1).
 
 **Unless** the advisory is covered by an **approved**, unexpired exception in `docs/security/audit-exceptions.json`
-for the scope where it was found. A *proposed* exception never passes in CI. Local evidence runs use
-`pnpm deps:audit:local`, which lets a proposed exception through and says so in the report.
+for the scope where it was found. A *proposed* exception never passes in CI. `pnpm deps:audit:local` exists for local investigation only; the evidence runs use the strict audit.
 
 CI and the clean-checkout script both install from the frozen lockfile and run this audit.
 
-## Result now
+## Result now (candidate 2)
 
 | Scope | Critical | High | Moderate | Low |
 | --- | --- | --- | --- | --- |
 | Production dependencies | 0 | 0 | 0 | 0 |
-| Development and build tools | 0 | 1 (proposed exception, awaiting approval) | 0 | 0 |
+| Development and build tools | 0 | 0 | 0 | 0 |
 
-## Remaining advisory and proposed exception
+No exceptions are in force. The strict audit (CI and the clean-checkout run) passes.
 
-| Advisory | Package and path | Severity | Relevance | Status |
-| --- | --- | --- | --- | --- |
-| GHSA-vfj7-8cjw-p6xm (stack exhaustion on deeply nested patterns) | `braces` 3.0.3 via `tailwindcss > chokidar` (web build) | High | Low. Used only by Tailwind's file watcher at build and development time, on glob patterns from our own configuration. Not in the running application, never sees user input. **No fixed release exists** (3.0.3 is the latest). | Proposed exception, expires 31 Jan 2027, **awaiting your confirmation**. Review on a Tailwind 4 migration or a braces fix. |
+## braces (GHSA-vfj7-8cjw-p6xm) — evidence and resolution
+
+| | |
+| --- | --- |
+| Advisory | GHSA-vfj7-8cjw-p6xm, CVE-2026-93687, published 18 Sep 2026; CVSS v4 8.7 (High), availability only; CWE-674 uncontrolled recursion |
+| What triggers it | Deeply nested brace patterns, under the length limit, passed to braces: the process crashes with a stack overflow |
+| Installed version (candidate 1) | braces 3.0.3, the latest release |
+| Dependency paths (candidate 1) | `apps/web` (dev) → tailwindcss 3.4.19 → chokidar 3.6.0 → braces; → fast-glob 3.3.3 → micromatch 4.0.8 → braces; → micromatch 4.0.8 → braces |
+| Official fix status | None. The advisory lists no patched version, and braces 3.0.3 (May 2024) is the latest release |
+| Actual exposure | Build and development time only, on glob patterns from our own Tailwind configuration. Not in the running application, never given user input. Worst case: a crashed local build |
+| Options considered | (1) Approve a time-limited exception. (2) Patch braces ourselves (pnpm patch), which needs ongoing maintenance. (3) Replace the dependency by moving to Tailwind CSS 4, which has none of these packages |
+| Decision taken (candidate 2) | Option 3 (ADR-031). The exception was withdrawn without ever being approved. Consequence: modern browsers only (Safari 16.4+, Chrome 111+, Firefox 128+) |
+
+## Exception policy (for any future case)
+
+An exception counts only if it names the advisory and package, its scope (production or development), the dependency
+path, the reason, an **owner**, an **approver**, status `approved`, an **expiry** date and a **review** date before the
+expiry. An overdue review, an expired date, a missing field or a finding outside the stated scope fails the audit.
+These rules have unit tests (`pnpm test:scripts`, 14 cases). Edits to the exceptions file need a code owner's review
+once GitHub is configured (`.github/CODEOWNERS`, enforcement pending).
 
 ## Resolved in this round
 
@@ -46,6 +62,4 @@ build steps.
 
 ## Accepted exceptions
 
-None accepted yet. The braces exception above needs your confirmation. Until then the strict audit, which CI runs,
-**fails** on it. So the first GitHub CI run will be red at this one step unless you approve the exception (checklist A13)
-or we migrate to Tailwind 4 (about 1–2 days).
+None.

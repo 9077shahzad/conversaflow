@@ -1,17 +1,12 @@
 {
-  "_readme": "Advisories the dependency audit may pass over. Each needs a reason, the scope it applies to (production or development), an expiry date, status 'approved' and an approver. 'proposed' entries never pass in CI; local evidence runs may pass them with --allow-proposed, and say so.",
-  "exceptions": [
+  "_readme": "Advisories the dependency audit may pass over. Every entry needs: advisory, package, scope (production or development), path, reason, owner (accountable person), approvedBy, status 'approved', expires (date) and reviewBy (date, before expiry). 'proposed' entries never pass in CI; local evidence runs may pass them with --allow-proposed and say so. The file is protected by .github/CODEOWNERS (enforcement pending GitHub configuration).",
+  "exceptions": [],
+  "history": [
     {
       "advisory": "GHSA-vfj7-8cjw-p6xm",
       "package": "braces",
-      "severity": "high",
-      "path": "apps/web > tailwindcss > chokidar > braces",
-      "reason": "No fixed version exists (3.0.3 is the latest release). braces is used by Tailwind's file watcher at build and development time only, on glob patterns from our own configuration. It is not in the running application and never sees user input.",
-      "review": "Remove when a fixed braces release or Tailwind 4 migration lands.",
-      "expires": "2027-01-31",
-      "status": "proposed",
-      "approvedBy": null,
-      "scope": "development"
+      "status": "withdrawn",
+      "reason": "No longer needed: Tailwind CSS 4 migration (candidate 2) removed braces from the dependency tree. Never approved."
     }
   ]
 }

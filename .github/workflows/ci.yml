@@ -66,6 +66,8 @@ jobs:
       - run: pnpm typecheck
       - name: Dependency audit (all packages; fails on high/critical anywhere or any production advisory, unless a recorded exception applies)
         run: pnpm deps:audit
+      - name: Unit tests for the audit rules
+        run: pnpm test:scripts
       - name: Create the non-superuser owner role
         run: |
           PGPASSWORD=ci-superuser-only psql -h localhost -U postgres -v ON_ERROR_STOP=1 \

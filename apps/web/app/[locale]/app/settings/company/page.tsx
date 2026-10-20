@@ -43,7 +43,7 @@ export default function CompanySettings() {
     }
   }
 
-  const input = 'rounded-lg border border-slate-300 px-3 py-2 text-base text-navy focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30';
+  const input = 'rounded-lg border border-slate-300 px-3 py-2 text-base text-navy focus:border-teal focus:outline-hidden focus:ring-2 focus:ring-teal/30';
   return (
     <div className="mx-auto max-w-3xl">
       <h1 className="text-2xl font-bold text-navy sm:text-3xl">{d.company.title}</h1>
@@ -55,7 +55,7 @@ export default function CompanySettings() {
             return (
               <div key={day} className="flex flex-wrap items-center gap-3 py-3">
                 <label className="flex w-36 items-center gap-2 text-base font-medium text-navy">
-                  <input type="checkbox" checked={!!iv} onChange={(e) => toggleDay(day, e.target.checked)} className="h-5 w-5 accent-[#0E7490]" />
+                  <input type="checkbox" checked={!!iv} onChange={(e) => toggleDay(day, e.target.checked)} className="h-5 w-5 accent-teal" />
                   {d.days[day]}
                 </label>
                 {iv ? (
@@ -77,7 +77,7 @@ export default function CompanySettings() {
           <legend className="text-lg font-semibold text-navy">{d.company.languages}</legend>
           {(['ar', 'en'] as const).map((l) => (
             <label key={l} className="mt-3 flex items-center gap-2 text-base text-navy">
-              <input type="checkbox" className="h-5 w-5 accent-[#0E7490]" checked={s.languages.includes(l)}
+              <input type="checkbox" className="h-5 w-5 accent-teal" checked={s.languages.includes(l)}
                 onChange={(e) => setS({ ...s, languages: e.target.checked ? [...new Set([...s.languages, l])] : s.languages.filter((x) => x !== l) })} />
               {d.languageNames[l]}
             </label>

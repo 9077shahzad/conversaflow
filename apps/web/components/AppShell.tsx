@@ -69,7 +69,7 @@ export function AppShell({ locale, children }: { locale: Locale; children: React
             <span key={it.key} className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-[15px] text-slate-400" aria-disabled="true">
               {icon}
               <span className="flex-1">{d.nav[it.key]}</span>
-              <span className="rounded bg-white/10 px-1.5 py-0.5 text-[11px] text-slate-300">{d.common.later}</span>
+              <span className="rounded-sm bg-white/10 px-1.5 py-0.5 text-[11px] text-slate-300">{d.common.later}</span>
             </span>
           );
         }
@@ -92,7 +92,7 @@ export function AppShell({ locale, children }: { locale: Locale; children: React
       {open && (
         <div className="fixed inset-0 z-40 lg:hidden" role="dialog" aria-modal="true" aria-label={d.nav.menu}>
           <button className="absolute inset-0 bg-navy/60" aria-label={d.nav.menu} onClick={() => setOpen(false)} />
-          <div className="absolute inset-y-0 start-0 w-72 bg-navy">
+          <div className="absolute inset-y-0 inset-s-0 w-72 bg-navy">
             <div className="px-5 py-5"><Logo by={d.brand.by} inverse /></div>
             {nav}
           </div>

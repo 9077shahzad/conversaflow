@@ -148,3 +148,20 @@ its own policy, `nosniff` and `X-Frame-Options: DENY`, because Next.js drops mid
 `htmlLimitedBots: /.*/` keeps `<title>` and other metadata in the document head under per-request rendering.
 Known limit: a malformed prefetch request (prefetch header without the RSC header) makes Next.js itself return a
 500; that response now carries the full policy and no attacker content.
+
+## ADR-031 — Tailwind CSS 4 instead of an audit exception for braces
+
+Context: GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, High, availability only) affects `braces` through 3.0.3, the latest
+release; no fix exists. Tailwind CSS 3.4 pulled it in through chokidar, fast-glob and micromatch (build time only).
+
+Decision: migrate the web app to Tailwind CSS 4.3 with the official upgrade tool (candidate 2). Tailwind 4's
+dependency tree contains no braces, chokidar or micromatch, so the advisory is removed rather than excepted and the
+strict audit passes with no exceptions. Theme colours and fonts moved from `tailwind.config.ts` into `@theme` in
+`globals.css`; a few utilities were renamed by the tool; autoprefixer is no longer needed.
+
+Evidence: browser checks 10/10; all 24 reference screenshots compared pixel by pixel with Tailwind 3: sign-in and
+dashboard identical, team identical apart from randomly generated demo email addresses, company settings rows
+about 2 px shorter each (form-control base styles). Accessibility and readability checks unchanged.
+
+Consequence: Tailwind 4 needs Safari 16.4+ (iOS 16.4, March 2023), Chrome 111+ or Firefox 128+. Older browsers show
+the pages without styling. If pilot companies need older devices, revert this and approve a time-limited exception.
