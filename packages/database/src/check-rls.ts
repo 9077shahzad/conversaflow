@@ -15,6 +15,8 @@ const CREDENTIAL_TABLES = ['user_credentials', 'mfa_factors', 'mfa_recovery_code
 const PILOT_WRITERS_ALLOWED = ['platform_enrol_pilot(text,uuid,integer,integer,text)', 'platform_end_pilot(text,uuid)'];
 /** Roles that may hold write rights on pilot enrolments and seat overrides: the table owner and cf_pilot (migration 0018). */
 const PILOT_TABLE_WRITERS = ['cf_owner', 'cf_pilot'];
+/** Privileged trigger functions reviewed and allowed although their owner could write those tables (billing guards). */
+const REVIEWED_TRIGGER_FUNCTIONS = ['subscription_new_is_trial()', 'subscription_requires_published_version()'];
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
@@ -140,7 +142,7 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       grew = false;
       const { rows } = await client.query<{ r: string }>(`
         SELECT DISTINCT r.rolname AS r FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
-        WHERE n.nspname = 'public' AND p.prosecdef AND p.prorettype <> 'trigger'::regtype AND NOT r.rolsuper
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prosecdef AND p.prorettype <> 'trigger'::regtype AND NOT r.rolsuper
           AND pg_get_userbyid(p.proowner) = ANY($1::text[]) AND NOT (p.oid::regprocedure::text = ANY($2::text[]))
           AND has_function_privilege(r.oid, p.oid, 'EXECUTE')`, [[...writers], PILOT_WRITERS_ALLOWED]);
       for (const x of rows) if (!writers.has(x.r)) { writers.add(x.r); grew = true; }
@@ -148,11 +150,33 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
     const pilotWriters = await client.query<{ who: string; fn: string }>(`
       SELECT r.rolname AS who, p.oid::regprocedure::text AS fn
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
-      WHERE n.nspname = 'public' AND p.prosecdef AND p.prorettype <> 'trigger'::regtype
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prosecdef AND p.prorettype <> 'trigger'::regtype
         AND r.rolname = ANY($1::text[]) AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
         AND pg_get_userbyid(p.proowner) = ANY($2::text[])
         AND NOT (p.oid::regprocedure::text = ANY($3::text[]))`, [LOGIN_ROLES, [...writers], PILOT_WRITERS_ALLOWED]);
     for (const w of pilotWriters.rows) problems.push(`${w.who} can run ${w.fn}, a privileged function able to write pilot or override records`);
+    // Privileged trigger functions owned by a writer, on a table a login role can change (recheck of candidate 3, L-D).
+    const pilotTriggers = await client.query<{ trg: string; tbl: string }>(`
+      SELECT t.tgname AS trg, t.tgrelid::regclass::text AS tbl
+      FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+      WHERE NOT t.tgisinternal AND p.prosecdef AND pg_get_userbyid(p.proowner) = ANY($1::text[])
+        AND NOT (p.oid::regprocedure::text = ANY($3::text[]))
+        AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = ANY($2::text[])
+                    AND (has_table_privilege(r.oid, t.tgrelid, 'INSERT,UPDATE,DELETE,TRUNCATE')
+                         OR has_any_column_privilege(r.oid, t.tgrelid, 'INSERT,UPDATE')))`, [[...writers], LOGIN_ROLES, REVIEWED_TRIGGER_FUNCTIONS]);
+    for (const x of pilotTriggers.rows) problems.push(`trigger ${x.trg} on ${x.tbl} runs as a role able to write pilot or override records`);
+    // Rules run with the table owner's rights; none are used, so any rule is flagged. Views over the two tables too.
+    const rules = await client.query<{ rule: string; tbl: string }>(`
+      SELECT r.rulename AS rule, c.oid::regclass::text AS tbl FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE r.rulename <> '_RETURN' AND n.nspname NOT IN ('pg_catalog', 'information_schema')`);
+    for (const x of rules.rows) problems.push(`rule ${x.rule} on ${x.tbl}: rules are not allowed (they run with the table owner's rights)`);
+    const views = await client.query<{ v: string }>(`
+      SELECT DISTINCT v.oid::regclass::text AS v FROM pg_depend d JOIN pg_rewrite rw ON rw.oid = d.objid
+      JOIN pg_class v ON v.oid = rw.ev_class
+      WHERE d.classid = 'pg_rewrite'::regclass AND v.relkind IN ('v', 'm')
+        AND d.refobjid IN ('pilot_enrolments'::regclass, 'entitlement_overrides'::regclass)`);
+    for (const x of views.rows) problems.push(`view ${x.v} reads or writes pilot or override records; not allowed`);
     const allowedRunners = await client.query<{ who: string; fn: string }>(`
       SELECT r.rolname AS who, p.oid::regprocedure::text AS fn FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN pg_roles r
       WHERE n.nspname = 'public' AND p.oid::regprocedure::text = ANY($2::text[]) AND r.rolname = ANY($1::text[]) AND r.rolname <> 'cf_platform'

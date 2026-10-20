@@ -24,8 +24,8 @@ const MfaResetRequest = z.object({
   reason: z.string().trim().min(20, 'Explain the situation (at least 20 characters)').max(1000),
   identityMethod: z.enum(['video_call_photo_id', 'callback_known_number', 'company_owner_confirmation', 'in_person']),
   identityReference: z.string().trim().min(10).max(200)
-    // Six or more digits of any script in a run, even with spaces, dashes, dots or slashes (review of candidate 3, L-A).
-    .refine((v) => !/(\p{Nd}[\s./-]?){6,}/u.test(v), 'Do not record document or account numbers; describe the check instead'),
+    // At most 5 digits in total, of any script, whatever separates them (recheck of candidate 3, L-A).
+    .refine((v) => (v.match(/\p{Nd}/gu) ?? []).length < 6, 'Do not record document or account numbers; describe the check in words (write dates as "20 Oct")'),
 });
 const PilotRequest = z.object({
   seats: z.number().int().min(1).max(50).default(10),

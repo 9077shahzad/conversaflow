@@ -12,8 +12,8 @@ normal reset email; it does not need this process.
 ## Steps
 
 1. **Check identity** (platform owner A). Choose one method and note what you saw. Never write down document or
-   account numbers. The system refuses six or more digits in a run (any script, even with spaces or dashes), so write
-   dates in words ("20 Oct"), not as numbers.
+   account numbers. The system refuses a reference with six or more digits in total (any script, however separated),
+   so write dates in words ("20 Oct") and keep times short ("10:20").
    - `video_call_photo_id`: video call; compare the person with their photo ID and their profile.
    - `callback_known_number`: call back on a number already on file (not one given in the request).
    - `company_owner_confirmation`: the company's Owner confirms the person and the request, on a separate channel.

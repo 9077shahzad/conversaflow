@@ -252,12 +252,12 @@ confirmation code goes nor activate an authenticator without the emailed code." 
 
 | # | Finding | Severity | Fix (migration 0018 and API) | Status |
 | --- | --- | --- | --- | --- |
-| L-A | Identity-reference filter bypassed with spaced, dashed, Arabic-Indic or full-width digits | Low | Six or more digits of any script in a run, with separators, refused in the database and the API | Fixed — awaiting recheck |
-| L-B | Second approver could not see the request before approving | Low | `GET /v1/platform/mfa-resets` (platform owners): reason, method, reference, requester | Fixed — awaiting recheck |
-| L-C | Invitations sent before enrolment kept 7 days; 72-hour rule only in application code | Low | Enrolment cuts pending invitations to 72 h; database trigger caps pilot invitations | Fixed — awaiting recheck |
-| L-D | CI guard missed a writer reached through a helper, and `concat()` dynamic SQL | Low | Dedicated owner role `cf_pilot`; guard works by owner and allowed signatures, following function chains | Fixed — awaiting recheck |
+| L-A | Identity-reference filter bypassed with spaced, dashed, Arabic-Indic or full-width digits | Low | First fix (runs with separators) still bypassable (recheck of `42823bb`); final rule: at most 5 digits in total, any script (migration 0019) | Fixed — awaiting final recheck |
+| L-B | Second approver could not see the request before approving | Low | `GET /v1/platform/mfa-resets` (platform owners): reason, method, reference, requester | **Verified** by the recheck of `42823bb` |
+| L-C | Invitations sent before enrolment kept 7 days; 72-hour rule only in application code | Low | Enrolment cuts pending invitations to 72 h; database trigger caps pilot invitations (verified at `42823bb`); cap now counted from creation so it cannot be renewed (0019) | Fixed — awaiting final recheck |
+| L-D | CI guard missed a writer reached through a helper, and `concat()` dynamic SQL | Low | Dedicated owner role `cf_pilot`; owner-based guard (verified for those two at `42823bb`). The recheck found three more gaps (another schema, a privileged trigger, a rule); the guard now covers all schemas, triggers, rules and views (ADR-037) | Fixed — awaiting final recheck |
 | I | The notifier credential chooses and sends the code (inherent to sending mail) | Informational | Activation still needs the enrolling session | Accepted |
-| I | No cap on confirmation emails | Informational | Capped at 5 per user per hour | Fixed — awaiting recheck |
+| I | No cap on confirmation emails | Informational | Capped at 5 per user per hour | **Verified** by the recheck of `42823bb` |
 | I | Password unchanged after a reset | Informational | Runbook advises a password change | Documented |
 | I | Not-found pages do not show the browser notice | Informational | Cosmetic | Accepted |
 

@@ -238,3 +238,15 @@ Migration 0018:
 - **L-B:** `platform_list_mfa_resets` (platform owners) shows open requests with reason, identity method, reference
   and requester, so the second owner reviews before approving.
 - **Informational:** confirmation-code emails are capped at 5 per user per hour.
+
+## ADR-037 — Fixes from the recheck of candidate 3
+
+Migration 0019 and the guard:
+
+- **L-A:** identity references may contain at most 5 digits in total, of any script, whatever separates them, in both
+  the database and the API.
+- **L-C:** a pilot invitation's life is capped at 72 hours from its creation, so it cannot be renewed.
+- **L-D:** the CI guard now covers every schema, not only `public`. It flags privileged trigger functions owned by a
+  writer on any table a login role can change; the two reviewed billing triggers are allowed by signature. It also
+  refuses any rule, and any view over the pilot or override tables. Tests plant a function in another schema, a
+  trigger and a rule; each is caught.

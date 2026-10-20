@@ -164,7 +164,8 @@ describe('M8: two-person, identity-checked, audited reset of two-step sign-in', 
     await enableMfa(u);
     await agentStaff.post('/v1/platform/mfa-resets', req(u.email)).expect(403);
     for (const bad of ['Passport number 12345678 checked', 'passport 123 456 789 checked', 'id 12-34-56-78-90 seen on call',
-      'iqama ١٢٣٤٥٦٧٨٩٠ seen on call', 'card １２３４５６７８ shown on call']) {
+      'iqama ١٢٣٤٥٦٧٨٩٠ seen on call', 'card １２３４５６７８ shown on call', 'no 1, 2, 3, 4, 5, 6 on the card',
+      'no 12_34_56 on the card', 'id 12 – 34 – 56 checked', 'id 1  2  3  4  5  6 checked', 'id 12:34:56:78 checked', 'id 1a2b3c4d5e6f checked']) {
       await ownerA.post('/v1/platform/mfa-resets', req(u.email, { identityReference: bad })).expect(400);
     }
     const id = (await ownerA.post('/v1/platform/mfa-resets', req(u.email)).expect(201)).body.requestId;
@@ -333,6 +334,20 @@ describe('CI guard: privileged functions that could write pilot or override reco
         AS $$ BEGIN EXECUTE (concat('INSERT INTO entitle', 'ment_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES ($1, ''seats'', 99, ''x'', now() + interval ''1 day'')')) USING p; END $$`);
       await owner.query('ALTER FUNCTION test_concat(uuid) OWNER TO cf_pilot');
       await owner.query('GRANT EXECUTE ON FUNCTION test_sneaky_grant(uuid), test_sneaky_dynamic(text), test_wrapper(uuid), test_concat(uuid) TO cf_app');
+      // Recheck of candidate 3, L-D: another schema, a privileged trigger, and a rule.
+      await owner.query('CREATE SCHEMA zz_other');
+      await owner.query('GRANT USAGE ON SCHEMA zz_other TO cf_app, cf_pilot');
+      await owner.query('GRANT CREATE ON SCHEMA zz_other TO cf_pilot');
+      await owner.query(`CREATE FUNCTION zz_other.g(p uuid) RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp
+        AS $$ INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (p, 'seats', 99, 'x', now() + interval '1 day') $$`);
+      await owner.query('ALTER FUNCTION zz_other.g(uuid) OWNER TO cf_pilot');
+      await owner.query('GRANT EXECUTE ON FUNCTION zz_other.g(uuid) TO cf_app');
+      await owner.query(`CREATE FUNCTION test_trg() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+        AS $$ BEGIN INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (NEW.tenant_id, 'seats', 99, 'x', now() + interval '1 day'); RETURN NEW; END $$`);
+      await owner.query('ALTER FUNCTION test_trg() OWNER TO cf_pilot');
+      await owner.query('CREATE TRIGGER test_trg AFTER INSERT ON branches FOR EACH ROW EXECUTE FUNCTION test_trg()');
+      await owner.query(`CREATE RULE test_rule AS ON INSERT TO teams DO ALSO
+        INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason, expires_at) VALUES (NEW.tenant_id, 'seats', 99, 'x', now() + interval '1 day')`);
       await owner.query('GRANT EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) TO cf_identity');
       const problems = await checkIsolation(process.env.DATABASE_URL!);
       expect(problems).toEqual(expect.arrayContaining([
@@ -340,6 +355,9 @@ describe('CI guard: privileged functions that could write pilot or override reco
         'cf_app can run test_sneaky_dynamic(text), a privileged function able to write pilot or override records',
         'cf_app can run test_wrapper(uuid), a privileged function able to write pilot or override records',
         'cf_app can run test_concat(uuid), a privileged function able to write pilot or override records',
+        'cf_app can run zz_other.g(uuid), a privileged function able to write pilot or override records',
+        'trigger test_trg on branches runs as a role able to write pilot or override records',
+        "rule test_rule on teams: rules are not allowed (they run with the table owner's rights)",
         'cf_identity can issue two-step confirmation codes; only cf_notify may',
       ]));
     } finally {
@@ -348,6 +366,10 @@ describe('CI guard: privileged functions that could write pilot or override reco
       await owner.query('DROP FUNCTION IF EXISTS test_wrapper(uuid)');
       await owner.query('DROP FUNCTION IF EXISTS test_concat(uuid)');
       await owner.query('DROP FUNCTION IF EXISTS zz_helper_grant(uuid)');
+      await owner.query('DROP RULE IF EXISTS test_rule ON teams');
+      await owner.query('DROP TRIGGER IF EXISTS test_trg ON branches');
+      await owner.query('DROP FUNCTION IF EXISTS test_trg()');
+      await owner.query('DROP SCHEMA IF EXISTS zz_other CASCADE');
       await owner.query('REVOKE EXECUTE ON FUNCTION auth_mfa_issue_activation(uuid, bytea) FROM cf_identity');
       await owner.end();
     }
