@@ -200,3 +200,8 @@ tests, browser checks 10/10 twice, `test:scripts` 14/14, strict audit with no ad
 181-day bound and the locale header). L3 coverage completed afterwards as listed above; the change is to
 `.github/CODEOWNERS` only (not enforced until GitHub is configured).
 
+Final check of `aeb50787275f4d2758782d3018b804186c68ee66` (reviewer, read-only): the change from `56cdf5b` is
+CODEOWNERS only; the eight added paths are covered; `apps/api/vitest.config.ts` was still missing (Low). Closed
+with pattern rules covering every `package.json`, `*.config.*` and `tsconfig*.json` file and the gitleaks
+configuration (including files created later), so coverage no longer depends on listing each file.
+

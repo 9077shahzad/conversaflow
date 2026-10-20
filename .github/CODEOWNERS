@@ -38,3 +38,12 @@
 /apps/api/test/                         @MERONATIC-ORG/security-owners
 /apps/web/e2e/                          @MERONATIC-ORG/security-owners
 /scripts/clamav/                        @MERONATIC-ORG/security-owners
+# Pattern rules (final check of aeb5078): every file of these kinds, wherever it is or will be, because each one can
+# change what a CI step runs — test file patterns, lint rules, type-check settings, build scripts, secret-scan
+# allow-lists.
+package.json                            @MERONATIC-ORG/security-owners
+*.config.*                              @MERONATIC-ORG/security-owners
+tsconfig*.json                          @MERONATIC-ORG/security-owners
+/.gitleaks.toml                         @MERONATIC-ORG/security-owners
+/.gitleaksignore                        @MERONATIC-ORG/security-owners
+
