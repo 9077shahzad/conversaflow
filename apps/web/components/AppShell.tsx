@@ -19,7 +19,7 @@ export const useSession = () => {
 type Item = { href: string; key: keyof ReturnType<typeof t>['nav']; later?: boolean; icon: string };
 const ITEMS: Item[] = [
   { href: '', key: 'dashboard', icon: 'M4 13h6V4H4zm10 7h6V11h-6zM4 20h6v-5H4zm10-11h6V4h-6z' },
-  { href: '/inbox', key: 'inbox', later: true, icon: 'M4 5h16v10h-5l-3 3-3-3H4z' },
+  { href: '/inbox', key: 'inbox', icon: 'M4 5h16v10h-5l-3 3-3-3H4z' },
   { href: '/contacts', key: 'contacts', later: true, icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0' },
   { href: '/campaigns', key: 'campaigns', later: true, icon: 'M4 10v4l12 5V5zM16 9h4v6h-4' },
   { href: '/automations', key: 'automations', later: true, icon: 'M5 4h5v5H5zm9 11h5v5h-5zM7.5 9v4.5h9V15' },

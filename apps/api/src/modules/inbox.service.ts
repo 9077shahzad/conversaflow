@@ -4,9 +4,8 @@ import type { Deps, TenantActor } from '../core/context';
 import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
-import {
-  ChannelSendError, consentKeyword, parseWebhook, STATUS_RANK, type ChannelAdapter, type ParsedEvent, type Provider,
-} from './channels';
+import { consentKeyword, parseWebhook, type ParsedEvent, type Provider } from './channels';
+import { applyStatus, Sender } from './sender';
 import { isUuid } from './members.service';
 
 /** Free-form replies are allowed only within this long of the customer's last message (Meta customer service window). */
@@ -26,6 +25,17 @@ const ListQuery = z.object({
 });
 const AssignRequest = z.object({ membershipId: z.string().uuid().nullable(), expectedVersion: z.number().int().min(0) });
 const NoteRequest = z.object({ body: z.string().trim().min(1).max(4000) });
+const PauseRequest = z.object({
+  reason: z.string().trim().min(3).max(300),
+  /** How long the pause lasts; null means until someone releases it. */
+  minutes: z.number().int().min(5).max(7 * 24 * 60).nullable(),
+});
+const RetryRequest = z.object({
+  seenActivity: z.number().int().min(0),
+  clientMessageId: z.string().uuid(),
+  /** Required for an uncertain message: the person confirms that a second copy may reach the customer. */
+  confirmPossibleDuplicate: z.boolean().optional(),
+});
 const ReplyRequest = z.object({
   text: z.string().trim().min(1).max(4096),
   /**
@@ -41,19 +51,18 @@ const ReplyRequest = z.object({
 type ConvRow = {
   id: string; contact_id: string; connection_id: string; status: string; assigned_membership_id: string | null;
   last_inbound_at: Date | null; last_message_id: string | null; version: number; activity_seq: string;
+  paused_by_membership_id: string | null; paused_reason: string | null; paused_at: Date | null; paused_until: Date | null;
 };
+const pauseActive = (c: ConvRow) => c.paused_at !== null && (c.paused_until === null || c.paused_until.getTime() > Date.now());
 
 /**
  * Messaging slice 1 (CF-EXT-001/002/003): verified webhook intake, contacts, conversations, inbox, assignment,
  * internal notes and replies. Everything runs as cf_app inside one company's context, so row-level security applies.
  */
 export class InboxService {
-  constructor(private readonly deps: Deps) {}
-
-  private adapter(provider: Provider): ChannelAdapter {
-    const a = this.deps.channels[provider];
-    if (!a) throw Errors.conflict('provider_not_available', 'This messaging provider is not available yet.');
-    return a;
+  private readonly sender: Sender;
+  constructor(private readonly deps: Deps) {
+    this.sender = new Sender(deps.db, deps.channels);
   }
 
   // --- Channels ------------------------------------------------------------------------------------------------
@@ -117,7 +126,7 @@ export class InboxService {
           if (!ins.rows[0]) { counts.duplicate++; continue; }
           const outcome = e.kind === 'message'
             ? await this.applyInbound(tx, route.tenant_id, route.connection_id, e)
-            : await this.applyStatus(tx, e.providerMessageId, e.status, e.errorCode);
+            : await applyStatus(tx, e.providerMessageId, e.status, e.errorCode, e.callbackData);
           await tx.query('UPDATE webhook_events SET processed_at = now(), outcome = $2 WHERE id = $1', [ins.rows[0].id, outcome]);
           if (outcome === 'applied') counts.applied++;
           else if (outcome === 'stale_status') counts.stale++;
@@ -187,19 +196,6 @@ export class InboxService {
     return 'applied' as const;
   }
 
-  /** Applies a delivery status. Statuses only move forward; one for a message we have not recorded yet is kept and applied later. */
-  private async applyStatus(tx: Tx, providerMessageId: string, status: string, errorCode: string | null) {
-    const upd = await tx.query(
-      `UPDATE messages SET status = $2, error_code = coalesce($3, error_code)
-       WHERE provider_message_id = $1 AND direction = 'out'
-         AND (CASE status WHEN 'queued' THEN 0 WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 WHEN 'failed' THEN 4 END) < $4
-       RETURNING id`,
-      [providerMessageId, status, errorCode, STATUS_RANK[status]]);
-    if (upd.rowCount) return 'applied' as const;
-    const exists = await tx.query(`SELECT 1 FROM messages WHERE provider_message_id = $1 AND direction = 'out'`, [providerMessageId]);
-    return exists.rowCount ? ('stale_status' as const) : ('orphan_status' as const);
-  }
-
   // --- Inbox -------------------------------------------------------------------------------------------------------
   /**
    * Agents without inbox.read_all see conversations assigned to them and unassigned ones; nobody else's.
@@ -218,7 +214,11 @@ export class InboxService {
                 c.last_message_at AS "lastMessageAt", c.last_inbound_at AS "lastInboundAt",
                 (c.last_inbound_at IS NOT NULL AND c.last_inbound_at > now() - make_interval(hours => $5)) AS "windowOpen",
                 ct.id AS "contactId", ct.display_name AS "contactName", (ct.opted_out_at IS NOT NULL) AS "optedOut",
-                m.body AS "lastMessagePreview", m.direction AS "lastMessageDirection"
+                m.body AS "lastMessagePreview", m.direction AS "lastMessageDirection",
+                (c.paused_at IS NOT NULL AND (c.paused_until IS NULL OR c.paused_until > now())) AS "paused",
+                EXISTS (SELECT 1 FROM messages f WHERE f.conversation_id = c.id AND f.direction = 'out'
+                          AND f.status IN ('failed', 'uncertain')
+                          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.retry_of = f.id)) AS "needsAttention"
          FROM conversations c
          JOIN contacts ct ON ct.id = c.contact_id
          LEFT JOIN messages m ON m.id = c.last_message_id
@@ -250,9 +250,11 @@ export class InboxService {
                 (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) AS "whatsapp"
          FROM contacts ct WHERE ct.id = $1`, [c.contact_id])).rows[0];
       const messages = (await tx.query(
-        `SELECT id, direction, kind, body, provider_type AS "providerType", status, error_code AS "errorCode",
-                occurred_at AS "occurredAt", sent_by_membership_id AS "sentByMembershipId", (referral IS NOT NULL) AS "fromAd"
-         FROM messages WHERE conversation_id = $1 ORDER BY occurred_at, id`, [c.id])).rows;
+        `SELECT m.id, m.direction, m.kind, m.body, m.provider_type AS "providerType", m.status, m.error_code AS "errorCode",
+                m.occurred_at AS "occurredAt", m.sent_by_membership_id AS "sentByMembershipId", (m.referral IS NOT NULL) AS "fromAd",
+                m.attempts, m.retry_of AS "retryOf", r.id AS "retriedAs"
+         FROM messages m LEFT JOIN messages r ON r.retry_of = m.id
+         WHERE m.conversation_id = $1 ORDER BY m.occurred_at, m.id`, [c.id])).rows;
       const notes = (await tx.query(
         `SELECT id, body, author_membership_id AS "authorMembershipId", created_at AS "createdAt"
          FROM internal_notes WHERE conversation_id = $1 ORDER BY created_at, id`, [c.id])).rows;
@@ -263,8 +265,22 @@ export class InboxService {
       return {
         id: c.id, status: c.status, version: c.version, assignedMembershipId: c.assigned_membership_id,
         lastMessageId: c.last_message_id, activitySeq: Number(c.activity_seq), windowOpen, contact, messages, notes, events,
+        people: await this.names(tx, [c.assigned_membership_id, c.paused_by_membership_id,
+          ...messages.map((m) => m.sentByMembershipId), ...notes.map((n) => n.authorMembershipId), ...events.map((e) => e.actorMembershipId)]),
+        pause: pauseActive(c)
+          ? { active: true, reason: c.paused_reason, pausedByMembershipId: c.paused_by_membership_id, pausedAt: c.paused_at, until: c.paused_until }
+          : { active: false },
       };
     });
+  }
+
+  /** Display names for the people who appear in a conversation (members of this company only, under RLS). */
+  private async names(tx: Tx, ids: Array<string | null | undefined>): Promise<Record<string, string>> {
+    const unique = [...new Set(ids.filter((x): x is string => !!x))];
+    if (!unique.length) return {};
+    const { rows } = await tx.query<{ id: string; name: string }>(
+      'SELECT m.id, u.full_name AS name FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.id = ANY($1::uuid[])', [unique]);
+    return Object.fromEntries(rows.map((r) => [r.id, r.name]));
   }
 
   async assign(actor: TenantActor, id: string, input: unknown) {
@@ -314,101 +330,184 @@ export class InboxService {
     });
   }
 
+  /** Checks shared by replies and retries. Throws the reason a person may not send in this conversation now. */
+  private async checkCanSend(tx: Tx, actor: TenantActor, c: ConvRow, seenActivity: number, takeover = false) {
+    const ctx = (await tx.query<{ opted_out_at: Date | null; wa: string | null; channel_status: string }>(
+      `SELECT ct.opted_out_at, ch.status AS channel_status,
+              (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) AS wa
+       FROM contacts ct, channel_connections ch WHERE ct.id = $1 AND ch.id = $2`, [c.contact_id, c.connection_id])).rows[0]!;
+    if (c.status === 'resolved') throw Errors.conflict('conversation_resolved', 'This conversation is resolved.');
+    if (ctx.channel_status !== 'active') throw Errors.conflict('channel_disabled', 'This channel is turned off.');
+    if (pauseActive(c) && c.paused_by_membership_id !== actor.membershipId) {
+      throw new AppError(409, 'replies_paused', 'A supervisor has paused replies on this conversation.',
+        { reason: c.paused_reason, pausedByMembershipId: c.paused_by_membership_id, until: c.paused_until });
+    }
+    let assigned = c.assigned_membership_id;
+    if (assigned && assigned !== actor.membershipId) {
+      if (!takeover) throw new AppError(409, 'assigned_to_other', 'Another person is handling this conversation.', { assignedMembershipId: assigned });
+      if (!actor.permissions.has('inbox.assign')) throw Errors.forbidden('Only a supervisor can take over a conversation.');
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'takeover', $3, $4)`,
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: assigned })]);
+      await AuditService.record(tx, {
+        tenantId: actor.tenantId, actorUserId: actor.userId, action: 'conversation.takeover', ip: actor.ip,
+        targetType: 'conversation', targetId: c.id, metadata: { from: assigned },
+      });
+      assigned = null;
+    }
+    if (Number(c.activity_seq) !== seenActivity) {
+      throw new AppError(409, 'conversation_changed', 'New messages arrived or were sent. Read them before replying.',
+        { activitySeq: Number(c.activity_seq) });
+    }
+    if (ctx.opted_out_at) throw Errors.conflict('contact_opted_out', 'This customer has opted out of messages.');
+    if (c.last_inbound_at === null || Date.now() - c.last_inbound_at.getTime() >= SERVICE_WINDOW_HOURS * 3600_000) {
+      throw Errors.conflict('template_required',
+        'More than 24 hours have passed since the customer last wrote. Only an approved template can be sent now.');
+    }
+    if (!ctx.wa) throw Errors.conflict('no_whatsapp_identifier', 'This contact has no verified WhatsApp number.');
+    if (assigned === null) {
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'assigned', $3, $4)`,
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: c.assigned_membership_id, to: actor.membershipId, by: 'reply' })]);
+    }
+  }
+
+  /** Records a queued outbound message and its send job, and moves the conversation forward. */
+  private async enqueue(tx: Tx, actor: TenantActor, c: ConvRow, text: string, clientMessageId: string, retryOf: string | null) {
+    const msg = (await tx.query<{ id: string; occurred_at: Date }>(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status, retry_of)
+       VALUES ($1, $2, 'out', 'text', $3, $4, $5, clock_timestamp(), 'queued', $6) RETURNING id, occurred_at`,
+      [actor.tenantId, c.id, text, clientMessageId, actor.membershipId, retryOf])).rows[0]!;
+    const job = (await tx.query<{ id: string }>(
+      'INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2) RETURNING id', [actor.tenantId, msg.id])).rows[0]!;
+    await tx.query(
+      `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4,
+              activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,
+      [c.id, actor.membershipId, msg.id, msg.occurred_at]);
+    return { messageId: msg.id, jobId: job.id };
+  }
+
+  /** Sends straight away when possible; if this fails or the process stops, the worker finishes the job. */
+  private async sendNow(actor: TenantActor, jobId: string) {
+    try {
+      if (await this.sender.leaseNow(actor.tenantId, jobId)) await this.sender.processJob(actor.tenantId, jobId);
+    } catch (err) {
+      console.error('immediate send failed; the worker will continue', err instanceof Error ? err.message : err);
+    }
+  }
+
   async reply(actor: TenantActor, id: string, input: unknown) {
     const body = parse(ReplyRequest, input);
-    type Prepared = { existing: string } | { existing?: undefined; messageId: string; provider: Provider; number: string; to: string };
+    type Prepared = { existing: string } | { existing?: undefined; messageId: string; jobId: string };
     const prepared = await withContext<Prepared>(this.deps.db, actor, async (tx) => {
       // A retry of a request we already accepted returns that message, whatever has changed since.
       const again = await tx.query(`SELECT id FROM messages WHERE client_message_id = $1 AND sent_by_membership_id = $2`,
         [body.clientMessageId, actor.membershipId]);
       if (again.rows[0]) return { existing: again.rows[0].id as string };
-
       const c = await this.loadVisible(tx, actor, id, true);
-      const ctx = (await tx.query<{ opted_out_at: Date | null; wa: string | null; provider: Provider; number: string; channel_status: string }>(
-        `SELECT ct.opted_out_at,
-                (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) AS wa,
-                ch.provider, ch.provider_number_id AS number, ch.status AS channel_status
-         FROM contacts ct, channel_connections ch WHERE ct.id = $1 AND ch.id = $2`, [c.contact_id, c.connection_id])).rows[0]!;
-      if (c.status === 'resolved') throw Errors.conflict('conversation_resolved', 'This conversation is resolved.');
-      if (ctx.channel_status !== 'active') throw Errors.conflict('channel_disabled', 'This channel is turned off.');
-
-      let assigned = c.assigned_membership_id;
-      if (assigned && assigned !== actor.membershipId) {
-        if (!body.takeover) {
-          throw new AppError(409, 'assigned_to_other', 'Another person is handling this conversation.', { assignedMembershipId: assigned });
-        }
-        if (!actor.permissions.has('inbox.assign')) throw Errors.forbidden('Only a supervisor can take over a conversation.');
-        await tx.query(
-          `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'takeover', $3, $4)`,
-          [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: assigned })]);
-        await AuditService.record(tx, {
-          tenantId: actor.tenantId, actorUserId: actor.userId, action: 'conversation.takeover', ip: actor.ip,
-          targetType: 'conversation', targetId: c.id, metadata: { from: assigned },
-        });
-        assigned = null;
-      }
-      if (Number(c.activity_seq) !== body.seenActivity) {
-        throw new AppError(409, 'conversation_changed', 'New messages arrived or were sent. Read them before replying.',
-          { activitySeq: Number(c.activity_seq) });
-      }
-      if (ctx.opted_out_at) throw Errors.conflict('contact_opted_out', 'This customer has opted out of messages.');
-      const windowOpen = c.last_inbound_at !== null && Date.now() - c.last_inbound_at.getTime() < SERVICE_WINDOW_HOURS * 3600_000;
-      if (!windowOpen) {
-        throw Errors.conflict('template_required',
-          'More than 24 hours have passed since the customer last wrote. Only an approved template can be sent now.');
-      }
-      if (!ctx.wa) throw Errors.conflict('no_whatsapp_identifier', 'This contact has no verified WhatsApp number.');
-
-      if (assigned === null) {
-        await tx.query(
-          `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'assigned', $3, $4)`,
-          [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: c.assigned_membership_id, to: actor.membershipId, by: 'reply' })]);
-      }
-      const msg = (await tx.query<{ id: string; occurred_at: Date }>(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status)
-         VALUES ($1, $2, 'out', 'text', $3, $4, $5, clock_timestamp(), 'queued') RETURNING id, occurred_at`,
-        [actor.tenantId, c.id, body.text, body.clientMessageId, actor.membershipId])).rows[0]!;
-      await tx.query(
-        `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4,
-                activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,
-        [c.id, actor.membershipId, msg.id, msg.occurred_at]);
-      return { messageId: msg.id, provider: ctx.provider, number: ctx.number, to: ctx.wa as string };
+      await this.checkCanSend(tx, actor, c, body.seenActivity, body.takeover);
+      return this.enqueue(tx, actor, c, body.text, body.clientMessageId, null);
     });
-
     if (prepared.existing !== undefined) return this.message(actor, prepared.existing);
-
-    // Sent after the record is committed: a failure leaves an honest "failed" status, never a false "sent".
-    let providerMessageId: string | null = null;
-    let errorCode: string | null = null;
-    try {
-      providerMessageId = (await this.adapter(prepared.provider).sendText({
-        providerNumberId: prepared.number, to: prepared.to, body: body.text, clientMessageId: body.clientMessageId,
-      })).providerMessageId;
-    } catch (err) {
-      errorCode = err instanceof ChannelSendError ? err.code : 'send_failed';
-    }
-    await withContext(this.deps.db, actor, async (tx) => {
-      if (providerMessageId) {
-        await tx.query(`UPDATE messages SET status = 'sent', provider_message_id = $2 WHERE id = $1 AND status = 'queued'`,
-          [prepared.messageId, providerMessageId]);
-        // Statuses that arrived before we recorded the provider id (out of order) are applied now.
-        const orphans = await tx.query<{ id: string; status: string; code: string | null }>(
-          `SELECT id, payload->>'status' AS status, payload#>>'{errors,0,code}' AS code FROM webhook_events
-           WHERE kind = 'status' AND outcome = 'orphan_status' AND payload->>'id' = $1`, [providerMessageId]);
-        for (const o of orphans.rows) {
-          await this.applyStatus(tx, providerMessageId, o.status, o.code);
-          await tx.query(`UPDATE webhook_events SET outcome = 'applied', processed_at = now() WHERE id = $1`, [o.id]);
-        }
-      } else {
-        await tx.query(`UPDATE messages SET status = 'failed', error_code = $2 WHERE id = $1 AND status = 'queued'`, [prepared.messageId, errorCode]);
-      }
-    });
+    await this.sendNow(actor, prepared.jobId);
     return this.message(actor, prepared.messageId);
+  }
+
+  /**
+   * A person retries a failed or uncertain message. The retry is a new message linked to the original (which keeps its
+   * honest status). An uncertain message may already have reached the customer, so the person must confirm.
+   */
+  async retry(actor: TenantActor, messageId: string, input: unknown) {
+    const body = parse(RetryRequest, input);
+    if (!isUuid(messageId)) throw Errors.notFound('Message');
+    type Prepared = { existing: string } | { existing?: undefined; messageId: string; jobId: string };
+    const prepared = await withContext<Prepared>(this.deps.db, actor, async (tx) => {
+      const again = await tx.query(`SELECT id FROM messages WHERE client_message_id = $1 AND sent_by_membership_id = $2`,
+        [body.clientMessageId, actor.membershipId]);
+      if (again.rows[0]) return { existing: again.rows[0].id as string };
+      const orig = (await tx.query<{ id: string; conversation_id: string; status: string; body: string | null; direction: string; error_code: string | null }>(
+        'SELECT id, conversation_id, status, body, direction, error_code FROM messages WHERE id = $1', [messageId])).rows[0];
+      if (!orig || orig.direction !== 'out') throw Errors.notFound('Message');
+      const c = await this.loadVisible(tx, actor, orig.conversation_id, true);
+      if (orig.status !== 'failed' && orig.status !== 'uncertain') {
+        throw Errors.conflict('not_retryable', 'Only a failed or uncertain message can be retried.');
+      }
+      if (orig.status === 'uncertain' && !body.confirmPossibleDuplicate) {
+        throw new AppError(409, 'confirmation_required',
+          'We do not know whether this message reached the customer. Retrying may send it twice. Confirm to retry.');
+      }
+      if (await tx.query('SELECT 1 FROM messages WHERE retry_of = $1', [orig.id]).then((r) => r.rowCount)) {
+        throw Errors.conflict('already_retried', 'This message has already been retried.');
+      }
+      await this.checkCanSend(tx, actor, c, body.seenActivity);
+      const queued = await this.enqueue(tx, actor, c, orig.body ?? '', body.clientMessageId, orig.id);
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'retried', $3, $4)`,
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ original: orig.id, retry: queued.messageId, originalStatus: orig.status })]);
+      await AuditService.record(tx, {
+        tenantId: actor.tenantId, actorUserId: actor.userId, action: 'message.retried', ip: actor.ip, targetType: 'message', targetId: orig.id,
+        metadata: { retry: queued.messageId, originalStatus: orig.status, errorCode: orig.error_code, confirmedPossibleDuplicate: !!body.confirmPossibleDuplicate },
+      });
+      return queued;
+    }).catch((err) => {
+      if ((err as { code?: string }).code === '23505') throw Errors.conflict('already_retried', 'This message has already been retried.');
+      throw err;
+    });
+    if (prepared.existing !== undefined) return this.message(actor, prepared.existing);
+    await this.sendNow(actor, prepared.jobId);
+    return this.message(actor, prepared.messageId);
+  }
+
+  /** "Pause replies / supervisor handling" (owner decision 20 Oct 2026): blocks everyone else's replies until released or expired. */
+  async pause(actor: TenantActor, id: string, input: unknown) {
+    const body = parse(PauseRequest, input);
+    return withContext(this.deps.db, actor, async (tx) => {
+      const c = await this.loadVisible(tx, actor, id, true);
+      if (pauseActive(c) && c.paused_by_membership_id !== actor.membershipId) {
+        throw new AppError(409, 'already_paused', 'Another supervisor has already paused replies here.',
+          { reason: c.paused_reason, pausedByMembershipId: c.paused_by_membership_id, until: c.paused_until });
+      }
+      const upd = (await tx.query<{ paused_at: Date; paused_until: Date | null }>(
+        `UPDATE conversations SET paused_by_membership_id = $2, paused_reason = $3, paused_at = now(),
+                paused_until = CASE WHEN $4::int IS NULL THEN NULL ELSE now() + make_interval(mins => $4::int) END,
+                version = version + 1
+         WHERE id = $1 RETURNING paused_at, paused_until`, [c.id, actor.membershipId, body.reason, body.minutes])).rows[0]!;
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'paused', $3, $4)`,
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ reason: body.reason, until: upd.paused_until })]);
+      await AuditService.record(tx, {
+        tenantId: actor.tenantId, actorUserId: actor.userId, action: 'conversation.replies_paused', ip: actor.ip,
+        targetType: 'conversation', targetId: c.id, metadata: { reason: body.reason, minutes: body.minutes },
+      });
+      return { active: true, reason: body.reason, pausedByMembershipId: actor.membershipId, pausedAt: upd.paused_at, until: upd.paused_until };
+    });
+  }
+
+  async release(actor: TenantActor, id: string) {
+    return withContext(this.deps.db, actor, async (tx) => {
+      const c = await this.loadVisible(tx, actor, id, true);
+      if (!pauseActive(c)) throw Errors.conflict('not_paused', 'Replies are not paused here.');
+      if (c.paused_by_membership_id !== actor.membershipId && !actor.permissions.has('inbox.pause')) {
+        throw Errors.forbidden('Only a supervisor can release a pause.');
+      }
+      await tx.query(
+        `UPDATE conversations SET paused_by_membership_id = NULL, paused_reason = NULL, paused_at = NULL, paused_until = NULL,
+                version = version + 1 WHERE id = $1`, [c.id]);
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'resumed', $3, $4)`,
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ pausedBy: c.paused_by_membership_id })]);
+      await AuditService.record(tx, {
+        tenantId: actor.tenantId, actorUserId: actor.userId, action: 'conversation.replies_resumed', ip: actor.ip,
+        targetType: 'conversation', targetId: c.id, metadata: { pausedBy: c.paused_by_membership_id },
+      });
+      return { active: false };
+    });
   }
 
   private async message(actor: TenantActor, id: string) {
     return withContext(this.deps.db, actor, async (tx) => (await tx.query(
-      `SELECT id, conversation_id AS "conversationId", direction, body, status, error_code AS "errorCode", occurred_at AS "occurredAt"
+      `SELECT id, conversation_id AS "conversationId", direction, body, status, error_code AS "errorCode", occurred_at AS "occurredAt",
+              attempts, retry_of AS "retryOf"
        FROM messages WHERE id = $1`, [id])).rows[0]);
   }
 }

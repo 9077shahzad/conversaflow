@@ -21,7 +21,7 @@ statement was found. Nothing here is purchased, submitted or connected; each ite
 | Coexistence | WhatsApp Business app and Cloud API on one number; 20 messages/second; no groups or calls on Cloud API. Country list not stated; KSA/UAE not verified | Eases onboarding of small businesses; test in market |
 | Flows | Encrypted data-exchange endpoint (RSA-OAEP + AES-GCM), return 421 on decryption failure | Wave 3 |
 | Calling | Business-initiated calls unavailable in US, Canada, Egypt, Vietnam, Nigeria. **Saudi Arabia and UAE not mentioned by Meta; respond.io notes "local restrictions" there** | Not verified — behind a feature flag, tested in market first |
-| Native in-chat payments | Documented for India, Brazil and Mexico only | **Not available in KSA/UAE** — use payment links / hosted checkout |
+| Native in-chat payments | Meta's payments documentation (read 20 Oct 2026) covers India, Brazil and Mexico only | **Not documented for KSA/UAE** in Meta's official pages — plan on payment links / hosted checkout, re-check before Wave 3 |
 
 **Cost to ConversaFlow:** Meta charges each customer directly (customers add their own card during onboarding).
 ConversaFlow passes rates through; any markup would be a commercial decision to disclose (BRD §11).
@@ -41,8 +41,8 @@ Requires App Review and business verification, Instagram professional accounts.
 | Publishing | Partner portal review; **closer scrutiny for communication and AI apps** | Review checklist: English/Arabic name, Arabic screenshots, video, trial plans, monitored support |
 | Fees | Not documented | Not documented |
 
-Neither Wati nor respond.io lists a native Salla or Zid integration (only via Zapier); the regional player Mottasl
-does.
+A native Salla or Zid integration by Wati or respond.io was **not verified in the sources checked** on 20 Oct 2026 (a Zid
+connection exists via Zapier for both); the regional player Mottasl lists both natively.
 
 ## 4. Payment gateways (Wave 3)
 

@@ -81,3 +81,24 @@ html[lang='en'] body { line-height: 1.55; }
   line-height: 1.5;
   text-align: center;
 }
+
+/* Inbox buttons (slice 2). Minimum 40px tall for touch; visible focus ring. */
+@layer components {
+  .btn-primary, .btn-secondary, .btn-danger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+  }
+  .btn-primary { background: var(--color-emerald-strong); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: #065f46; }
+  .btn-secondary { background: #fff; color: var(--color-navy); border: 1px solid #cbd5e1; }
+  .btn-secondary:hover:not(:disabled) { background: #f1f5f9; }
+  .btn-danger { background: var(--color-danger); color: #fff; }
+  .btn-primary:disabled, .btn-secondary:disabled, .btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary:focus-visible, .btn-secondary:focus-visible, .btn-danger:focus-visible { outline: 3px solid var(--color-teal); outline-offset: 2px; }
+}

@@ -132,6 +132,11 @@ export class MeController {
   async switchTenant(@CurrentSession() session: AuthSession, @Body() body: unknown) {
     await this.tenants.switchTo(session, body);
   }
+  /** What I can do in the active company, so screens show only actions the server will allow. */
+  @RequirePermission('tenant.read') @Get('access')
+  access(@CurrentActor() actor: TenantActor) {
+    return { membershipId: actor.membershipId, roles: actor.roles, permissions: [...actor.permissions].sort() };
+  }
 }
 
 @Controller('v1')
@@ -489,5 +494,25 @@ export class InboxController {
   @RequirePermission('inbox.reply') @Post(':id/reply') @HttpCode(201)
   reply(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
     return this.inbox.reply(actor, id, body);
+  }
+  @RequirePermission('inbox.pause') @Post(':id/pause') @HttpCode(200)
+  pause(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.pause(actor, id, body);
+  }
+
+  /** The supervisor who paused, or anyone with inbox.pause, can release (checked in the service). */
+  @RequirePermission('inbox.reply') @Delete(':id/pause') @HttpCode(200)
+  release(@CurrentActor() actor: TenantActor, @Param('id') id: string) {
+    return this.inbox.release(actor, id);
+  }
+}
+
+@Controller('v1/messages')
+export class MessagesController {
+  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+
+  @RequirePermission('inbox.reply') @Post(':id/retry') @HttpCode(201)
+  retry(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.retry(actor, id, body);
   }
 }

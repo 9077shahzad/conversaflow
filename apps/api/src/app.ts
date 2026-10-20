@@ -13,7 +13,7 @@ import { RateLimiter } from './core/rate-limit';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 import {
   AuditController, AuthController, BillingController, ChannelsController, FilesController, HealthController, InboxController,
-  MeController, MembersController, PlatformController, SettingsController, TenantsController, WebhooksController,
+  MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -72,7 +72,7 @@ export class AppModule {
       controllers: [
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
-        InboxController,
+        InboxController, MessagesController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },

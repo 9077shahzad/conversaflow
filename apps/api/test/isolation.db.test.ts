@@ -39,6 +39,12 @@ async function populate(owner: Client, label: string, tenantId: string) {
       messages: [{ from: wa, id: `wamid.iso.${label}.${i}`, timestamp: String(Math.floor(Date.now() / 1000) + i), type: 'text', text: { body: text } }] } }] }] });
     await request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
       .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, raw)).send(raw).expect(200);
+    if (i === 0) {
+      // One reply before the opt-out, so messages and send_jobs (migration 0024) have rows too.
+      const first = (await owner.get('/v1/conversations?limit=1').expect(200)).body.items[0];
+      const seen = (await owner.get(`/v1/conversations/${first.id}`).expect(200)).body.activitySeq;
+      await owner.post(`/v1/conversations/${first.id}/reply`, { text: `Reply ${label}`, seenActivity: seen, clientMessageId: crypto.randomUUID() }).expect(201);
+    }
   }
   const conv = (await owner.get('/v1/conversations?limit=1').expect(200)).body.items[0];
   await owner.post(`/v1/conversations/${conv.id}/notes`, { body: `Note for ${label}` }).expect(201);

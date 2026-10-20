@@ -83,8 +83,9 @@ async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Prom
   }
   // cf_pilot (migration 0018) alone may write pilot enrolments and seat overrides, through two console functions.
   // cf_channel (migration 0022) owns the one lookup that routes an incoming webhook to its company; it can read
-  // the channel routing columns and nothing else.
-  for (const owner of ['cf_auth', 'cf_ops', 'cf_pilot', 'cf_channel']) {
+  // the channel routing columns and nothing else. cf_dispatch (migration 0024) owns the lookup that leases due send
+  // jobs across companies; it sees job scheduling columns only, never message content.
+  for (const owner of ['cf_auth', 'cf_ops', 'cf_pilot', 'cf_channel', 'cf_dispatch']) {
     // eslint-disable-next-line no-restricted-syntax
     if (!(await exists(owner))) await client.query(`CREATE ROLE ${pg.escapeIdentifier(owner)} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
   }
@@ -92,7 +93,7 @@ async function bootstrapRoles(client: pg.Client, passwords: RolePasswords): Prom
   const { rows: me } = await client.query<{ u: string; db: string }>('SELECT current_user AS u, current_database() AS db');
   // Identifiers come from the server itself and are escaped; GRANT cannot take bind parameters.
   // eslint-disable-next-line no-restricted-syntax
-  await client.query(`GRANT cf_auth, cf_ops, cf_pilot, cf_channel TO ${pg.escapeIdentifier(me[0]!.u)}`);
+  await client.query(`GRANT cf_auth, cf_ops, cf_pilot, cf_channel, cf_dispatch TO ${pg.escapeIdentifier(me[0]!.u)}`);
   for (const [role] of loginRoles) {
     // eslint-disable-next-line no-restricted-syntax
     await client.query(`GRANT CONNECT ON DATABASE ${pg.escapeIdentifier(me[0]!.db)} TO ${pg.escapeIdentifier(role)}`);

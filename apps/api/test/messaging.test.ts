@@ -235,7 +235,7 @@ describe('replies (acceptance 2) and delivery statuses', () => {
     const wa = nextWaId();
     await deliver(webhook(inbound(wa, 'Hello').value)).expect(200);
     const conv = await conversationFor(agentA, wa);
-    sandbox.failNext.push('131047');
+    sandbox.script.push({ reject: '131047' });
     const res = await agentA.post(`/v1/conversations/${conv.id}/reply`, { text: 'Hi!', seenActivity: conv.activitySeq, clientMessageId: randomUUID() }).expect(201);
     expect(res.body).toMatchObject({ status: 'failed', errorCode: '131047' });
   });

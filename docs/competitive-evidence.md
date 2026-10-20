@@ -58,8 +58,8 @@ read, and Wati's trust centre (trust.wati.io) could not be opened. Both are list
 | AI agents | Astra: end-to-end conversations, voice and voice notes, "30+ languages"; bring-your-own model | AI Agents: documents, web pages, images; actions incl. HTTP, fields, hand-off, calls |
 | Agent assistance | Summaries, translation, CX score | AI Assist incl. audio transcription and summaries; translation not verified |
 | Campaigns and ads | Segments, scheduling, retargeting; click-to-WhatsApp ads (Meta, TikTok, Google) | Broadcasts (Growth and up); Meta Conversions API; TikTok messaging ads |
-| Commerce | WhatsApp catalog; native Shopify; WooCommerce; PayTabs listed; in-chat payments documented for India only (Razorpay, PayU) | Shopify through Zapier; no native catalog or checkout found |
-| **Salla and Zid** | **No native integration found**; Zid via Zapier | **No native integration found**; Zid via Zapier |
+| Commerce | WhatsApp catalog; native Shopify; WooCommerce; PayTabs listed; in-chat payments documented for India only (Razorpay, PayU) | Shopify through Zapier; native catalog or checkout not verified in the sources checked |
+| **Salla and Zid** | Native integration **not verified in the sources checked**; a Zid connection exists via Zapier | Native integration **not verified in the sources checked**; a Zid connection exists via Zapier |
 | CRM | HubSpot (Pro+), Salesforce (Business), Zoho | HubSpot, Salesforce (native) |
 | API, webhooks, MCP | API with plan limits; MCP server (docs 29 Sep 2026) | API (Growth+), webhooks (Advanced+); MCP server can configure AI Agents (8 Oct 2026) |
 | Arabic interface | App languages: English, Chinese, Spanish, Portuguese (help article 19 Nov 2025). **Arabic UI not listed** | **Arabic UI with full right-to-left switch** (changelog) |
@@ -81,8 +81,8 @@ read, and Wati's trust centre (trust.wati.io) could not be opened. Both are list
 | respond.io Starter is $79 or $99 | **Both**: $99 monthly, $79 a month billed annually |
 
 What this means for ConversaFlow's positioning: Arabic interface alone is **not** a differentiator against
-respond.io. The defensible advantages are the ones listed in the addendum: Gulf commerce (Salla and Zid, where
-neither competitor has a native integration), service operations (the maintenance package), customer-promise
+respond.io. The defensible advantages are the ones listed in the addendum: Gulf commerce (Salla and Zid, where a native
+integration by either competitor was not verified in the sources checked), service operations (the maintenance package), customer-promise
 tracking, safe automation, transparent message costs, and company-level security that can be shown (audit trail,
 two-person support access). Each still has to be built and proved with pilot customers.
 

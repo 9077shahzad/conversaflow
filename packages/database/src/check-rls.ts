@@ -28,6 +28,42 @@ const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
   'plan_entitlement_frozen()': '43b3204094b27f3fd863f73862cde1e0',
 };
 
+/**
+ * Roles other than cf_app (company context, row-level security) and the table owner that may read company-owned
+ * tables, and exactly which ones. Anything else is flagged: a new grant, a PUBLIC grant, or inherited membership
+ * (open Low finding from the review of messaging slice 1, "M5-general").
+ */
+const COMPANY_TABLE_READERS: Record<string, string[]> = {
+  cf_auth: ['invitations'],
+  cf_channel: ['channel_connections'],
+  cf_dispatch: ['send_jobs'],
+  cf_identity: ['memberships'],
+  cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
+  cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
+};
+/**
+ * Privileged (SECURITY DEFINER) functions that a login role may run although their owner can read company tables.
+ * Each was reviewed; a new one fails the check until it is reviewed and added here.
+ */
+const REVIEWED_DEFINERS = [
+  // cf_auth: sign-in, sessions, two-step sign-in (ADR-018, ADR-027, M7)
+  'auth_verify_email(bytea)', 'auth_mfa_issue_activation(uuid,bytea)', 'auth_mfa_activate(bytea,bytea,bytea[])',
+  'auth_session_lookup(bytea,interval)', 'auth_open_session(uuid,bytea,uuid,inet,text,integer)', 'auth_user_for_email(citext)',
+  'auth_mfa_begin(bytea)', 'auth_mfa_verify(bytea,text,bytea)', 'auth_request_email(text,citext)',
+  'auth_issue_token(uuid,text,bytea,interval)', 'auth_mfa_confirm_code(bytea,text)', 'auth_invitation_lookup(bytea)',
+  'auth_reset_password(bytea,text)', 'auth_register_user(citext,text,text,text)', 'auth_credentials_by_email(citext)',
+  // cf_ops: token-bound platform console functions
+  'platform_publish_plan_version(text,uuid)', 'platform_set_feature_flag(text,uuid,text,boolean)', 'platform_session_staff(text)',
+  'platform_tenant_directory(text)', 'platform_request_support(text,uuid,text,integer)', 'platform_approve_support(text,uuid)',
+  'platform_revoke_support(text,uuid)', 'platform_support_view(text,uuid,text)', 'platform_request_mfa_reset(text,citext,text,text,text)',
+  'platform_reject_mfa_reset(text,uuid)', 'platform_approve_mfa_reset(text,uuid)', 'platform_list_mfa_resets(text)',
+  // cf_pilot: pilot console functions (pinned separately as pilot writers)
+  'platform_enrol_pilot(text,uuid,integer,integer,text)', 'platform_end_pilot(text,uuid)',
+  // cf_owner: billing and plan triggers (pinned by definition in REVIEWED_TRIGGER_FUNCTIONS)
+  'subscription_requires_published_version()', 'plan_version_frozen()', 'subscription_new_is_trial()', 'plan_entitlement_frozen()',
+  // cf_channel and cf_dispatch: webhook routing and send-job leasing (migrations 0022, 0024)
+  'channel_route(text,text)', 'dispatch_claim(integer,integer)',
+];
 /** The only columns cf_channel may read (migration 0022). */
 const CHANNEL_ROUTING_COLUMNS = ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'];
 /** The only function cf_channel may own, pinned to the md5 of its reviewed definition. */
@@ -246,6 +282,30 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
     const chanMember = await client.query(
       `SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'cf_channel'`);
     if ((chanMember.rowCount ?? 0) > 0) problems.push('cf_channel is a member of another role; it must not inherit privileges');
+
+    // General rule 1: who may read company tables at all.
+    const readers = await client.query<{ who: string; t: string }>(`
+      WITH company_tables AS (
+        SELECT c.oid, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped))
+      SELECT r.rolname AS who, t.relname AS t FROM pg_roles r CROSS JOIN company_tables t
+      WHERE NOT r.rolsuper AND r.rolname NOT LIKE 'pg\\_%' AND r.rolname NOT IN ('cf_app', current_user)
+        AND (has_table_privilege(r.oid, t.oid, 'SELECT') OR has_any_column_privilege(r.oid, t.oid, 'SELECT'))`);
+    for (const r of readers.rows) {
+      if (!(COMPANY_TABLE_READERS[r.who] ?? []).includes(r.t)) problems.push(`${r.who} can read company table ${r.t}; it is not on the reviewed list`);
+    }
+    // General rule 2: privileged functions a login role can run, whose owner can read company tables.
+    const exposed = await client.query<{ fn: string; owner: string }>(`
+      SELECT DISTINCT p.oid::regprocedure::text AS fn, pg_get_userbyid(p.proowner) AS owner
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prosecdef
+        AND (pg_get_userbyid(p.proowner) = ANY($1::text[]) OR pg_get_userbyid(p.proowner) = current_user)
+        AND EXISTS (SELECT 1 FROM pg_roles l WHERE l.rolname = ANY($2::text[]) AND has_function_privilege(l.oid, p.oid, 'EXECUTE'))`,
+      [Object.keys(COMPANY_TABLE_READERS), LOGIN_ROLES]);
+    for (const f of exposed.rows) {
+      if (!REVIEWED_DEFINERS.includes(f.fn)) problems.push(`${f.fn} (owned by ${f.owner}) is a privileged function a login role can run; it is not on the reviewed list`);
+    }
 
     const definers = await client.query<{ name: string; owner: string; config: string[] | null }>(`
       SELECT p.proname AS name, pg_get_userbyid(p.proowner) AS owner, p.proconfig AS config

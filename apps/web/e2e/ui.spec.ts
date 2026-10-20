@@ -56,7 +56,7 @@ async function checkPage(page: Page, locale: 'en' | 'ar', name: string, view: st
   expect(small, `text smaller than 11px on ${name} ${view}`).toEqual([]);
   // No text cut off inside its own box
   const clipped = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('h1,h2,p,label,a,button,td,th,span,li'))
-    .filter((el) => el.offsetParent !== null && el.scrollWidth > el.clientWidth + 1 && ['hidden', 'clip'].includes(getComputedStyle(el).overflowX) && !el.classList.contains('truncate'))
+    .filter((el) => el.offsetParent !== null && el.scrollWidth > el.clientWidth + 1 && ['hidden', 'clip'].includes(getComputedStyle(el).overflowX) && !el.classList.contains('truncate') && !el.classList.contains('sr-only'))
     .map((el) => el.textContent!.trim().slice(0, 40)));
   expect(clipped, `clipped text on ${name} ${view}`).toEqual([]);
   // A shortened Latin name inside Arabic must be shortened at its own end (dir="auto"), not the start.
@@ -101,6 +101,15 @@ for (const locale of ['en', 'ar'] as const) {
       await page.goto(`/${locale}/app/settings/team`);
       await expect(page.getByText('Omar Siddiqui').locator('visible=true').first()).toBeVisible();
       await checkPage(page, locale, 'team', view);
+
+      // Inbox (slice 2): list, then a conversation, at this size.
+      await page.goto(`/${locale}/app/inbox`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'صندوق المحادثات' : 'Inbox');
+      await expect(page.getByRole('button', { name: /Khalid \(Demo\)/ })).toBeVisible();
+      await checkPage(page, locale, 'inbox', view);
+      await page.getByRole('button', { name: /Emma \(Demo\)/ }).click();
+      await expect(page.getByText(locale === 'ar' ? 'لم تُرسل هذه الرسالة.' : 'This message was not sent.')).toBeVisible();
+      await checkPage(page, locale, 'inbox-conversation', view);
       await context.close();
     });
   }
@@ -207,4 +216,56 @@ test('the preview-only notice is absent from normal builds', async ({ page }) =>
     await page.goto(`/${locale}/sign-in`);
     await expect(page.getByTestId('preview-notice')).toHaveCount(0);
   }
+});
+
+test.describe('inbox behaviour (desktop)', () => {
+  async function signIn(page: Page, locale: 'en' | 'ar') {
+    const { ownerEmail, password } = demo();
+    await page.goto(`/${locale}/sign-in`);
+    await page.getByLabel(locale === 'ar' ? 'البريد الإلكتروني' : 'Email address').fill(ownerEmail);
+    await page.getByLabel(locale === 'ar' ? 'كلمة المرور' : 'Password', { exact: true }).fill(password);
+    await page.getByRole('button', { name: locale === 'ar' ? 'تسجيل الدخول' : 'Sign in' }).click();
+    await page.waitForURL(`**/${locale}/app`);
+  }
+
+  test('reply in English: sent once, shown as sent; pause banner and failed-message retry are shown', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: VIEWPORTS.desktop, locale: 'en-GB' });
+    await context.addInitScript(RECORD_CSP);
+    const page = await context.newPage();
+    await signIn(page, 'en');
+    await page.goto('/en/app/inbox');
+    await page.getByRole('button', { name: /Khalid \(Demo\)/ }).click();
+    await page.getByLabel('Your reply').fill('Yes, we service AC units in Dammam. Which day suits you?');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(page.getByText('Yes, we service AC units in Dammam. Which day suits you?')).toBeVisible();
+    await expect(page.getByText(/· Sent$/).first()).toBeVisible();
+    await expect(page.getByLabel('Your reply')).toHaveValue('');
+
+    await page.getByRole('button', { name: /Noura \(Demo\)/ }).click();
+    await expect(page.getByText(/Replies paused by you: Complaint/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Release pause' })).toBeVisible();
+
+    await page.getByRole('button', { name: /Emma \(Demo\)/ }).click();
+    await expect(page.getByText('This message was not sent.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? null)).toEqual([]);
+    await context.close();
+  });
+
+  test('Arabic: blocked replies are explained in Arabic and the composer is disabled', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: VIEWPORTS.desktop, locale: 'ar-SA' });
+    const page = await context.newPage();
+    await signIn(page, 'ar');
+    await page.goto('/ar/app/inbox');
+    await page.getByRole('button', { name: /Huda \(Demo\)/ }).click();
+    await expect(page.getByText(/مرّ أكثر من 24 ساعة على آخر رسالة من العميل/)).toBeVisible();
+    await expect(page.getByLabel('ردّك')).toBeDisabled();
+    await page.getByRole('button', { name: /Faisal \(Demo\)/ }).click();
+    await expect(page.getByText(/ألغى هذا العميل اشتراكه في الرسائل/)).toBeVisible();
+    await page.getByRole('tab', { name: 'ملاحظة داخلية' }).click();
+    await page.getByLabel('ملاحظة للفريق').fill('اتصل العميل وطلب عدم إرسال رسائل.');
+    await page.getByRole('button', { name: 'إضافة ملاحظة' }).click();
+    await expect(page.getByText('اتصل العميل وطلب عدم إرسال رسائل.')).toBeVisible();
+    await context.close();
+  });
 });
