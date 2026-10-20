@@ -28,8 +28,11 @@ const AssignRequest = z.object({ membershipId: z.string().uuid().nullable(), exp
 const NoteRequest = z.object({ body: z.string().trim().min(1).max(4000) });
 const ReplyRequest = z.object({
   text: z.string().trim().min(1).max(4096),
-  /** The newest message the agent saw. If anything newer arrived (or was sent), the reply is refused (CF-EXT-002). */
-  afterMessageId: z.string().uuid(),
+  /**
+   * The conversation's activity counter when the agent last looked (from GET /conversations/:id). Every recorded
+   * message bumps it, including a late customer message with an older timestamp; a mismatch refuses the reply.
+   */
+  seenActivity: z.number().int().min(0),
   /** Idempotency key chosen by the sender; a retried request returns the first result instead of sending again. */
   clientMessageId: z.string().uuid(),
   takeover: z.boolean().optional(),
@@ -37,7 +40,7 @@ const ReplyRequest = z.object({
 
 type ConvRow = {
   id: string; contact_id: string; connection_id: string; status: string; assigned_membership_id: string | null;
-  last_inbound_at: Date | null; last_message_id: string | null; version: number;
+  last_inbound_at: Date | null; last_message_id: string | null; version: number; activity_seq: string;
 };
 
 /**
@@ -159,6 +162,7 @@ export class InboxService {
          last_message_id = CASE WHEN last_message_at IS NULL OR $2 >= last_message_at THEN $3 ELSE last_message_id END,
          last_message_at = greatest(coalesce(last_message_at, $2), $2),
          status = CASE WHEN status = 'pending' THEN 'open' ELSE status END,
+         activity_seq = activity_seq + 1,
          version = version + 1
        WHERE id = $1`, [conv.id, e.occurredAt, messageId]);
 
@@ -258,7 +262,7 @@ export class InboxService {
       const windowOpen = c.last_inbound_at !== null && Date.now() - c.last_inbound_at.getTime() < SERVICE_WINDOW_HOURS * 3600_000;
       return {
         id: c.id, status: c.status, version: c.version, assignedMembershipId: c.assigned_membership_id,
-        lastMessageId: c.last_message_id, windowOpen, contact, messages, notes, events,
+        lastMessageId: c.last_message_id, activitySeq: Number(c.activity_seq), windowOpen, contact, messages, notes, events,
       };
     });
   }
@@ -343,9 +347,9 @@ export class InboxService {
         });
         assigned = null;
       }
-      if (c.last_message_id !== body.afterMessageId) {
+      if (Number(c.activity_seq) !== body.seenActivity) {
         throw new AppError(409, 'conversation_changed', 'New messages arrived or were sent. Read them before replying.',
-          { lastMessageId: c.last_message_id });
+          { activitySeq: Number(c.activity_seq) });
       }
       if (ctx.opted_out_at) throw Errors.conflict('contact_opted_out', 'This customer has opted out of messages.');
       const windowOpen = c.last_inbound_at !== null && Date.now() - c.last_inbound_at.getTime() < SERVICE_WINDOW_HOURS * 3600_000;
@@ -365,7 +369,8 @@ export class InboxService {
          VALUES ($1, $2, 'out', 'text', $3, $4, $5, clock_timestamp(), 'queued') RETURNING id, occurred_at`,
         [actor.tenantId, c.id, body.text, body.clientMessageId, actor.membershipId])).rows[0]!;
       await tx.query(
-        `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4, version = version + 1 WHERE id = $1`,
+        `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4,
+                activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,
         [c.id, actor.membershipId, msg.id, msg.occurred_at]);
       return { messageId: msg.id, provider: ctx.provider, number: ctx.number, to: ctx.wa as string };
     });

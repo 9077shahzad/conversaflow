@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { Module, type DynamicModule, type INestApplication } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD, NestFactory } from '@nestjs/core';
 import cookieParser from 'cookie-parser';
+import { json } from 'express';
 import { randomBytes } from 'node:crypto';
 import Redis from 'ioredis';
 import { createPool } from '@conversaflow/database';
@@ -90,6 +91,14 @@ export async function createApp(deps: Deps, opts: { logSink?: LogSink } = {}): P
   const app = await NestFactory.create(AppModule.forRoot(deps), { logger: ['error', 'warn'], rawBody: true });
   app.use(requestLog(opts.logSink ?? (deps.config.NODE_ENV === 'test' ? () => undefined : undefined)));
   app.use(cookieParser());
+  // Provider webhooks may carry up to about 3 MB (Meta's documented maximum); every other JSON body keeps the default
+  // limit. The raw bytes are kept for the signature check. Larger bodies get 413, not a server error (review M4).
+  // Wrapped in a named function: Nest skips its own JSON parser when it finds a middleware called "jsonParser".
+  const webhookJson = json({
+    limit: '3mb',
+    verify: (req: unknown, _res: unknown, buf: Buffer) => { (req as { rawBody?: Buffer }).rawBody = buf; },
+  });
+  app.use('/v1/webhooks', function webhookBodyParser(req: never, res: never, next: never) { webhookJson(req, res, next); });
   // API responses are data, never pages: nothing in them may run, be framed or be sniffed (ADR-028, review F3).
   app.use((_req: unknown, res: { setHeader(k: string, v: string): void }, next: () => void) => {
     res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");

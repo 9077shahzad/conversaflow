@@ -89,8 +89,16 @@ export type ParsedEvent =
   | { kind: 'status'; providerNumberId: string; key: string; providerMessageId: string; status: 'sent' | 'delivered' | 'read' | 'failed';
       occurredAt: Date; errorCode: string | null; raw: unknown };
 
+/**
+ * Provider timestamps are capped at the time we receive them, so a timestamp in the future can never keep the
+ * 24-hour customer service window open or reorder a thread ahead of real messages.
+ */
+function providerTime(epoch: string, receivedAt: number): Date {
+  return new Date(Math.min(Number(epoch) * 1000, receivedAt));
+}
+
 /** Splits one verified delivery into individual events. Malformed parts are skipped and counted, not fatal. */
-export function parseWebhook(payload: unknown): { events: ParsedEvent[]; skipped: number } {
+export function parseWebhook(payload: unknown, receivedAt = Date.now()): { events: ParsedEvent[]; skipped: number } {
   const top = WebhookPayload.safeParse(payload);
   if (!top.success) return { events: [], skipped: 1 };
   const events: ParsedEvent[] = [];
@@ -105,7 +113,7 @@ export function parseWebhook(payload: unknown): { events: ParsedEvent[]; skipped
       for (const m of v.data.messages ?? []) {
         events.push({
           kind: 'message', providerNumberId: number, key: `msg:${m.id}`, from: m.from, profileName: names.get(m.from) ?? null,
-          providerMessageId: m.id, occurredAt: new Date(Number(m.timestamp) * 1000), type: m.type,
+          providerMessageId: m.id, occurredAt: providerTime(m.timestamp, receivedAt), type: m.type,
           body: m.type === 'text' ? (m.text?.body ?? '') : null, referral: m.referral ?? null, raw: m,
         });
       }
@@ -113,7 +121,7 @@ export function parseWebhook(payload: unknown): { events: ParsedEvent[]; skipped
         const code = s.errors?.[0]?.code;
         events.push({
           kind: 'status', providerNumberId: number, key: `st:${s.id}:${s.status}`, providerMessageId: s.id, status: s.status,
-          occurredAt: new Date(Number(s.timestamp) * 1000), errorCode: code === undefined ? null : String(code), raw: s,
+          occurredAt: providerTime(s.timestamp, receivedAt), errorCode: code === undefined ? null : String(code), raw: s,
         });
       }
     }
@@ -132,7 +140,13 @@ const OPT_OUT = new Set(['stop', 'unsubscribe', 'stop all', 'إيقاف', 'اي�
 const OPT_IN = new Set(['start', 'subscribe', 'ابدأ', 'ابدا', 'اشتراك']);
 export function consentKeyword(body: string | null): 'opt_out' | 'opt_in' | null {
   if (!body) return null;
-  const t = body.trim().toLowerCase().replace(/\s+/g, ' ');
+  // Ignore case, surrounding punctuation, Arabic diacritics and tatweel, so "Stop." or "إيقافّ" still count (review note).
+  const t = body
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[.!?,;:،؟؛"'()-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (OPT_OUT.has(t)) return 'opt_out';
   if (OPT_IN.has(t)) return 'opt_in';
   return null;

@@ -56,6 +56,9 @@ importers:
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7
+      express:
+        specifier: 5.2.1
+        version: 5.2.1
       ioredis:
         specifier: ^5.4.2
         version: 5.11.1

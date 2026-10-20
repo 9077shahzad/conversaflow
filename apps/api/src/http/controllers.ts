@@ -20,6 +20,7 @@ import { PlatformService } from '../modules/platform.service';
 import { SettingsService } from '../modules/settings.service';
 import { TenantsService } from '../modules/tenants.service';
 import { InboxService } from '../modules/inbox.service';
+import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
 import { DEPS } from './tokens';
@@ -441,7 +442,10 @@ export class WebhooksController {
   @SignedWebhook() @Get()
   verify(@Query() q: Record<string, string>, @Res() res: Response) {
     if (!this.deps.channels.sandbox) throw Errors.notFound('Webhook');
-    if (q['hub.mode'] !== 'subscribe' || q['hub.verify_token'] !== this.deps.keys.sandboxVerifyToken || !q['hub.challenge']) {
+    const given = Buffer.from(String(q['hub.verify_token'] ?? ''));
+    const expected = Buffer.from(this.deps.keys.sandboxVerifyToken);
+    const tokenOk = given.length === expected.length && timingSafeEqual(given, expected);
+    if (q['hub.mode'] !== 'subscribe' || !tokenOk || !q['hub.challenge']) {
       throw new AppError(403, 'forbidden', 'Verification failed.');
     }
     res.status(200).type('text/plain').send(String(q['hub.challenge']).slice(0, 200));

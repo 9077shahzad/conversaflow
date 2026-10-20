@@ -19,6 +19,10 @@ export class ErrorFilter implements ExceptionFilter {
       res.status(status).json({ error: { code, message: status === 404 ? 'Not found.' : err.message } });
       return;
     }
+    if ((err as { type?: string }).type === 'entity.too.large') {
+      res.status(413).json({ error: { code: 'too_large', message: 'The request body is too large.' } });
+      return;
+    }
     if ((err as { type?: string }).type === 'entity.parse.failed') {
       res.status(400).json({ error: { code: 'bad_request', message: 'Malformed JSON.' } });
       return;

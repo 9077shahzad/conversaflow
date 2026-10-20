@@ -31,15 +31,18 @@ const Schema = z.object({
   /** Uploads are refused unless clamd has the official signature database loaded and it is recent. */
   SCANNER_REQUIRE_OFFICIAL_SIGNATURES: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   SCANNER_MAX_SIGNATURE_AGE_HOURS: z.coerce.number().int().min(1).max(168).default(48),
-  /** Sandbox messaging channel (local test double; never contacts a provider). Refused in production. */
-  CHANNEL_SANDBOX_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  /**
+   * Sandbox messaging channel (local test double; never contacts a provider). Off unless set; development and test
+   * turn it on by default (review note), and production refuses it.
+   */
+  CHANNEL_SANDBOX_ENABLED: z.enum(['true', 'false']).optional(),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),
   /** Token echoed during webhook verification (hub.verify_token). Generated per process when not set. */
   SANDBOX_VERIFY_TOKEN: z.string().min(16).optional(),
 });
 
-export type Config = z.infer<typeof Schema>;
+export type Config = Omit<z.infer<typeof Schema>, 'CHANNEL_SANDBOX_ENABLED'> & { CHANNEL_SANDBOX_ENABLED: boolean };
 
 /** Reads configuration from the environment and refuses to start when anything required is missing. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -54,8 +57,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (parsed.data.NODE_ENV === 'production' && !parsed.data.SCANNER_REQUIRE_OFFICIAL_SIGNATURES) {
     throw new Error('Invalid configuration: production requires SCANNER_REQUIRE_OFFICIAL_SIGNATURES=true.');
   }
-  if (parsed.data.NODE_ENV === 'production' && parsed.data.CHANNEL_SANDBOX_ENABLED) {
+  const sandbox = parsed.data.CHANNEL_SANDBOX_ENABLED === undefined
+    ? parsed.data.NODE_ENV !== 'production'
+    : parsed.data.CHANNEL_SANDBOX_ENABLED === 'true';
+  if (parsed.data.NODE_ENV === 'production' && sandbox) {
     throw new Error('Invalid configuration: production requires CHANNEL_SANDBOX_ENABLED=false (the sandbox channel is a test double).');
   }
-  return parsed.data;
+  return { ...parsed.data, CHANNEL_SANDBOX_ENABLED: sandbox };
 }

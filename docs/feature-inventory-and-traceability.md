@@ -145,4 +145,5 @@ hosted verification, an external security review and owner approval.
 | CF-EXT-001 / FR-103, FR-108 | `messages`, `contacts.opted_out_at`, `consent_events` | `POST /v1/conversations/:id/reply` | `messaging.test.ts`: 24-hour window, opt-out keywords, refusal after opt-out |
 | CF-EXT-002 / FR-201–204 | `conversations`, `conversation_events`, `internal_notes` | `GET /v1/conversations`, `GET /v1/conversations/:id`, `/assign`, `/notes` | `messaging.test.ts`: assignment race, reply collision, takeover, notes never sent |
 | CF-EXT-003 / FR-301 | `contacts`, `contact_identifiers` | via conversations | `messaging.test.ts` |
-| CF-EXT-026 | all new tables under forced RLS | — | `check-rls`, cross-company tests in `messaging.test.ts` |
+| CF-EXT-026 | all new tables under forced RLS; `cf_channel` pinned by the CI guard | — | `check-rls`, cross-company tests and guard tests in `messaging.test.ts`, `isolation.db.test.ts` |
+| Review fixes (M1–M5) | migration 0023 (`activity_seq`, per-sender idempotency key) | reply takes `seenActivity`; webhook body limit 3 MB | `messaging.test.ts` › review fixes (6) |

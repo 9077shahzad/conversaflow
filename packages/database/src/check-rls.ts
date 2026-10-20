@@ -28,6 +28,13 @@ const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
   'plan_entitlement_frozen()': '43b3204094b27f3fd863f73862cde1e0',
 };
 
+/** The only columns cf_channel may read (migration 0022). */
+const CHANNEL_ROUTING_COLUMNS = ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'];
+/** The only function cf_channel may own, pinned to the md5 of its reviewed definition. */
+const CHANNEL_FUNCTIONS: Record<string, string> = {
+  'channel_route(text,text)': '36b3b2385d8d3b07fd294ab6aa8033b7',
+};
+
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
   await client.connect();
@@ -211,6 +218,34 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'auth_email_requests'
         AND (has_table_privilege('cf_notify', c.oid, 'SELECT') OR has_any_column_privilege('cf_notify', c.oid, 'SELECT'))`);
     for (const r of notifyReads.rows) problems.push(`cf_notify can read ${r.t}; it must only see auth_email_requests`);
+
+    // cf_channel (migration 0022) routes webhooks to a company. It may read exactly the routing columns of
+    // channel_connections and own exactly the reviewed channel_route() function; anything wider is flagged
+    // (review of messaging slice 1, M5).
+    const chanTables = await client.query<{ t: string }>(`
+      SELECT c.oid::regclass::text AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+        AND (has_table_privilege('cf_channel', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+             OR (c.relname <> 'channel_connections' AND has_any_column_privilege('cf_channel', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')))`);
+    for (const r of chanTables.rows) problems.push(`cf_channel has privileges on ${r.t}; it may only read the routing columns of channel_connections`);
+    const chanCols = await client.query<{ col: string }>(`
+      SELECT a.attname AS col FROM pg_attribute a
+      WHERE a.attrelid = 'channel_connections'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+        AND (has_column_privilege('cf_channel', a.attrelid, a.attnum, 'INSERT, UPDATE, REFERENCES')
+             OR (NOT (a.attname = ANY($1::name[])) AND has_column_privilege('cf_channel', a.attrelid, a.attnum, 'SELECT')))`,
+      [CHANNEL_ROUTING_COLUMNS]);
+    for (const r of chanCols.rows) problems.push(`cf_channel has more than read access on channel_connections.${r.col}`);
+    const chanOwned = await client.query<{ what: string; ok: boolean }>(`
+      SELECT p.oid::regprocedure::text AS what,
+             coalesce($1::jsonb ->> (p.oid::regprocedure::text), '') = md5(pg_get_functiondef(p.oid)) AS ok
+      FROM pg_proc p WHERE pg_get_userbyid(p.proowner) = 'cf_channel'
+      UNION ALL
+      SELECT c.oid::regclass::text, false FROM pg_class c WHERE pg_get_userbyid(c.relowner) = 'cf_channel'`,
+      [JSON.stringify(CHANNEL_FUNCTIONS)]);
+    for (const o of chanOwned.rows) if (!o.ok) problems.push(`cf_channel owns ${o.what}, which is not the reviewed routing function`);
+    const chanMember = await client.query(
+      `SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'cf_channel'`);
+    if ((chanMember.rowCount ?? 0) > 0) problems.push('cf_channel is a member of another role; it must not inherit privileges');
 
     const definers = await client.query<{ name: string; owner: string; config: string[] | null }>(`
       SELECT p.proname AS name, pg_get_userbyid(p.proowner) AS owner, p.proconfig AS config
