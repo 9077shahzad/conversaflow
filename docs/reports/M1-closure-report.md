@@ -268,18 +268,19 @@ confirmation code goes nor activate an authenticator without the emailed code." 
 | `42823bb` | L-B; email cap; L-C enrolment cut and trigger; L-D helper and `concat()` cases | L-A (separated digits); L-C (cap could be renewed); L-D (other schema, privileged trigger, rule) |
 | `4e60aeb` | L-A (at most 5 digits in total, any script); L-D cases C–H | L-C: business role could set `created_at`. G2: privileged trigger on a table only privileged functions write |
 | `6f78a89` | **L-C** (creation time cannot be set; cap counted from the stored creation time); **G2** for its own case (`mfa_attempts`); a replaced reviewed body is flagged; the four reviewed trigger functions write nothing | G3 (Low): the pin covered only the body, so a migration could change a reviewed function's `search_path`, owner or security mode unnoticed. Informational: business role still had DELETE on invitations |
-| `f1bc095` | **G3** (search_path, owner and other setting changes all flagged; an invoker switch correctly ignored); **invitation DELETE** refused (42501), invite/accept/revoke unaffected | G4 (accepted residual, see below) |
+| `f1bc095` | **G3** (search_path, owner and other setting changes all flagged; an invoker switch correctly ignored); **invitation DELETE** refused (42501), invite/accept/revoke unaffected | G4 (documented residual risk, see below) |
 
 **Fix for G3 and the informational item (migration 0021 and the guard):** reviewed trigger functions are pinned to
 the md5 of their whole definition (`pg_get_functiondef`: body, `search_path` and other settings, security mode,
 language) plus owner; the business role loses DELETE on invitations, which it never used.
 
-**G4 — accepted residual (Low).** At `f1bc095` the reviewer showed that a migration could replace a table that one of
+**G4 — documented residual risk (Low); owner acceptance pending.** At `f1bc095` the reviewer showed that a migration could replace a table that one of
 the four reviewed trigger functions reads (for example `trial_policy`) with a view calling a writing function; the
-reviewed function's definition is unchanged, so the guard passes. This is accepted rather than chased further:
+reviewed function's definition is unchanged, so the guard passes. Further guard extensions are not pursued:
 migrations run as the table owner, so a hostile migration could write a seat override directly, and no database
 check can prevent that. The guard's job is to catch accidental privilege drift; the control against a hostile or
-careless migration is code-owner review of `packages/database/migrations/`, which is **pending GitHub set-up**.
+careless migration is code-owner review of `packages/database/migrations/`, which is **pending** until enforced
+and verified on GitHub. Record and acceptance wording: `docs/readiness/database-change-residual-risk.md`.
 If wanted later, the four functions can be schema-qualified and the guard can refuse views that call non-catalog
 functions.
 
@@ -287,7 +288,7 @@ functions.
 
 | # | Finding | Severity | Status | What closes it |
 | --- | --- | --- | --- | --- |
-| 1 | Takeover before the user finishes set-up needs the sign-in credential, database network access **and** the user's mailbox or cooperation | Accepted residual (pending owner acceptance) | Reduced by M7 and M9 | Signed acceptance; M6 before general availability |
+| 1 | Takeover before the user finishes set-up needs the sign-in credential, database network access **and** the user's mailbox or cooperation | Documented residual risk; **owner acceptance pending** | Reduced by M7 and M9 | Signed acceptance; M6 before general availability |
 | 2 | The sign-in credential can lock a user out of two-step sign-in for one hour | Low | Open | M1–M3; M6 |
 | 3 | Reset process needs a second platform owner to be usable | — | Built (M8) | Owner: name a second platform owner |
 | 4 | Pilot two-step rule enforced in the API, not the database | Informational | Accepted (ADR-029) | — |
@@ -296,7 +297,7 @@ functions.
 | 7 | `base32_decode` unused; pre-0010 factors cannot pass TOTP (local only) | Informational | No action | — |
 | 8 | Hosted verification (signatures, revocation, storage, session expiry, backup restore) | — | Pending | Owner: hosting decision |
 | 9 | Firefox/WebKit browser checks not yet run; real-device check pending | — | Configured | GitHub CI, then staging |
-| 10 | G4: a hostile migration could swap a table read by a reviewed trigger function | Low | Accepted residual | Code-owner review of migrations (item 5) |
+| 10 | G4: a hostile migration could swap a table read by a reviewed trigger function | Low | Documented residual risk; **owner acceptance pending** | Code-owner review of migrations (item 5, pending); signed acceptance |
 | 11 | The notifier credential chooses and sends the code; password unchanged after a reset; not-found pages lack the browser notice | Informational | Accepted / documented | — |
 
 L-A, L-B, L-C, L-D, G2, G3, the email cap and the invitation-delete item are all **verified closed**.

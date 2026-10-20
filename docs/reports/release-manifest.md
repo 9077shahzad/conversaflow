@@ -16,7 +16,7 @@ coverage, and the unsupported-browser notice.
 | Rechecked (first fixes) | `42823bb6dce50c7ed7ad992146dd3af12c6ed607` | L-B and the email cap verified; L-A, L-C and L-D partly fixed | Closure report; `clean-checkout-42823bb.txt` |
 | Rechecked (second fixes) | `4e60aeba731f194edaa398a0bf27fda04fed248c` | L-A verified; L-D verified for six cases; two Low gaps left (L-C creation time, G2 trigger on a privileged-only table) | Closure report; `clean-checkout-4e60aeb.txt` |
 | Rechecked (third fixes) | `6f78a895c549b070474f5180e9e9bd527727d295` | L-C verified; G2 verified for its own case; one Low gap left (G3: the pin covered only the function body) | Closure report; `clean-checkout-6f78a89.txt` |
-| **Tested and rechecked (final)** | `f1bc0952de1c3139fe9d4806b910382f4a46296a` | **Clean-checkout run:** fresh clone, frozen lockfile, fresh database, restricted roles; results below.<br>**Targeted recheck:** G3 and the invitation-delete item verified; one Low residual (G4) accepted | `clean-checkout-f1bc095.txt`; closure report |
+| **Tested and rechecked (final)** | `f1bc0952de1c3139fe9d4806b910382f4a46296a` | **Clean-checkout run:** fresh clone, frozen lockfile, fresh database, restricted roles; results below.<br>**Targeted recheck:** G3 and the invitation-delete item verified; one Low residual risk (G4) documented, owner acceptance pending | `clean-checkout-f1bc095.txt`; closure report |
 | **Packaged** | The commit containing this file (hash in the handover message) | Documents and evidence only. Its code is identical to `f1bc095` | Command below |
 
 Tags: `rc3-tested` = `f1bc095`; `rc3-packaged` = the packaged commit.
@@ -96,5 +96,5 @@ The earlier reviewed commits `6972acb` (N1–N4) and `ee77e77` (F1–F3 found) a
 - **Reviews and approvals still to come:** the external security review, Meta verification and App Review, the
   sign-in risk acceptance, and the pilot approval itself.
 - **Remaining findings:** the complete numbered list (11 items) is in the closure report. None is Critical, High or
-  Medium. L-A to L-D, G2 and G3 are verified closed; G4 is an accepted Low residual that relies on code-owner review
-  of migrations.
+  Medium. L-A to L-D, G2 and G3 are verified closed; G4 is a documented Low residual risk, owner acceptance pending; its
+  safeguard (code-owner review of migrations) is pending until enforced and verified on GitHub.
