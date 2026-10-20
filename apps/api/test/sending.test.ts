@@ -298,6 +298,7 @@ describe('opt-out commands (owner decision 3)', () => {
     'STOP', 'Stop.', 'stop!!!', 'STOP 🛑', '🛑 stop 🛑', 'Stop ✋🏽', 'stop 👍🏻', '"stop"', 'Unsubscribe.', 'stop all!',
     'إيقاف', 'ايقاف', 'إِيقاف', 'إيـقـاف', 'إيقاف 🙏', 'إيقاف!!', 'توقف.', 'إلغاء الاشتراك', 'الغاء الاشتراك ✋', 'أوقف', 'اوقف!',
     '\u200fإيقاف', 'إيقاف\u200f', '\u202bSTOP\u202c', 'ST\u200cOP', '\ufeffstop', '\u2067إيقاف\u2069 🙏',
+    'stop\u200ball', 'إلغاء\u200cالاشتراك', 'stop\u200c all',
   ])('"%s" is an opt-out', (text) => expect(consentKeyword(text)).toBe('opt_out'));
 
   it.each(['START', 'Start 👍', 'ابدأ', 'ابدا ✅', 'اشتراك!'])('"%s" is an opt-in', (text) => expect(consentKeyword(text)).toBe('opt_in'));
@@ -305,6 +306,7 @@ describe('opt-out commands (owner decision 3)', () => {
   it.each([
     'please stop', 'stop the technician', 'Stop by tomorrow?', "don't stop", 'S T O P', 'stopped',
     'إلغاء', 'الغاء الموعد', 'لا تتوقف', 'إيقاف المكيف من فضلك', 'I want to start a booking',
+    'go\u200bstop', 'non\u200cstop', 'start\u200bstop', 'أوقف الفني',
   ])('"%s" is an ordinary message', (text) => expect(consentKeyword(text)).toBeNull());
 
   it('an emoji opt-out through a real webhook blocks replies', async () => {
@@ -397,5 +399,35 @@ describe('strengthened CI guard (open Low finding)', () => {
       await t.ownerDb.query(original);
     }
     expect(await guard()).toEqual([]);
+  });
+
+  it('review S2c: an extra loose policy for the business role, or a changed reviewed one, is flagged', async () => {
+    const original = (await t.ownerDb.query<{ q: string }>(
+      "SELECT pg_get_expr(polqual, polrelid) AS q FROM pg_policy WHERE polname = 'users_self_update'")).rows[0]!.q;
+    try {
+      await t.ownerDb.query('CREATE POLICY zz_all ON messages FOR SELECT TO cf_app USING (true)');
+      await t.ownerDb.query('CREATE POLICY zz_pub ON contacts FOR SELECT USING (tenant_id IS NOT NULL)');
+      await t.ownerDb.query('ALTER POLICY users_self_update ON users USING (true)');
+      const problems = await guard();
+      expect(problems).toEqual(expect.arrayContaining([
+        'policy messages.zz_all widens what the business role can see; it is not the standard company rule and not on the reviewed list',
+        'policy contacts.zz_pub widens what the business role can see; it is not the standard company rule and not on the reviewed list',
+        'policy users.users_self_update has changed since it was reviewed',
+      ]));
+    } finally {
+      await reset(['DROP POLICY IF EXISTS zz_all ON messages', 'DROP POLICY IF EXISTS zz_pub ON contacts',
+        `ALTER POLICY users_self_update ON users USING ${original}`]);
+    }
+    expect(await guard()).toEqual([]);
+  });
+
+  it('review S2c: a restrictive policy or another standard company policy is allowed', async () => {
+    try {
+      await t.ownerDb.query('CREATE POLICY zz_narrow ON messages AS RESTRICTIVE FOR SELECT TO cf_app USING (true)');
+      await t.ownerDb.query('CREATE POLICY zz_std ON contacts FOR SELECT TO cf_app USING (tenant_id = app_tenant_id())');
+      expect(await guard()).toEqual([]);
+    } finally {
+      await reset(['DROP POLICY IF EXISTS zz_narrow ON messages', 'DROP POLICY IF EXISTS zz_std ON contacts']);
+    }
   });
 });

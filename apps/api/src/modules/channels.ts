@@ -203,8 +203,10 @@ const OPT_IN_SET = new Set(OPT_IN.map(normaliseCommand));
 
 export function consentKeyword(body: string | null): 'opt_out' | 'opt_in' | null {
   if (!body || body.length > 60) return null;
-  const t = normaliseCommand(body);
-  if (OPT_OUT_SET.has(t)) return 'opt_out';
-  if (OPT_IN_SET.has(t)) return 'opt_in';
+  // Zero-width space and non-joiner are sometimes used as a word gap ("stop\u200Ball") and sometimes inside a word to
+  // hide it ("ST\u200COP"). Both readings are tried; each must still match a whole command exactly (review S1 note).
+  const candidates = [normaliseCommand(body), normaliseCommand(body.replace(/[\u200b\u200c]/g, ' '))];
+  if (candidates.some((t) => OPT_OUT_SET.has(t))) return 'opt_out';
+  if (candidates.some((t) => OPT_IN_SET.has(t))) return 'opt_in';
   return null;
 }

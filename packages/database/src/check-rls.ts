@@ -90,6 +90,25 @@ const REVIEWED_DEFINERS: Record<string, string> = {
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
+/**
+ * Permissive policies for the business role (or PUBLIC) that are not the standard company rule
+ * `tenant_id = app_tenant_id()`. PostgreSQL ORs permissive policies together, so one extra loose policy cancels
+ * company isolation (review S2c). Each was reviewed and is pinned to md5(command | USING | WITH CHECK | roles); a new
+ * one, or a changed expression, command or role list, fails the check until it is reviewed again.
+ */
+const REVIEWED_APP_POLICIES: Record<string, string> = {
+  'memberships.memberships_read': '9f18ae1b8f8e795aabcf4eb23503d27b',
+  'mfa_factors.mfa_self': 'bae3235b9f650c7a6ef556a5b2ed4887',
+  'mfa_recovery_codes.recovery_self': 'bae3235b9f650c7a6ef556a5b2ed4887',
+  'sessions.sessions_self': 'bae3235b9f650c7a6ef556a5b2ed4887',
+  'tenants.tenants_insert': 'e811d7fae216074e8bb3e52699234e11',
+  'tenants.tenants_read': 'dd63bf50e45075bdc49b1473d4fae305',
+  'tenants.tenants_update': '380986229f8fbae8b289b299746132ab',
+  'user_credentials.credentials_self': 'bae3235b9f650c7a6ef556a5b2ed4887',
+  'users.users_read': '6efcc22321ab3bd8ec41d2ea38a58ee3',
+  'users.users_self_update': '843978d964e680ac6bf8348a5ea6f7b6',
+};
+const STANDARD_COMPANY_RULE = '(tenant_id = app_tenant_id())';
 /** The only columns cf_channel may read (migration 0022). */
 const CHANNEL_ROUTING_COLUMNS = ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'];
 /** The only function cf_channel may own, pinned to the md5 of its reviewed definition. */
@@ -346,6 +365,20 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
         || (COMPANY_TABLE_READERS[p.who] ?? []).includes(p.t)
         || (p.who === '<owner>' && OWNER_POLICY_TABLES.includes(p.t));
       if (!ok) problems.push(`policy ${p.pol} on company table ${p.t} applies to ${p.who}; it is not on the reviewed list`);
+    }
+    // General rule 5 (review S2c): every permissive policy the business role is subject to (directly or via PUBLIC)
+    // must be the standard company rule or a reviewed, pinned exception. Restrictive policies only narrow access.
+    const appPolicies = await client.query<{ key: string; std: boolean; hash: string }>(`
+      SELECT c.relname || '.' || p.polname AS key,
+             (coalesce(pg_get_expr(p.polqual, p.polrelid), $1) = $1 AND coalesce(pg_get_expr(p.polwithcheck, p.polrelid), $1) = $1) AS std,
+             md5(p.polcmd::text || '|' || coalesce(pg_get_expr(p.polqual, p.polrelid), '') || '|' || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')
+                 || '|' || (SELECT string_agg(CASE WHEN r = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(r) END, ',' ORDER BY 1) FROM unnest(p.polroles) AS u(r))) AS hash
+      FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE p.polpermissive AND (0 = ANY(p.polroles) OR 'cf_app'::regrole = ANY(p.polroles))`, [STANDARD_COMPANY_RULE]);
+    for (const p of appPolicies.rows) {
+      if (p.std) continue;
+      if (!(p.key in REVIEWED_APP_POLICIES)) problems.push(`policy ${p.key} widens what the business role can see; it is not the standard company rule and not on the reviewed list`);
+      else if (REVIEWED_APP_POLICIES[p.key] !== p.hash) problems.push(`policy ${p.key} has changed since it was reviewed`);
     }
     // General rule 4: no view or materialised view may be built over a company table (views run with their owner's
     // rights and would bypass company row security for whoever can read the view).
