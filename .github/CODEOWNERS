@@ -1,0 +1,13 @@
+# Code owners — ENFORCEMENT PENDING GitHub configuration (docs/github-setup.md, "security-owners" steps).
+# Until the Meronatic organisation exists, "@MERONATIC-ORG/security-owners" is a placeholder: replace it with the real
+# team (Muhammad Shahzad plus a second Meronatic owner), then turn on "Require review from Code Owners" for main.
+#
+# Approving a dependency-audit exception is an edit to docs/security/audit-exceptions.json. This rule makes that edit
+# impossible to merge without an owner's review (independent recheck R4-2).
+/docs/security/                    @MERONATIC-ORG/security-owners
+# The same protection for what decides the security checks themselves.
+/.github/                          @MERONATIC-ORG/security-owners
+/scripts/audit-deps.mjs            @MERONATIC-ORG/security-owners
+/scripts/verify-clean-checkout.sh  @MERONATIC-ORG/security-owners
+/packages/database/migrations/     @MERONATIC-ORG/security-owners
+/packages/database/src/check-rls.ts @MERONATIC-ORG/security-owners

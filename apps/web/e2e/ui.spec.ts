@@ -170,3 +170,21 @@ test('injected HTML cannot run inline script or apply inline style, and both are
   expect(violations.some((v) => v.startsWith('style-src'))).toBe(true);
   await context.close();
 });
+
+test('not-found pages are rendered per request: 404 status, nonce on every script, no inline styles, no violations', async ({ browser }) => {
+  const context = await browser.newContext();
+  await context.addInitScript(RECORD_CSP);
+  const page = await context.newPage();
+  for (const [path, heading] of [['/nope', 'Page not found'], ['/en/no-such-page', 'Page not found'], ['/ar/لا-توجد', 'الصفحة غير موجودة']] as const) {
+    const res = await page.goto(path);
+    expect(res!.status(), path).toBe(404);
+    const nonce = /'nonce-([A-Za-z0-9+/=]+)'/.exec(res!.headers()['content-security-policy'] ?? '')?.[1];
+    expect(nonce, path).toBeTruthy();
+    const html = await res!.text();
+    for (const tag of html.match(/<script\b[^>]*>/g) ?? []) expect(tag, `${path}: ${tag}`).toContain(`nonce="${nonce}"`);
+    expect(html, path).not.toMatch(/\sstyle="/);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(heading);
+    expect(await page.evaluate(() => (window as unknown as { __csp: string[] }).__csp), path).toEqual([]);
+  }
+  await context.close();
+});

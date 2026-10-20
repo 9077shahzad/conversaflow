@@ -11,6 +11,8 @@ Proposed repository: **`conversaflow`** (private). Push approval stays pending u
 - [ ] Create repository **`conversaflow`**: Private, empty (no README, licence or .gitignore).
 - [ ] Repository **Settings → Branches**: protect `main` — pull request required, status check `CI / checks` required, no force-push, no deletion.
 - [ ] Repository **Settings → Code security**: Dependabot alerts and security updates on (free).
+- [ ] Create a team **security-owners** with you and the second Meronatic owner. Tell me its name, and I replace the placeholder in `.github/CODEOWNERS` in the first pull request.
+- [ ] Repository **Settings → Branches → main**: also tick **Require review from Code Owners**. Edits to `docs/security/` (including approving an audit exception), CI, migrations and the security scripts then need an owner's approval. Until this is ticked, the code-owner rule is **not enforced**.
 - [ ] Tell me the organisation name and approve the push.
 
 ## Me (after your approval)

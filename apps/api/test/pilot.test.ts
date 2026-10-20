@@ -150,6 +150,39 @@ describe('a pilot company', () => {
   });
 });
 
+describe('candidate 2 follow-ups (independent recheck R4-3, R4-4)', () => {
+  it('two enrolments at the same instant: one succeeds, the other gets 409, never a server error', async () => {
+    const o = await newUser(t, 'race');
+    const tenant = await newCompany(o, 'raceco', 'growth');
+    const results = await Promise.all([1, 2, 3].map(() =>
+      lead.post(`/v1/platform/tenants/${tenant}/pilot`, { reason: 'Concurrent enrolment test' })));
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409]);
+    const n = (await asOwner(t, tenant, (tx) => tx.query('SELECT count(*)::int AS n FROM entitlement_overrides WHERE tenant_id = $1', [tenant]))).rows[0].n;
+    expect(n).toBe(1);
+  });
+
+  it('the operations role can end a seat override but cannot extend or clear its expiry', async () => {
+    const o = await newUser(t, 'expiry');
+    const tenant = await newCompany(o, 'expiryco', 'growth');
+    await lead.post(`/v1/platform/tenants/${tenant}/pilot`, { reason: 'Expiry policy test' }).expect(201);
+    const asOps = async (sql: string) => {
+      const c = await t.ownerDb.connect();
+      try {
+        await c.query('BEGIN'); await c.query('SET LOCAL ROLE cf_ops');
+        const r = await c.query(sql, [tenant]); await c.query('COMMIT'); return r;
+      } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+    };
+    for (const sql of [
+      "UPDATE entitlement_overrides SET expires_at = now() + interval '5 years' WHERE tenant_id = $1",
+      'UPDATE entitlement_overrides SET expires_at = NULL WHERE tenant_id = $1',
+    ]) await expect(asOps(sql), sql).rejects.toMatchObject({ code: '42501' });
+    const before = (await asOwner(t, tenant, (tx) => tx.query('SELECT expires_at FROM entitlement_overrides WHERE tenant_id = $1', [tenant]))).rows[0].expires_at;
+    expect(new Date(before).getTime()).toBeGreaterThan(Date.now() + 80 * 86_400_000);
+    await lead.post(`/v1/platform/tenants/${tenant}/pilot/end`).expect(204);
+    expect(await seats(o)).toBe(3);
+  });
+});
+
 describe('the CI guard', () => {
   it('fails the build if the business role can write pilot records or overrides', async () => {
     const owner = createPool(process.env.DATABASE_URL!, 1);

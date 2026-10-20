@@ -54,6 +54,9 @@ export class PlatformService {
     return withContext(this.db, { tenantId: null, userId: null }, fn).catch((err: { code?: string; message?: string }) => {
       if (err.code === '42501') throw Errors.forbidden(err.message);
       if (err.code === '23514') throw new AppError(409, 'not_allowed', String(err.message));
+      // Two requests racing past a check hit the database's unique rule; the loser gets the same answer as a later
+      // request would (independent recheck R4-3).
+      if (err.code === '23505') throw new AppError(409, 'not_allowed', 'This was just done by another request.');
       throw err;
     });
   }
