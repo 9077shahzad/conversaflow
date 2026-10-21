@@ -57,6 +57,8 @@ as_pg psql -h 127.0.0.1 -p "$PG_PORT" -U postgres -q -v ON_ERROR_STOP=1 \
 # Trust auth is used only on this disposable loopback cluster.
 
 export DATABASE_URL="postgres://cf_owner:$OWNER_PW@127.0.0.1:$PG_PORT/conversaflow"
+# Superuser on this disposable cluster only, for guard tests that need to create conditions the owner cannot.
+export DATABASE_SUPERUSER_URL="postgres://postgres@127.0.0.1:$PG_PORT/conversaflow"
 export DATABASE_APP_URL="postgres://cf_app:$APP_PW@127.0.0.1:$PG_PORT/conversaflow"
 export CF_APP_DB_PASSWORD="$APP_PW"
 export DATABASE_IDENTITY_URL="postgres://cf_identity:$IDENTITY_PW@127.0.0.1:$PG_PORT/conversaflow"

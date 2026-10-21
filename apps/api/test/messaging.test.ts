@@ -389,9 +389,9 @@ describe('review fixes for slice 1', () => {
       await owner.query('ALTER FUNCTION zz_all_messages() OWNER TO cf_channel');
       const problems = await checkIsolation(process.env.DATABASE_URL!);
       expect(problems).toEqual(expect.arrayContaining([
-        'cf_channel has privileges on messages; it may only read the routing columns of channel_connections',
+        'cf_channel has privileges on messages; it may only read the routing columns of channel_connections and provider_accounts',
         'cf_channel has more than read access on channel_connections.display_phone',
-        'cf_channel owns zz_all_messages(), which is not the reviewed routing function',
+        'cf_channel owns zz_all_messages(), which is not a reviewed routing function',
       ]));
     } finally {
       await owner.query('DROP FUNCTION IF EXISTS zz_all_messages()');

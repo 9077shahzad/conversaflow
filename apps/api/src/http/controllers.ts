@@ -20,6 +20,8 @@ import { PlatformService } from '../modules/platform.service';
 import { SettingsService } from '../modules/settings.service';
 import { TenantsService } from '../modules/tenants.service';
 import { InboxService } from '../modules/inbox.service';
+import { TemplatesService } from '../modules/templates.service';
+import { HealthService } from '../modules/health.service';
 import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
@@ -423,7 +425,24 @@ export class PlatformController {
 
 @Controller('v1/channels')
 export class ChannelsController {
-  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+  constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(HealthService) private readonly health: HealthService) {}
+
+  @RequirePermission('channels.monitor') @Get('health')
+  overview(@CurrentActor() actor: TenantActor) {
+    return this.health.overview(actor);
+  }
+
+  /** Recovery: re-applies delivery statuses that arrived before their message (safe to repeat). */
+  @RequirePermission('channels.manage') @Post('recovery/statuses') @HttpCode(200)
+  reapplyStatuses(@CurrentActor() actor: TenantActor) {
+    return this.health.reapplyStatuses(actor);
+  }
+
+  /** Recovery: downloads a customer's media again after a failed download. Never sends anything. */
+  @RequirePermission('channels.manage') @Post('recovery/media/:messageId') @HttpCode(200)
+  retryMedia(@CurrentActor() actor: TenantActor, @Param('messageId') id: string) {
+    return this.health.retryMedia(actor, id);
+  }
 
   @RequirePermission('tenant.read') @Get()
   list(@CurrentActor() actor: TenantActor) {
@@ -495,6 +514,11 @@ export class InboxController {
   reply(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
     return this.inbox.reply(actor, id, body);
   }
+
+  @RequirePermission('inbox.reply') @Post(':id/template') @HttpCode(201)
+  sendTemplate(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.sendTemplate(actor, id, body);
+  }
   @RequirePermission('inbox.pause') @Post(':id/pause') @HttpCode(200)
   pause(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
     return this.inbox.pause(actor, id, body);
@@ -514,5 +538,36 @@ export class MessagesController {
   @RequirePermission('inbox.reply') @Post(':id/retry') @HttpCode(201)
   retry(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
     return this.inbox.retry(actor, id, body);
+  }
+}
+
+@Controller('v1/templates')
+export class TemplatesController {
+  constructor(@Inject(TemplatesService) private readonly templates: TemplatesService) {}
+
+  @RequirePermission('inbox.reply') @Get()
+  list(@CurrentActor() actor: TenantActor) {
+    return this.templates.list(actor);
+  }
+
+  @RequirePermission('templates.manage') @Post() @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Body() body: unknown) {
+    return this.templates.create(actor, body);
+  }
+
+  /** Recovery: re-reads review status, quality and category from the provider. */
+  @RequirePermission('templates.manage') @Post('sync') @HttpCode(200)
+  sync(@CurrentActor() actor: TenantActor) {
+    return this.templates.sync(actor);
+  }
+}
+
+@Controller('v1/contacts')
+export class ContactsController {
+  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+
+  @RequirePermission('contacts.write') @Post(':id/marketing-consent') @HttpCode(200)
+  marketingConsent(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.setMarketingConsent(actor, id, body);
   }
 }

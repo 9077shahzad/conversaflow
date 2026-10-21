@@ -6,16 +6,35 @@ import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { consentKeyword, parseWebhook, type ParsedEvent, type Provider } from './channels';
 import { applyStatus, Sender } from './sender';
+import { applyTemplateEvent, checkParamValue, renderTemplate } from './templates.service';
+import { acceptsInbound, outboundTypeFor } from './media';
+import { startTimerOnInbound } from './sla';
 import { isUuid } from './members.service';
 
 /** Free-form replies are allowed only within this long of the customer's last message (Meta customer service window). */
 export const SERVICE_WINDOW_HOURS = 24;
+/** Manual retries allowed per original message, across the whole retry chain (database constraint, migration 0025). */
+export const MANUAL_RETRY_LIMIT = 1;
 
 const ChannelRequest = z.object({
   provider: z.enum(['sandbox', 'whatsapp_cloud']),
   providerNumberId: z.string().regex(/^[0-9A-Za-z_-]{3,64}$/, 'Use the provider number id (letters, digits, - or _)'),
   displayPhone: z.string().trim().min(3).max(32),
   label: z.string().trim().min(1).max(80),
+  /** The business account (Meta's WABA id) the number belongs to. Sandbox numbers get their own account if omitted. */
+  providerAccountId: z.string().regex(/^[0-9A-Za-z_-]{3,64}$/).optional(),
+});
+const TemplateSendRequest = z.object({
+  templateId: z.string().uuid(),
+  params: z.array(z.string().max(1024)).max(20),
+  seenActivity: z.number().int().min(0),
+  clientMessageId: z.string().uuid(),
+  takeover: z.boolean().optional(),
+});
+const MarketingConsentRequest = z.object({
+  granted: z.boolean(),
+  /** How the customer agreed or withdrew, in the agent's words (e.g. "Customer asked for offers in chat on 21 Oct"). */
+  evidence: z.string().trim().min(5).max(300),
 });
 const ListQuery = z.object({
   status: z.enum(['open', 'pending', 'resolved', 'active']).default('active'),
@@ -37,7 +56,10 @@ const RetryRequest = z.object({
   confirmPossibleDuplicate: z.boolean().optional(),
 });
 const ReplyRequest = z.object({
-  text: z.string().trim().min(1).max(4096),
+  /** The reply text, or the caption when a file is attached (may then be empty). */
+  text: z.string().trim().max(4096).default(''),
+  /** A stored file of this company, scanned clean, sent as a WhatsApp media message. */
+  fileId: z.string().uuid().optional(),
   /**
    * The conversation's activity counter when the agent last looked (from GET /conversations/:id). Every recorded
    * message bumps it, including a late customer message with an older timestamp; a mismatch refuses the reply.
@@ -52,6 +74,7 @@ type ConvRow = {
   id: string; contact_id: string; connection_id: string; status: string; assigned_membership_id: string | null;
   last_inbound_at: Date | null; last_message_id: string | null; version: number; activity_seq: string;
   paused_by_membership_id: string | null; paused_reason: string | null; paused_at: Date | null; paused_until: Date | null;
+  sla_kind: string | null; sla_started_at: Date | null; sla_due_at: Date | null; first_response_at: Date | null;
 };
 const pauseActive = (c: ConvRow) => c.paused_at !== null && (c.paused_until === null || c.paused_until.getTime() > Date.now());
 
@@ -62,7 +85,7 @@ const pauseActive = (c: ConvRow) => c.paused_at !== null && (c.paused_until === 
 export class InboxService {
   private readonly sender: Sender;
   constructor(private readonly deps: Deps) {
-    this.sender = new Sender(deps.db, deps.channels);
+    this.sender = new Sender(deps.db, deps.channels, {}, undefined, deps.storage);
   }
 
   // --- Channels ------------------------------------------------------------------------------------------------
@@ -81,11 +104,18 @@ export class InboxService {
     if (!this.deps.channels.sandbox) throw Errors.conflict('provider_not_available', 'The sandbox channel is turned off here.');
     return withContext(this.deps.db, actor, async (tx) => {
       try {
+        const accountId = body.providerAccountId ?? `sbx-${body.providerNumberId}`;
+        let account = (await tx.query<{ id: string }>(
+          'SELECT id FROM provider_accounts WHERE provider = $1 AND account_id = $2', [body.provider, accountId])).rows[0];
+        // Inserting an account another company holds fails on the unique key: same answer as a taken number.
+        account ??= (await tx.query<{ id: string }>(
+          'INSERT INTO provider_accounts (tenant_id, provider, account_id) VALUES ($1, $2, $3) RETURNING id',
+          [actor.tenantId, body.provider, accountId])).rows[0]!;
         const { rows } = await tx.query(
-          `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, created_by, account_ref)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, provider, provider_number_id AS "providerNumberId", display_phone AS "displayPhone", label, status`,
-          [actor.tenantId, body.provider, body.providerNumberId, body.displayPhone, body.label, actor.userId]);
+          [actor.tenantId, body.provider, body.providerNumberId, body.displayPhone, body.label, actor.userId, account.id]);
         await AuditService.record(tx, {
           tenantId: actor.tenantId, actorUserId: actor.userId, action: 'channel.connected', ip: actor.ip,
           targetType: 'channel_connection', targetId: rows[0].id, metadata: { provider: body.provider },
@@ -107,9 +137,33 @@ export class InboxService {
    */
   async ingest(provider: Provider, payload: unknown) {
     const { events, skipped } = parseWebhook(payload);
-    const counts = { applied: 0, duplicate: 0, stale: 0, orphan: 0, unrouted: 0, skipped };
-    const byNumber = new Map<string, ParsedEvent[]>();
-    for (const e of events) byNumber.set(e.providerNumberId, [...(byNumber.get(e.providerNumberId) ?? []), e]);
+    const counts = { applied: 0, duplicate: 0, stale: 0, orphan: 0, unrouted: 0, unknownTemplate: 0, skipped };
+    const byNumber = new Map<string, Array<Exclude<ParsedEvent, { kind: 'template' }>>>();
+    const byAccount = new Map<string, Array<Extract<ParsedEvent, { kind: 'template' }>>>();
+    for (const e of events) {
+      if (e.kind === 'template') byAccount.set(e.accountId, [...(byAccount.get(e.accountId) ?? []), e]);
+      else byNumber.set(e.providerNumberId, [...(byNumber.get(e.providerNumberId) ?? []), e]);
+    }
+
+    // Template review, quality and category updates belong to the business account, not a number.
+    for (const [account, list] of byAccount) {
+      const route = await withContext(this.deps.db, { tenantId: null, userId: null }, async (tx) =>
+        (await tx.query<{ tenant_id: string; account_ref: string }>('SELECT * FROM account_route($1, $2)', [provider, account])).rows[0]);
+      if (!route) { counts.unrouted += list.length; continue; }
+      list.sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
+      await withContext(this.deps.db, { tenantId: route.tenant_id, userId: null }, async (tx) => {
+        for (const e of list) {
+          const ins = await tx.query<{ id: string }>(
+            `INSERT INTO webhook_events (tenant_id, account_ref, event_key, kind, payload) VALUES ($1, $2, $3, 'template', $4)
+             ON CONFLICT (tenant_id, account_ref, event_key) WHERE account_ref IS NOT NULL DO NOTHING RETURNING id`,
+            [route.tenant_id, route.account_ref, e.key, JSON.stringify(e.raw)]);
+          if (!ins.rows[0]) { counts.duplicate++; continue; }
+          const outcome = await applyTemplateEvent(tx, route.account_ref, e);
+          await tx.query('UPDATE webhook_events SET processed_at = now(), outcome = $2 WHERE id = $1', [ins.rows[0].id, outcome]);
+          if (outcome === 'applied') counts.applied++; else counts.unknownTemplate++;
+        }
+      });
+    }
 
     for (const [number, list] of byNumber) {
       const route = await withContext(this.deps.db, { tenantId: null, userId: null }, async (tx) =>
@@ -156,14 +210,22 @@ export class InboxService {
         'INSERT INTO conversations (tenant_id, contact_id, connection_id) VALUES ($1, $2, $3) RETURNING *',
         [tenantId, contactId, connectionId])).rows[0]!;
     }
+    // Media is recorded now and downloaded, checked for malware and stored by a background job.
+    const media = e.media;
+    const mediaStatus = media ? (acceptsInbound(media.type, media.mime) ? 'pending' : 'unsupported') : null;
+    const kind = e.type === 'text' ? 'text' : media ? 'media' : 'unsupported';
     const msg = await tx.query<{ id: string }>(
-      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, provider_type, provider_message_id, occurred_at, status, referral)
-       VALUES ($1, $2, 'in', $3, $4, $5, $6, $7, 'received', $8)
+      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, provider_type, provider_message_id, occurred_at, status, referral,
+                             media_type, media_status, provider_media_id, media_mime, media_filename)
+       VALUES ($1, $2, 'in', $3, $4, $5, $6, $7, 'received', $8, $9, $10, $11, $12, $13)
        ON CONFLICT (tenant_id, provider_message_id) DO NOTHING RETURNING id`,
-      [tenantId, conv.id, e.type === 'text' ? 'text' : 'unsupported', e.body, e.type === 'text' ? null : e.type,
-        e.providerMessageId, e.occurredAt, e.referral ? JSON.stringify(e.referral) : null]);
+      [tenantId, conv.id, kind, e.body, e.type === 'text' ? null : e.type,
+        e.providerMessageId, e.occurredAt, e.referral ? JSON.stringify(e.referral) : null,
+        media?.type ?? null, mediaStatus, media?.id ?? null, media?.mime?.slice(0, 120) ?? null, media?.filename?.slice(0, 255) ?? null]);
     const messageId = msg.rows[0]?.id;
     if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
+    if (mediaStatus === 'pending') await tx.query('INSERT INTO media_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenantId, messageId]);
+    await startTimerOnInbound(tx, conv.id, e.occurredAt);
     // A delayed message updates the thread position only if it is the newest; the service window uses the latest.
     await tx.query(
       `UPDATE conversations SET
@@ -179,7 +241,10 @@ export class InboxService {
     if (consent) {
       const optedOut = (await tx.query<{ opted_out_at: Date | null }>('SELECT opted_out_at FROM contacts WHERE id = $1', [contactId])).rows[0]!.opted_out_at;
       if ((consent === 'opt_out') !== (optedOut !== null)) {
-        await tx.query(`UPDATE contacts SET opted_out_at = CASE WHEN $2 THEN now() END, updated_at = now() WHERE id = $1`,
+        // An opt-out also withdraws any marketing consent; opting back in does not restore it.
+        await tx.query(
+          `UPDATE contacts SET opted_out_at = CASE WHEN $2 THEN now() END,
+                  marketing_consent_at = CASE WHEN $2 THEN NULL ELSE marketing_consent_at END, updated_at = now() WHERE id = $1`,
           [contactId, consent === 'opt_out']);
         await tx.query(
           `INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence) VALUES ($1, $2, $3, 'whatsapp', 'inbound_keyword', $4)`,
@@ -216,6 +281,7 @@ export class InboxService {
                 ct.id AS "contactId", ct.display_name AS "contactName", (ct.opted_out_at IS NOT NULL) AS "optedOut",
                 m.body AS "lastMessagePreview", m.direction AS "lastMessageDirection",
                 (c.paused_at IS NOT NULL AND (c.paused_until IS NULL OR c.paused_until > now())) AS "paused",
+                c.sla_kind AS "slaKind", c.sla_due_at AS "slaDueAt",
                 EXISTS (SELECT 1 FROM messages f WHERE f.conversation_id = c.id AND f.direction = 'out'
                           AND f.status IN ('failed', 'uncertain')
                           AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.retry_of = f.id)) AS "needsAttention"
@@ -247,14 +313,19 @@ export class InboxService {
       const c = await this.loadVisible(tx, actor, id);
       const contact = (await tx.query(
         `SELECT ct.id, ct.display_name AS "displayName", (ct.opted_out_at IS NOT NULL) AS "optedOut",
+                ct.marketing_consent_at AS "marketingConsentAt",
                 (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) AS "whatsapp"
          FROM contacts ct WHERE ct.id = $1`, [c.contact_id])).rows[0];
       const messages = (await tx.query(
         `SELECT m.id, m.direction, m.kind, m.body, m.provider_type AS "providerType", m.status, m.error_code AS "errorCode",
                 m.occurred_at AS "occurredAt", m.sent_by_membership_id AS "sentByMembershipId", (m.referral IS NOT NULL) AS "fromAd",
-                m.attempts, m.retry_of AS "retryOf", r.id AS "retriedAs"
+                m.failure_kind AS "failureKind", m.original_author_membership_id AS "originalAuthorMembershipId",
+                m.template_id AS "templateId", m.pricing_category AS "pricingCategory",
+                m.media_type AS "mediaType", m.media_status AS "mediaStatus", m.file_id AS "fileId", m.media_filename AS "mediaFilename",
+                m.attempts, m.retry_of AS "retryOf", m.retry_number AS "retryNumber", r.id AS "retriedAs",
+                (m.direction = 'out' AND m.status IN ('failed', 'uncertain') AND r.id IS NULL AND m.retry_number < $2) AS "retryable"
          FROM messages m LEFT JOIN messages r ON r.retry_of = m.id
-         WHERE m.conversation_id = $1 ORDER BY m.occurred_at, m.id`, [c.id])).rows;
+         WHERE m.conversation_id = $1 ORDER BY m.occurred_at, m.id`, [c.id, MANUAL_RETRY_LIMIT])).rows;
       const notes = (await tx.query(
         `SELECT id, body, author_membership_id AS "authorMembershipId", created_at AS "createdAt"
          FROM internal_notes WHERE conversation_id = $1 ORDER BY created_at, id`, [c.id])).rows;
@@ -265,8 +336,10 @@ export class InboxService {
       return {
         id: c.id, status: c.status, version: c.version, assignedMembershipId: c.assigned_membership_id,
         lastMessageId: c.last_message_id, activitySeq: Number(c.activity_seq), windowOpen, contact, messages, notes, events,
+        sla: c.sla_kind ? { kind: c.sla_kind, startedAt: c.sla_started_at, dueAt: c.sla_due_at } : null,
+        firstResponseAt: c.first_response_at,
         people: await this.names(tx, [c.assigned_membership_id, c.paused_by_membership_id,
-          ...messages.map((m) => m.sentByMembershipId), ...notes.map((n) => n.authorMembershipId), ...events.map((e) => e.actorMembershipId)]),
+          ...messages.map((m) => m.sentByMembershipId), ...messages.map((m) => m.originalAuthorMembershipId), ...notes.map((n) => n.authorMembershipId), ...events.map((e) => e.actorMembershipId)]),
         pause: pauseActive(c)
           ? { active: true, reason: c.paused_reason, pausedByMembershipId: c.paused_by_membership_id, pausedAt: c.paused_at, until: c.paused_until }
           : { active: false },
@@ -331,7 +404,7 @@ export class InboxService {
   }
 
   /** Checks shared by replies and retries. Throws the reason a person may not send in this conversation now. */
-  private async checkCanSend(tx: Tx, actor: TenantActor, c: ConvRow, seenActivity: number, takeover = false) {
+  private async checkCanSend(tx: Tx, actor: TenantActor, c: ConvRow, seenActivity: number, takeover = false, requireWindow = true) {
     const ctx = (await tx.query<{ opted_out_at: Date | null; wa: string | null; channel_status: string }>(
       `SELECT ct.opted_out_at, ch.status AS channel_status,
               (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) AS wa
@@ -360,7 +433,7 @@ export class InboxService {
         { activitySeq: Number(c.activity_seq) });
     }
     if (ctx.opted_out_at) throw Errors.conflict('contact_opted_out', 'This customer has opted out of messages.');
-    if (c.last_inbound_at === null || Date.now() - c.last_inbound_at.getTime() >= SERVICE_WINDOW_HOURS * 3600_000) {
+    if (requireWindow && (c.last_inbound_at === null || Date.now() - c.last_inbound_at.getTime() >= SERVICE_WINDOW_HOURS * 3600_000)) {
       throw Errors.conflict('template_required',
         'More than 24 hours have passed since the customer last wrote. Only an approved template can be sent now.');
     }
@@ -372,12 +445,27 @@ export class InboxService {
     }
   }
 
+  /** A file may be sent only if it is this company's, scanned clean, and of a type and size WhatsApp accepts. */
+  private async attachable(tx: Tx, actor: TenantActor, fileId: string) {
+    if (!actor.permissions.has('files.read')) throw Errors.forbidden('You cannot send files.');
+    const f = (await tx.query<{ id: string; status: string; content_type: string; size_bytes: string; original_name: string }>(
+      'SELECT id, status, content_type, size_bytes, original_name FROM files WHERE id = $1', [fileId])).rows[0];
+    if (!f || f.status !== 'available') throw Errors.notFound('File');
+    const type = outboundTypeFor(f.content_type, Number(f.size_bytes));
+    if (!type) throw Errors.badRequest('WhatsApp does not accept this type or size of file.');
+    return { type, fileId: f.id, mime: f.content_type, filename: f.original_name };
+  }
+
   /** Records a queued outbound message and its send job, and moves the conversation forward. */
-  private async enqueue(tx: Tx, actor: TenantActor, c: ConvRow, text: string, clientMessageId: string, retryOf: string | null) {
+  private async enqueue(tx: Tx, actor: TenantActor, c: ConvRow, text: string, clientMessageId: string, retryOf: string | null,
+    template?: { id: string; params: string[]; category: string }, media?: { type: string; fileId: string; mime: string; filename: string }) {
     const msg = (await tx.query<{ id: string; occurred_at: Date }>(
-      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status, retry_of)
-       VALUES ($1, $2, 'out', 'text', $3, $4, $5, clock_timestamp(), 'queued', $6) RETURNING id, occurred_at`,
-      [actor.tenantId, c.id, text, clientMessageId, actor.membershipId, retryOf])).rows[0]!;
+      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status,
+                             retry_of, template_id, template_params, pricing_category, media_type, media_status, file_id, media_mime, media_filename)
+       VALUES ($1, $2, 'out', $7, $3, $4, $5, clock_timestamp(), 'queued', $6, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id, occurred_at`,
+      [actor.tenantId, c.id, text || null, clientMessageId, actor.membershipId, retryOf, template ? 'template' : media ? 'media' : 'text',
+        template?.id ?? null, template ? JSON.stringify(template.params) : null, template?.category ?? 'service',
+        media?.type ?? null, media ? 'available' : null, media?.fileId ?? null, media?.mime ?? null, media?.filename ?? null])).rows[0]!;
     const job = (await tx.query<{ id: string }>(
       'INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2) RETURNING id', [actor.tenantId, msg.id])).rows[0]!;
     await tx.query(
@@ -405,8 +493,10 @@ export class InboxService {
         [body.clientMessageId, actor.membershipId]);
       if (again.rows[0]) return { existing: again.rows[0].id as string };
       const c = await this.loadVisible(tx, actor, id, true);
+      if (!body.fileId && !body.text) throw Errors.badRequest('Write a reply or attach a file.');
+      const media = body.fileId ? await this.attachable(tx, actor, body.fileId) : undefined;
       await this.checkCanSend(tx, actor, c, body.seenActivity, body.takeover);
-      return this.enqueue(tx, actor, c, body.text, body.clientMessageId, null);
+      return this.enqueue(tx, actor, c, body.text, body.clientMessageId, null, undefined, media);
     });
     if (prepared.existing !== undefined) return this.message(actor, prepared.existing);
     await this.sendNow(actor, prepared.jobId);
@@ -414,8 +504,15 @@ export class InboxService {
   }
 
   /**
-   * A person retries a failed or uncertain message. The retry is a new message linked to the original (which keeps its
-   * honest status). An uncertain message may already have reached the customer, so the person must confirm.
+   * A person retries a failed or uncertain message (owner decisions of 20 and 21 Oct 2026).
+   *
+   * - Anyone who may reply to the conversation right now may retry, including a colleague's message. The usual reply
+   *   checks apply now (assignment, pause, opt-out, window, channel) and again when the retry is actually sent.
+   * - The retry is a new message linked to the original, which keeps its honest status. The database records the
+   *   original author and the person retrying, and limits retries to MANUAL_RETRY_LIMIT per original message across
+   *   the whole chain, so a retry copy cannot be retried again to get round the limit.
+   * - A confirmed failure (`failed`) can be retried directly. An `uncertain` message may already have reached the
+   *   customer, so the person must confirm that a second copy is acceptable.
    */
   async retry(actor: TenantActor, messageId: string, input: unknown) {
     const body = parse(RetryRequest, input);
@@ -425,37 +522,119 @@ export class InboxService {
       const again = await tx.query(`SELECT id FROM messages WHERE client_message_id = $1 AND sent_by_membership_id = $2`,
         [body.clientMessageId, actor.membershipId]);
       if (again.rows[0]) return { existing: again.rows[0].id as string };
-      const orig = (await tx.query<{ id: string; conversation_id: string; status: string; body: string | null; direction: string; error_code: string | null }>(
-        'SELECT id, conversation_id, status, body, direction, error_code FROM messages WHERE id = $1', [messageId])).rows[0];
+      const orig = (await tx.query<{
+        id: string; conversation_id: string; status: string; body: string | null; direction: string; error_code: string | null;
+        failure_kind: string | null; retry_number: number; original_author_membership_id: string | null;
+        kind: string; template_id: string | null; template_params: string[] | null; pricing_category: string | null; file_id: string | null;
+      }>(
+        `SELECT id, conversation_id, status, body, direction, error_code, failure_kind, retry_number, original_author_membership_id,
+                kind, template_id, template_params, pricing_category, file_id
+         FROM messages WHERE id = $1`, [messageId])).rows[0];
       if (!orig || orig.direction !== 'out') throw Errors.notFound('Message');
       const c = await this.loadVisible(tx, actor, orig.conversation_id, true);
       if (orig.status !== 'failed' && orig.status !== 'uncertain') {
         throw Errors.conflict('not_retryable', 'Only a failed or uncertain message can be retried.');
       }
-      if (orig.status === 'uncertain' && !body.confirmPossibleDuplicate) {
-        throw new AppError(409, 'confirmation_required',
-          'We do not know whether this message reached the customer. Retrying may send it twice. Confirm to retry.');
+      if (orig.retry_number >= MANUAL_RETRY_LIMIT) {
+        throw Errors.conflict('retry_limit_reached', 'This message has already been retried as often as allowed. Write a new reply instead.');
       }
       if (await tx.query('SELECT 1 FROM messages WHERE retry_of = $1', [orig.id]).then((r) => r.rowCount)) {
         throw Errors.conflict('already_retried', 'This message has already been retried.');
       }
-      await this.checkCanSend(tx, actor, c, body.seenActivity);
-      const queued = await this.enqueue(tx, actor, c, orig.body ?? '', body.clientMessageId, orig.id);
+      if (orig.status === 'uncertain' && !body.confirmPossibleDuplicate) {
+        throw new AppError(409, 'confirmation_required',
+          'We do not know whether this message reached the customer. Retrying may send it twice. Confirm to retry.');
+      }
+      // A template may be retried outside the window (it will be checked again: still approved, consent).
+      await this.checkCanSend(tx, actor, c, body.seenActivity, false, orig.kind !== 'template');
+      const media = orig.kind === 'media' && orig.file_id ? await this.attachable(tx, actor, orig.file_id) : undefined;
+      const queued = await this.enqueue(tx, actor, c, orig.body ?? '', body.clientMessageId, orig.id,
+        orig.kind === 'template' ? { id: orig.template_id!, params: orig.template_params ?? [], category: orig.pricing_category ?? 'utility' } : undefined,
+        media);
+      const record = {
+        original: orig.id, retry: queued.messageId, originalStatus: orig.status, failureKind: orig.failure_kind,
+        errorCode: orig.error_code, originalAuthorMembershipId: orig.original_author_membership_id,
+        retriedByMembershipId: actor.membershipId, confirmedPossibleDuplicate: orig.status === 'uncertain',
+      };
       await tx.query(
         `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'retried', $3, $4)`,
-        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ original: orig.id, retry: queued.messageId, originalStatus: orig.status })]);
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify(record)]);
       await AuditService.record(tx, {
         tenantId: actor.tenantId, actorUserId: actor.userId, action: 'message.retried', ip: actor.ip, targetType: 'message', targetId: orig.id,
-        metadata: { retry: queued.messageId, originalStatus: orig.status, errorCode: orig.error_code, confirmedPossibleDuplicate: !!body.confirmPossibleDuplicate },
+        metadata: record,
       });
       return queued;
     }).catch((err) => {
-      if ((err as { code?: string }).code === '23505') throw Errors.conflict('already_retried', 'This message has already been retried.');
+      const code = (err as { code?: string }).code;
+      // Two people retrying at once, or a retry past the chain limit, are stopped by database constraints.
+      if (code === '23505') throw Errors.conflict('already_retried', 'This message has already been retried.');
+      if (code === '23514') throw Errors.conflict('retry_limit_reached', 'This message has already been retried as often as allowed. Write a new reply instead.');
       throw err;
     });
     if (prepared.existing !== undefined) return this.message(actor, prepared.existing);
     await this.sendNow(actor, prepared.jobId);
     return this.message(actor, prepared.messageId);
+  }
+
+  /**
+   * Sends an approved template (the only way to write after the 24-hour window has closed). The usual checks apply
+   * (assignment, pause, opt-out, channel) and, for marketing templates, recorded marketing consent. Everything is
+   * checked again at send time, including that the template is still approved.
+   */
+  async sendTemplate(actor: TenantActor, id: string, input: unknown) {
+    const body = parse(TemplateSendRequest, input);
+    type Prepared = { existing: string } | { existing?: undefined; messageId: string; jobId: string };
+    const prepared = await withContext<Prepared>(this.deps.db, actor, async (tx) => {
+      const again = await tx.query(`SELECT id FROM messages WHERE client_message_id = $1 AND sent_by_membership_id = $2`,
+        [body.clientMessageId, actor.membershipId]);
+      if (again.rows[0]) return { existing: again.rows[0].id as string };
+      const c = await this.loadVisible(tx, actor, id, true);
+      const tpl = (await tx.query<{ id: string; status: string; category: string; param_count: number; account_ref: string;
+        header_text: string | null; body_text: string; footer_text: string | null }>(
+        `SELECT t.id, t.status, t.category, t.param_count, t.account_ref, t.header_text, t.body_text, t.footer_text
+         FROM message_templates t WHERE t.id = $1`, [body.templateId])).rows[0];
+      if (!tpl) throw Errors.notFound('Template');
+      const conn = (await tx.query<{ account_ref: string }>('SELECT account_ref FROM channel_connections WHERE id = $1', [c.connection_id])).rows[0]!;
+      if (tpl.account_ref !== conn.account_ref) throw Errors.badRequest('This template belongs to a different WhatsApp business account.');
+      if (tpl.status !== 'approved') throw Errors.conflict('template_not_approved', 'This template is not approved for sending.');
+      if (body.params.length !== tpl.param_count || !body.params.every(checkParamValue)) {
+        throw Errors.badRequest(`Fill in all ${tpl.param_count} values, each on one line.`);
+      }
+      if (tpl.category === 'marketing') {
+        const consent = (await tx.query<{ marketing_consent_at: Date | null }>('SELECT marketing_consent_at FROM contacts WHERE id = $1', [c.contact_id])).rows[0]!;
+        if (!consent.marketing_consent_at) {
+          throw Errors.conflict('marketing_consent_required', 'This customer has not agreed to receive marketing messages.');
+        }
+      }
+      await this.checkCanSend(tx, actor, c, body.seenActivity, body.takeover, false);
+      return this.enqueue(tx, actor, c, renderTemplate(tpl, body.params), body.clientMessageId, null,
+        { id: tpl.id, params: body.params, category: tpl.category });
+    });
+    if (prepared.existing !== undefined) return this.message(actor, prepared.existing);
+    await this.sendNow(actor, prepared.jobId);
+    return this.message(actor, prepared.messageId);
+  }
+
+  /** Records that a customer agreed to, or withdrew from, marketing messages, with the agent's evidence. */
+  async setMarketingConsent(actor: TenantActor, contactId: string, input: unknown) {
+    const body = parse(MarketingConsentRequest, input);
+    if (!isUuid(contactId)) throw Errors.notFound('Contact');
+    return withContext(this.deps.db, actor, async (tx) => {
+      const ct = (await tx.query<{ opted_out_at: Date | null }>('SELECT opted_out_at FROM contacts WHERE id = $1 FOR UPDATE', [contactId])).rows[0];
+      if (!ct) throw Errors.notFound('Contact');
+      if (body.granted && ct.opted_out_at) {
+        throw Errors.conflict('contact_opted_out', 'This customer has opted out of all messages. They must send START first.');
+      }
+      await tx.query(`UPDATE contacts SET marketing_consent_at = CASE WHEN $2 THEN now() END, updated_at = now() WHERE id = $1`, [contactId, body.granted]);
+      await tx.query(
+        `INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence, recorded_by) VALUES ($1, $2, $3, 'whatsapp', 'agent_recorded', $4, $5)`,
+        [actor.tenantId, contactId, body.granted ? 'marketing_opt_in' : 'marketing_opt_out', body.evidence, actor.userId]);
+      await AuditService.record(tx, {
+        tenantId: actor.tenantId, actorUserId: actor.userId, action: body.granted ? 'contact.marketing_opt_in' : 'contact.marketing_opt_out',
+        ip: actor.ip, targetType: 'contact', targetId: contactId, metadata: { source: 'agent_recorded' },
+      });
+      return { marketingConsent: body.granted };
+    });
   }
 
   /** "Pause replies / supervisor handling" (owner decision 20 Oct 2026): blocks everyone else's replies until released or expired. */
@@ -506,8 +685,9 @@ export class InboxService {
 
   private async message(actor: TenantActor, id: string) {
     return withContext(this.deps.db, actor, async (tx) => (await tx.query(
-      `SELECT id, conversation_id AS "conversationId", direction, body, status, error_code AS "errorCode", occurred_at AS "occurredAt",
-              attempts, retry_of AS "retryOf"
+      `SELECT id, conversation_id AS "conversationId", direction, body, status, error_code AS "errorCode", failure_kind AS "failureKind",
+              occurred_at AS "occurredAt", attempts, retry_of AS "retryOf", retry_number AS "retryNumber",
+              sent_by_membership_id AS "sentByMembershipId", original_author_membership_id AS "originalAuthorMembershipId"
        FROM messages WHERE id = $1`, [id])).rows[0]);
   }
 }

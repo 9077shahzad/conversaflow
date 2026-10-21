@@ -48,6 +48,13 @@ async function populate(owner: Client, label: string, tenantId: string) {
   }
   const conv = (await owner.get('/v1/conversations?limit=1').expect(200)).body.items[0];
   await owner.post(`/v1/conversations/${conv.id}/notes`, { body: `Note for ${label}` }).expect(201);
+  // Slice 3: a template (business account and template rows) and an inbound photo (a media download job).
+  await owner.post('/v1/templates', { name: `iso_${label}`, language: 'en', category: 'utility', bodyText: 'Hello {{1}}, thanks.', examples: ['A'] }).expect(201);
+  const photo = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: {
+    metadata: { phone_number_id: number }, contacts: [{ wa_id: wa, profile: { name: `Customer ${label}` } }],
+    messages: [{ from: wa, id: `wamid.iso.${label}.photo`, timestamp: String(Math.floor(Date.now() / 1000) + 3), type: 'image', image: { id: `m-${label}`, mime_type: 'image/png' } }] } }] }] });
+  await request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, photo)).send(photo).expect(200);
   // Settings, holidays, branches, teams and team members.
   await owner.post('/v1/settings/holidays', { day: '2026-12-25', name: `Holiday ${label}` }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;

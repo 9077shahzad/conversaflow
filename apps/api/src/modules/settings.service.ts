@@ -15,6 +15,8 @@ export const SettingsRequest = z
     businessHours: z.record(z.enum(DAYS), z.array(interval).max(4)),
     languages: z.array(z.enum(['en', 'ar'])).min(1).max(2),
     slaFirstResponseMinutes: z.number().int().min(1).max(10080).nullable(),
+    /** Target for answering a customer who writes again after an earlier answer; falls back to the first-response target. */
+    slaNextResponseMinutes: z.number().int().min(1).max(10080).nullable(),
     slaResolutionMinutes: z.number().int().min(1).max(43200).nullable(),
   })
   .partial();
@@ -35,7 +37,7 @@ export class SettingsService {
     return withContext(this.deps.db, actor, async (tx) => {
       const s = await tx.query(
         `SELECT business_hours AS "businessHours", languages, sla_first_response_minutes AS "slaFirstResponseMinutes",
-                sla_resolution_minutes AS "slaResolutionMinutes" FROM tenant_settings`);
+                sla_next_response_minutes AS "slaNextResponseMinutes", sla_resolution_minutes AS "slaResolutionMinutes" FROM tenant_settings`);
       const h = await tx.query('SELECT id, day::text, name FROM tenant_holidays ORDER BY day');
       return { ...(s.rows[0] ?? {}), holidays: h.rows };
     });
@@ -52,12 +54,14 @@ export class SettingsService {
            languages = coalesce($2::text[], languages),
            sla_first_response_minutes = CASE WHEN $3::boolean THEN $4::int ELSE sla_first_response_minutes END,
            sla_resolution_minutes = CASE WHEN $5::boolean THEN $6::int ELSE sla_resolution_minutes END,
+           sla_next_response_minutes = CASE WHEN $7::boolean THEN $8::int ELSE sla_next_response_minutes END,
            updated_at = now()`,
         [
           body.businessHours === undefined ? null : JSON.stringify(body.businessHours),
           body.languages ?? null,
           body.slaFirstResponseMinutes !== undefined, body.slaFirstResponseMinutes ?? null,
           body.slaResolutionMinutes !== undefined, body.slaResolutionMinutes ?? null,
+          body.slaNextResponseMinutes !== undefined, body.slaNextResponseMinutes ?? null,
         ]);
       await AuditService.record(tx, {
         tenantId: actor.tenantId, actorUserId: actor.userId, action: 'settings.updated', ip: actor.ip,

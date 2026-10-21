@@ -14,6 +14,7 @@ import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 import {
   AuditController, AuthController, BillingController, ChannelsController, FilesController, HealthController, InboxController,
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
+  TemplatesController, ContactsController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -25,6 +26,8 @@ import { EntitlementsService } from './modules/entitlements.service';
 import { FilesService } from './modules/files.service';
 import { SandboxAdapter } from './modules/channels';
 import { InboxService } from './modules/inbox.service';
+import { TemplatesService } from './modules/templates.service';
+import { HealthService } from './modules/health.service';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
 import { SettingsService } from './modules/settings.service';
@@ -72,12 +75,12 @@ export class AppModule {
       controllers: [
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
-        InboxController, MessagesController,
+        InboxController, MessagesController, TemplatesController, ContactsController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
-        service(AuditService), service(FilesService), service(SettingsService), service(InboxService),
+        service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService),
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

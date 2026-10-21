@@ -13,6 +13,8 @@ import { SettingsService } from '../modules/settings.service';
 import { TenantsService } from '../modules/tenants.service';
 import { InboxService } from '../modules/inbox.service';
 import type { SandboxAdapter } from '../modules/channels';
+import { TemplatesService } from '../modules/templates.service';
+import { MediaFetcher } from '../modules/media';
 import { Notifier } from '../worker/notifier';
 
 const PASSWORD = 'Demo-Only-Password-2026';
@@ -47,7 +49,7 @@ async function main() {
   const actor = (await loadActor(deps.db, tenant.id, owner.userId))!;
   await new SettingsService(deps).updateSettings(actor, {
     businessHours: { sun: [['08:00', '17:00']], mon: [['08:00', '17:00']], tue: [['08:00', '17:00']], wed: [['08:00', '17:00']], thu: [['08:00', '13:00']] },
-    languages: ['ar', 'en'], slaFirstResponseMinutes: 15, slaResolutionMinutes: 480,
+    languages: ['ar', 'en'], slaFirstResponseMinutes: 15, slaNextResponseMinutes: 60, slaResolutionMinutes: 480,
   });
   await new SettingsService(deps).addHoliday(actor, { day: '2026-12-02', name: 'UAE National Day / اليوم الوطني' });
   // Invitations need an Owner with MFA in the API; the seed acts at service level with the same checks on seats.
@@ -94,6 +96,34 @@ async function main() {
     await inbox.pause(ownerActor, c.id, { reason: 'Complaint — I am calling the customer myself', minutes: 120 });
     await say('966500000104', 'Faisal (Demo)', 'STOP 🛑', 300);
     await say('966500000105', 'Huda (Demo)', 'Do you clean water tanks?', 26 * 3600);
+
+    // Templates: two approved (the review decision arrives as a sandbox webhook), one still in review.
+    const templates = new TemplatesService(deps);
+    const review = (providerTemplateId: string, event: string) => inbox.ingest('sandbox', {
+      object: 'whatsapp_business_account',
+      entry: [{ id: `sbx-${number}`, time: now, changes: [{ field: 'message_template_status_update',
+        value: { event, message_template_id: Number(providerTemplateId), message_template_name: 'demo', message_template_language: 'en', reason: null } }] }],
+    });
+    for (const [name, language, category, bodyText, examples, approve] of [
+      ['visit_reminder', 'en', 'utility', 'Hello {{1}}, this is a reminder of your visit on {{2}}. Reply here if you need to change it.', ['Huda', 'Sunday 10:00'], true],
+      ['visit_reminder_ar', 'ar', 'utility', 'مرحبًا {{1}}، نذكّرك بموعد الزيارة يوم {{2}}. يمكنك الرد هنا لتغيير الموعد.', ['هدى', 'الأحد 10:00'], true],
+      ['spring_offer', 'en', 'marketing', 'Hi {{1}}, our spring AC service offer is open this week. Reply YES to book.', ['Huda'], false],
+    ] as const) {
+      const tpl = await templates.create(ownerActor, { name, language, category, bodyText, examples: [...examples] });
+      if (approve) await review(tpl.providerTemplateId, 'APPROVED');
+    }
+
+    // A customer photo, downloaded and checked for malware like any inbound media.
+    const photo = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+    sandbox.media.set('demo-photo-1', { data: photo, contentType: 'image/png' });
+    await inbox.ingest('sandbox', {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: number },
+        contacts: [{ wa_id: '966500000106', profile: { name: 'Layla (Demo)' } }],
+        messages: [{ from: '966500000106', id: `wamid.demo.${suffix}.photo`, timestamp: String(now - 120), type: 'image',
+          image: { id: 'demo-photo-1', mime_type: 'image/png', caption: 'Water under the kitchen sink' } }] } }] }],
+    });
+    await new MediaFetcher(deps.db, deps.channels, deps.storage, deps.scanner, config.MAX_UPLOAD_BYTES).dispatchDue();
   }
 
   console.log(JSON.stringify({ ownerEmail, password: PASSWORD, tenantId: tenant.id }));

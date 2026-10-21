@@ -35,8 +35,8 @@ const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
  */
 const COMPANY_TABLE_READERS: Record<string, string[]> = {
   cf_auth: ['invitations'],
-  cf_channel: ['channel_connections'],
-  cf_dispatch: ['send_jobs'],
+  cf_channel: ['channel_connections', 'provider_accounts'],
+  cf_dispatch: ['send_jobs', 'media_jobs'],
   cf_identity: ['memberships'],
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
@@ -86,7 +86,9 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'plan_entitlement_frozen()': '43b3204094b27f3fd863f73862cde1e0',
   // cf_channel and cf_dispatch: webhook routing and send-job leasing (migrations 0022, 0024)
   'channel_route(text,text)': '1df6e4008edea1274471be11593aa226',
+  'account_route(text,text)': '19be2ce700975b7c99cf8520ccb99891',
   'dispatch_claim(integer,integer)': '69cd1d0ac8475917c80b9676b32d79b4',
+  'media_claim(integer,integer)': '60252793661bcad14021c70cf1292897',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
@@ -110,6 +112,17 @@ const REVIEWED_APP_POLICIES: Record<string, string> = {
 };
 const STANDARD_COMPANY_RULE = '(tenant_id = app_tenant_id())';
 /**
+ * Tables without a tenant_id column, reviewed as shared or identity tables (rule 8). Any other table without that
+ * column is flagged, so company data copied into a new untagged table (CREATE TABLE ... AS SELECT) cannot hide from
+ * the company-table rules (slice 2 recheck note, identifier S2-N2).
+ */
+const SHARED_TABLES = [
+  'auth_email_requests', 'auth_keys', 'auth_tokens', 'feature_flags', 'mfa_activation_codes', 'mfa_attempts', 'mfa_factors',
+  'mfa_recovery_codes', 'mfa_reset_requests', 'permissions', 'plan_entitlements', 'plan_versions', 'plans', 'platform_audit_events',
+  'platform_staff', 'provider_allowances', 'provider_rates', 'retention_policies', 'schema_migrations', 'sessions', 'tenants',
+  'trial_caps', 'trial_policy', 'user_credentials', 'users',
+];
+/**
  * Non-built-in functions called by any row-security policy, pinned to md5(pg_get_functiondef || owner). Replacing
  * app_tenant_id() would change what every company policy means without changing its text (review S2d).
  */
@@ -117,11 +130,15 @@ const REVIEWED_POLICY_FUNCTIONS: Record<string, string> = {
   'app_tenant_id()': 'a95dafefef52596f5626256da15e70a6',
   'app_user_id()': '105e6a33eb37c1cb5d012bcaa8223a86',
 };
-/** The only columns cf_channel may read (migration 0022). */
-const CHANNEL_ROUTING_COLUMNS = ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'];
-/** The only function cf_channel may own, pinned to the md5 of its reviewed definition. */
+/** The only columns cf_channel may read: numbers (migration 0022) and business accounts (migration 0026). */
+const CHANNEL_ROUTING_COLUMNS: Record<string, string[]> = {
+  channel_connections: ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'],
+  provider_accounts: ['id', 'tenant_id', 'provider', 'account_id', 'status'],
+};
+/** The only functions cf_channel may own, pinned to the md5 of their reviewed definitions. */
 const CHANNEL_FUNCTIONS: Record<string, string> = {
   'channel_route(text,text)': '36b3b2385d8d3b07fd294ab6aa8033b7',
+  'account_route(text,text)': '771c221d8b88a73a47dee069b8430bd5',
 };
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
@@ -318,15 +335,18 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       SELECT c.oid::regclass::text AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
         AND (has_table_privilege('cf_channel', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
-             OR (c.relname <> 'channel_connections' AND has_any_column_privilege('cf_channel', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')))`);
-    for (const r of chanTables.rows) problems.push(`cf_channel has privileges on ${r.t}; it may only read the routing columns of channel_connections`);
-    const chanCols = await client.query<{ col: string }>(`
-      SELECT a.attname AS col FROM pg_attribute a
-      WHERE a.attrelid = 'channel_connections'::regclass AND a.attnum > 0 AND NOT a.attisdropped
-        AND (has_column_privilege('cf_channel', a.attrelid, a.attnum, 'INSERT, UPDATE, REFERENCES')
-             OR (NOT (a.attname = ANY($1::name[])) AND has_column_privilege('cf_channel', a.attrelid, a.attnum, 'SELECT')))`,
-      [CHANNEL_ROUTING_COLUMNS]);
-    for (const r of chanCols.rows) problems.push(`cf_channel has more than read access on channel_connections.${r.col}`);
+             OR (NOT (c.relname = ANY($1::name[])) AND has_any_column_privilege('cf_channel', c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')))`,
+      [Object.keys(CHANNEL_ROUTING_COLUMNS)]);
+    for (const r of chanTables.rows) problems.push(`cf_channel has privileges on ${r.t}; it may only read the routing columns of channel_connections and provider_accounts`);
+    for (const [table, cols] of Object.entries(CHANNEL_ROUTING_COLUMNS)) {
+      const chanCols = await client.query<{ col: string }>(`
+        SELECT a.attname AS col FROM pg_attribute a
+        WHERE a.attrelid = to_regclass($2) AND a.attnum > 0 AND NOT a.attisdropped
+          AND (has_column_privilege('cf_channel', a.attrelid, a.attnum, 'INSERT, UPDATE, REFERENCES')
+               OR (NOT (a.attname = ANY($1::name[])) AND has_column_privilege('cf_channel', a.attrelid, a.attnum, 'SELECT')))`,
+        [cols, `public.${table}`]);
+      for (const r of chanCols.rows) problems.push(`cf_channel has more than read access on ${table}.${r.col}`);
+    }
     const chanOwned = await client.query<{ what: string; ok: boolean }>(`
       SELECT p.oid::regprocedure::text AS what,
              coalesce($1::jsonb ->> (p.oid::regprocedure::text), '') = md5(pg_get_functiondef(p.oid)) AS ok
@@ -334,7 +354,7 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       UNION ALL
       SELECT c.oid::regclass::text, false FROM pg_class c WHERE pg_get_userbyid(c.relowner) = 'cf_channel'`,
       [JSON.stringify(CHANNEL_FUNCTIONS)]);
-    for (const o of chanOwned.rows) if (!o.ok) problems.push(`cf_channel owns ${o.what}, which is not the reviewed routing function`);
+    for (const o of chanOwned.rows) if (!o.ok) problems.push(`cf_channel owns ${o.what}, which is not a reviewed routing function`);
     const chanMember = await client.query(
       `SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'cf_channel'`);
     if ((chanMember.rowCount ?? 0) > 0) problems.push('cf_channel is a member of another role; it must not inherit privileges');
@@ -410,6 +430,25 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
       FROM pg_policy p JOIN pg_depend d ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_operator'::regclass
       JOIN pg_operator o ON o.oid = d.refobjid WHERE o.oprnamespace <> 'pg_catalog'::regnamespace`);
     for (const o of policyOps.rows) problems.push(`operator ${o.op} used by a row-security policy is not built in; not allowed`);
+    // General rule 7 (slice 2 recheck note, identifier S2-N1): no role-level or database-level default for the
+    // settings that carry the company and user context (app.*). The API sets them at the start of every transaction,
+    // but a default would apply to any connection that forgot to.
+    const contextDefaults = await client.query<{ who: string; setting: string }>(`
+      SELECT coalesce(r.rolname, '(all roles)') || ' in ' || coalesce(d.datname, '(all databases)') AS who, cfg AS setting
+      FROM pg_db_role_setting s LEFT JOIN pg_roles r ON r.oid = s.setrole LEFT JOIN pg_database d ON d.oid = s.setdatabase
+      CROSS JOIN LATERAL unnest(s.setconfig) AS cfg
+      WHERE cfg ILIKE 'app.%'`);
+    for (const x of contextDefaults.rows) problems.push(`a default for ${x.setting.split('=')[0]} is set for ${x.who}; company context settings must never have defaults`);
+
+    // General rule 8 (S2-N2): every table without tenant_id must be a reviewed shared table.
+    const untagged = await client.query<{ t: string }>(`
+      SELECT c.relname AS t FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%'
+        AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+        AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)
+        AND NOT (n.nspname = 'public' AND c.relname = ANY($1::name[]))`, [SHARED_TABLES]);
+    for (const x of untagged.rows) problems.push(`table ${x.t} has no tenant_id and is not on the reviewed list of shared tables`);
+
     // General rule 4: no view or materialised view may be built over a company table (views run with their owner's
     // rights and would bypass company row security for whoever can read the view).
     const companyViews = await client.query<{ v: string; t: string }>(`

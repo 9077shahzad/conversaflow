@@ -108,8 +108,26 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByRole('button', { name: /Khalid \(Demo\)/ })).toBeVisible();
       await checkPage(page, locale, 'inbox', view);
       await page.getByRole('button', { name: /Emma \(Demo\)/ }).click();
-      await expect(page.getByText(locale === 'ar' ? 'لم تُرسل هذه الرسالة.' : 'This message was not sent.')).toBeVisible();
+      await expect(page.getByText(locale === 'ar' ? 'لم تُرسل: رفضها واتساب.' : 'Not sent: WhatsApp refused it.')).toBeVisible();
       await checkPage(page, locale, 'inbox-conversation', view);
+      // Slice 3: a customer photo, checked for malware, and the template composer.
+      await page.goto(`/${locale}/app/inbox`);
+      await page.getByRole('button', { name: /Layla \(Demo\)/ }).click();
+      await expect(page.getByText(locale === 'ar' ? 'تم الفحص: لا يوجد فيروس' : 'Checked: no virus found')).toBeVisible();
+      await checkPage(page, locale, 'inbox-media', view);
+      await page.getByRole('tab', { name: locale === 'ar' ? 'قالب' : 'Template' }).click();
+      await expect(page.getByLabel(locale === 'ar' ? 'قالب معتمد' : 'Approved template')).toBeVisible();
+      await checkPage(page, locale, 'inbox-template', view);
+
+      await page.goto(`/${locale}/app/templates`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'قوالب الرسائل' : 'Message templates');
+      await expect(page.getByText('visit_reminder', { exact: true })).toBeVisible();
+      await checkPage(page, locale, 'templates', view);
+
+      await page.goto(`/${locale}/app/channel-health`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'حالة القناة' : 'Channel health');
+      await expect(page.getByText(locale === 'ar' ? 'رسائل تحتاج إلى متابعة' : 'Messages needing a person')).toBeVisible();
+      await checkPage(page, locale, 'channel-health', view);
       await context.close();
     });
   }
@@ -246,8 +264,29 @@ test.describe('inbox behaviour (desktop)', () => {
     await expect(page.getByRole('button', { name: 'Release pause' })).toBeVisible();
 
     await page.getByRole('button', { name: /Emma \(Demo\)/ }).click();
-    await expect(page.getByText('This message was not sent.')).toBeVisible();
+    await expect(page.getByText('Not sent: WhatsApp refused it.')).toBeVisible();
+    await expect(page.getByText('Confirmed: the customer did not receive this message.')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? null)).toEqual([]);
+    await context.close();
+  });
+
+  test('outside the 24-hour window an approved template is sent, with a preview of what the customer will read', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: VIEWPORTS.desktop, locale: 'en-GB' });
+    await context.addInitScript(RECORD_CSP);
+    const page = await context.newPage();
+    await signIn(page, 'en');
+    await page.goto('/en/app/inbox');
+    await page.getByRole('button', { name: /Huda \(Demo\)/ }).click();
+    // The window has closed, so the composer opens on templates.
+    await expect(page.getByRole('tab', { name: 'Template' })).toHaveAttribute('aria-selected', 'true');
+    await page.getByLabel('Approved template').selectOption({ label: 'visit_reminder · en · utility' });
+    await page.getByLabel('Value 1').fill('Huda');
+    await page.getByLabel('Value 2').fill('Sunday 10:00');
+    await expect(page.getByText('Hello Huda, this is a reminder of your visit on Sunday 10:00. Reply here if you need to change it.')).toHaveCount(1);
+    await page.getByRole('button', { name: 'Send template' }).click();
+    await expect(page.getByText('Template · utility')).toBeVisible();
+    await expect(page.getByText(/· Sent$/).first()).toBeVisible();
     expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? null)).toEqual([]);
     await context.close();
   });
@@ -259,6 +298,9 @@ test.describe('inbox behaviour (desktop)', () => {
     await page.goto('/ar/app/inbox');
     await page.getByRole('button', { name: /Huda \(Demo\)/ }).click();
     await expect(page.getByText(/مرّ أكثر من 24 ساعة على آخر رسالة من العميل/)).toBeVisible();
+    // The composer opens on templates once the window has closed; a free-form reply stays disabled.
+    await expect(page.getByRole('tab', { name: 'قالب' })).toHaveAttribute('aria-selected', 'true');
+    await page.getByRole('tab', { name: 'رد', exact: true }).click();
     await expect(page.getByLabel('ردّك')).toBeDisabled();
     await page.getByRole('button', { name: /Faisal \(Demo\)/ }).click();
     await expect(page.getByText(/ألغى هذا العميل اشتراكه في الرسائل/)).toBeVisible();

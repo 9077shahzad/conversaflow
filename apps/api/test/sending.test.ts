@@ -10,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import pg from 'pg';
 import { withContext } from '@conversaflow/database';
 import { checkIsolation } from '@conversaflow/database/dist/check-rls';
 import { consentKeyword, signBody, type SandboxAdapter } from '../src/modules/channels';
@@ -321,7 +322,8 @@ describe('verified number ownership before any live connection', () => {
   it('the business role cannot create a live WhatsApp connection, through the API or directly', async () => {
     await owner.post('/v1/channels', { provider: 'whatsapp_cloud', providerNumberId: 'live123', displayPhone: '+971500000001', label: 'Live' }).expect(409);
     await expect(app((tx) => tx.query(
-      `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label) VALUES ($1, 'whatsapp_cloud', 'live124', '+97150', 'Live')`,
+      `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, account_ref)
+       VALUES ($1, 'whatsapp_cloud', 'live124', '+97150', 'Live', (SELECT id FROM provider_accounts LIMIT 1))`,
       [tenant]))).rejects.toMatchObject({ code: '23514' });
     await expect(app((tx) => tx.query(
       `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, ownership_verified_at, ownership_method)
@@ -440,6 +442,41 @@ describe('strengthened CI guard (open Low finding)', () => {
       ]));
     } finally {
       await reset(['DROP POLICY IF EXISTS zz_shadowed ON contacts', 'DROP SCHEMA IF EXISTS zz_shadow CASCADE']);
+    }
+    expect(await guard()).toEqual([]);
+  });
+
+  it('note S2-N1: the migration owner cannot set a default for the company context; a superuser default is flagged', async () => {
+    const db = (await t.ownerDb.query<{ d: string }>('SELECT current_database() AS d')).rows[0]!.d;
+    // Not reachable through a migration: PostgreSQL refuses the owner.
+    await expect(t.ownerDb.query(`ALTER DATABASE "${db}" SET app.tenant_id = '00000000-0000-0000-0000-000000000000'`)).rejects.toMatchObject({ code: '42501' });
+    await expect(t.ownerDb.query(`ALTER ROLE cf_app SET app.tenant_id = '00000000-0000-0000-0000-000000000000'`)).rejects.toMatchObject({ code: '42501' });
+    // Defence in depth for a superuser-applied setting (local harness only; skipped where no superuser URL is given).
+    const superUrl = process.env.DATABASE_SUPERUSER_URL;
+    if (!superUrl) return;
+    const su = new pg.Client({ connectionString: superUrl });
+    await su.connect();
+    try {
+      await su.query(`ALTER ROLE cf_app IN DATABASE "${db}" SET app.tenant_id = '00000000-0000-0000-0000-000000000000'`);
+      expect(await guard()).toContain(`a default for app.tenant_id is set for cf_app in ${db}; company context settings must never have defaults`);
+    } finally {
+      await su.query(`ALTER ROLE cf_app IN DATABASE "${db}" RESET app.tenant_id`);
+      await su.end();
+    }
+    expect(await guard()).toEqual([]);
+  });
+
+  it('note S2-N2: company data copied into a new table without tenant_id is flagged', async () => {
+    try {
+      await t.ownerDb.query('CREATE TABLE zz_copy AS SELECT id, body FROM messages');
+      await t.ownerDb.query('CREATE SCHEMA zz_side');
+      await t.ownerDb.query('CREATE TABLE zz_side.notes_copy AS SELECT id, body FROM internal_notes');
+      expect(await guard()).toEqual(expect.arrayContaining([
+        'table zz_copy has no tenant_id and is not on the reviewed list of shared tables',
+        'table notes_copy has no tenant_id and is not on the reviewed list of shared tables',
+      ]));
+    } finally {
+      await reset(['DROP TABLE IF EXISTS zz_copy', 'DROP SCHEMA IF EXISTS zz_side CASCADE']);
     }
     expect(await guard()).toEqual([]);
   });

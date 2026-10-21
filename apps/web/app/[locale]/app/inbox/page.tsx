@@ -12,16 +12,25 @@ interface ListItem {
   id: string; status: string; version: number; assignedMembershipId: string | null; lastMessageAt: string | null;
   windowOpen: boolean; contactName: string | null; optedOut: boolean; lastMessagePreview: string | null;
   lastMessageDirection: 'in' | 'out' | null; paused: boolean; needsAttention: boolean;
+  slaKind: string | null; slaDueAt: string | null;
 }
 interface Message {
   id: string; direction: 'in' | 'out'; kind: string; body: string | null; providerType: string | null; status: string;
   errorCode: string | null; occurredAt: string; sentByMembershipId: string | null; fromAd: boolean; retryOf: string | null; retriedAs: string | null;
+  /** Set only on a confirmed failure; null on an uncertain delivery. */
+  failureKind: 'blocked' | 'rejected' | 'exhausted' | 'provider_reported' | null;
+  originalAuthorMembershipId: string | null; retryNumber: number; retryable: boolean;
+  templateId: string | null; pricingCategory: string | null;
+  mediaType: string | null; mediaStatus: string | null; fileId: string | null; mediaFilename: string | null;
 }
+interface Template { id: string; name: string; language: string; category: string; status: string; paramCount: number;
+  headerText: string | null; bodyText: string; footerText: string | null }
 interface Note { id: string; body: string; authorMembershipId: string; createdAt: string }
 interface Event { id: string; kind: string; actorMembershipId: string | null; data: Record<string, unknown>; createdAt: string }
 interface Conversation {
   id: string; status: string; version: number; assignedMembershipId: string | null; activitySeq: number; windowOpen: boolean;
-  contact: { id: string; displayName: string | null; optedOut: boolean; whatsapp: string | null };
+  contact: { id: string; displayName: string | null; optedOut: boolean; whatsapp: string | null; marketingConsentAt: string | null };
+  sla: { kind: string; startedAt: string; dueAt: string } | null;
   messages: Message[]; notes: Note[]; events: Event[]; people: Record<string, string>;
   pause: { active: boolean; reason?: string; pausedByMembershipId?: string; until?: string | null };
 }
@@ -97,6 +106,9 @@ function Inbox() {
                       <span className="mt-0.5 block truncate text-sm text-slate-700" dir="auto">{it.lastMessagePreview ?? ''}</span>
                       <span className="mt-1.5 flex flex-wrap gap-1.5">
                         {it.needsAttention && <Badge tone="red">{d.badges.attention}</Badge>}
+                        {it.slaDueAt && (new Date(it.slaDueAt).getTime() < Date.now()
+                          ? <Badge tone="red">{d.slaBadgeOverdue}</Badge>
+                          : <Badge tone="amber">{d.slaBadgeDue} {time(it.slaDueAt, locale)}</Badge>)}
                         {it.paused && <Badge tone="amber">{d.badges.paused}</Badge>}
                         {it.optedOut && <Badge tone="slate">{d.badges.optedOut}</Badge>}
                         {!it.windowOpen && <Badge tone="slate">{d.badges.windowClosed}</Badge>}
@@ -157,6 +169,13 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
             <span className="sr-only">{d.phoneLabel}: </span><span dir="ltr">{conv.contact.whatsapp ? `+${conv.contact.whatsapp}` : ''}</span>
             {' · '}{conv.assignedMembershipId ? fill(d.assignedTo, { name: name(conv.assignedMembershipId) }) : d.unassigned}
           </p>
+          {conv.sla && (
+            <p className={`text-sm font-medium ${new Date(conv.sla.dueAt).getTime() < Date.now() ? 'text-red-700' : 'text-amber-800'}`}>
+              {fill(new Date(conv.sla.dueAt).getTime() < Date.now() ? d.slaOverdue : d.slaDue, { time: time(conv.sla.dueAt, locale) })}
+              {' · '}{d.slaKinds[conv.sla.kind] ?? conv.sla.kind}
+            </p>
+          )}
+          <MarketingConsent conv={conv} locale={locale} canEdit={can('contacts.write')} onChanged={onChanged} />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {!conv.assignedMembershipId && <button type="button" disabled={busy} onClick={() => me && assign(me)} className="btn-secondary">{d.claim}</button>}
@@ -213,11 +232,16 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
             <li key={m.id} className={`flex ${out ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] rounded-2xl px-3.5 py-2 ${out ? 'bg-teal-soft text-slate-900' : 'bg-slate-100 text-slate-900'}`}>
                 {m.fromAd && <p className="mb-1 text-xs font-semibold text-teal">{d.fromAd}</p>}
-                <p className="whitespace-pre-wrap break-words" dir="auto">{m.body ?? `[${m.providerType ?? m.kind}]`}</p>
+                {m.kind === 'template' && <p className="mb-1 text-xs font-semibold text-teal">{fill(d.templateBadge, { category: d.categories[m.pricingCategory ?? ''] ?? '' })}</p>}
+                {m.kind === 'media' && <MediaItem m={m} locale={locale} canOpen={can('files.read')} />}
+                {(m.body || m.kind !== 'media') && <p className="whitespace-pre-wrap break-words" dir="auto">{m.body ?? `[${m.providerType ?? m.kind}]`}</p>}
                 <p className="mt-1 text-xs text-slate-600">
                   <time dateTime={m.occurredAt}>{time(m.occurredAt, locale)}</time>
                   {out && <> · {name(m.sentByMembershipId)} · <span className={m.status === 'failed' || m.status === 'uncertain' ? 'font-semibold text-red-700' : ''}>{d.statuses[m.status] ?? m.status}</span></>}
                 </p>
+                {out && m.retryOf && m.originalAuthorMembershipId && m.sentByMembershipId !== m.originalAuthorMembershipId && (
+                  <p className="text-xs text-slate-600">{fill(d.retryOfBy, { actor: name(m.sentByMembershipId), author: name(m.originalAuthorMembershipId) })}</p>
+                )}
                 {out && (m.status === 'failed' || m.status === 'uncertain') && (
                   <DeliveryProblem m={m} conv={conv} locale={locale} busy={busy} blocked={pausedForMe || conv.contact.optedOut || !conv.windowOpen || assignedOther}
                     onRetry={(confirm) => act(() => api(`/v1/messages/${m.id}/retry`, { method: 'POST', body: { seenActivity: conv.activitySeq, clientMessageId: newKey(), confirmPossibleDuplicate: confirm } }))} />
@@ -229,9 +253,9 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
       </ol>
 
       {error && <p role="alert" className="mx-4 mb-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p>}
-      <Composer conv={conv} locale={locale} canTakeOver={can('inbox.assign')} blockedReason={
+      <Composer conv={conv} locale={locale} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} blockedReason={
         pausedForMe ? d.badges.paused : conv.contact.optedOut ? d.badges.optedOut : !conv.windowOpen ? d.badges.windowClosed : null
-      } assignedOther={assignedOther} onDone={onChanged} />
+      } templateBlocked={pausedForMe || conv.contact.optedOut} assignedOther={assignedOther} onDone={onChanged} />
     </div>
   );
 }
@@ -242,42 +266,56 @@ function DeliveryProblem({ m, conv, locale, busy, blocked, onRetry }: {
   const d = t(locale).inbox;
   const [confirming, setConfirming] = useState(false);
   const reason = m.errorCode ? (d.reasons[m.errorCode.split(':').pop()!] ?? d.reasons[m.errorCode] ?? fill(d.reasonCode, { code: m.errorCode })) : null;
+  const uncertain = m.status === 'uncertain';
   void conv;
   return (
-    <div role="status" className="mt-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">
-      <p className="font-semibold">{m.status === 'uncertain' ? d.uncertainTitle : d.failedTitle}</p>
+    <div role="status" className={`mt-2 rounded-lg border px-3 py-2 text-sm ${uncertain ? 'border-amber-400 bg-amber-50 text-amber-950' : 'border-red-300 bg-red-50 text-red-900'}`}>
+      <p className="font-semibold">{uncertain ? d.uncertainTitle : (m.failureKind && d.failedTitles[m.failureKind]) || d.failedTitle}</p>
+      {!uncertain && <p>{d.failedConfirmed}</p>}
       {reason && <p>{fill(d.failedReason, { reason })}</p>}
-      {m.status === 'uncertain' && <p>{d.uncertainHelp}</p>}
-      {m.retriedAs ? <p className="mt-1 font-medium">{d.retried}</p> : !blocked && (
-        m.status === 'uncertain' && !confirming
-          ? <button type="button" className="btn-secondary mt-2" disabled={busy} onClick={() => setConfirming(true)}>{d.retry}</button>
-          : <button type="button" className="btn-danger mt-2" disabled={busy} onClick={() => onRetry(m.status === 'uncertain')}>
-              {m.status === 'uncertain' ? d.retryAnyway : d.retry}
-            </button>
-      )}
+      {uncertain && <p>{d.uncertainHelp}</p>}
+      {m.retriedAs ? <p className="mt-1 font-medium">{d.retried}</p>
+        : !m.retryable ? <p className="mt-1">{d.retryLimit}</p>
+        : !blocked && (
+          uncertain && !confirming
+            ? <button type="button" className="btn-secondary mt-2" disabled={busy} onClick={() => setConfirming(true)}>{d.retry}</button>
+            : <button type="button" className="btn-danger mt-2" disabled={busy} onClick={() => onRetry(uncertain)}>
+                {uncertain ? d.retryAnyway : d.retry}
+              </button>
+        )}
     </div>
   );
 }
 
-function Composer({ conv, locale, canTakeOver, blockedReason, assignedOther, onDone }: {
-  conv: Conversation; locale: Locale; canTakeOver: boolean; blockedReason: string | null; assignedOther: boolean; onDone: () => Promise<void>;
+function Composer({ conv, locale, canTakeOver, canAttach, blockedReason, templateBlocked, assignedOther, onDone }: {
+  conv: Conversation; locale: Locale; canTakeOver: boolean; canAttach: boolean; blockedReason: string | null; templateBlocked: boolean;
+  assignedOther: boolean; onDone: () => Promise<void>;
 }) {
   const d = t(locale).inbox;
-  const [mode, setMode] = useState<'reply' | 'note'>('reply');
+  const [mode, setMode] = useState<'reply' | 'note' | 'template'>(conv.windowOpen ? 'reply' : 'template');
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ code: string; message: string } | null>(null);
+  const [file, setFile] = useState<{ id: string; name: string } | null>(null);
+  const [templates, setTemplates] = useState<Template[] | null>(null);
+  const [templateId, setTemplateId] = useState('');
+  const [values, setValues] = useState<string[]>([]);
   // One key per draft: a retried request (double click, network blip) can never send twice.
   const key = useRef(newKey());
   const replyBlocked = mode === 'reply' && !!blockedReason;
+  const tpl = templates?.find((x) => x.id === templateId) ?? null;
 
-  async function submit(takeover = false) {
-    if (!text.trim()) return;
+  useEffect(() => {
+    if (mode === 'template' && templates === null) {
+      api<Template[]>('/v1/templates').then((list) => setTemplates(list.filter((x) => x.status === 'approved'))).catch(() => setTemplates([]));
+    }
+  }, [mode, templates]);
+
+  async function run(fn: () => Promise<unknown>) {
     setBusy(true); setProblem(null);
     try {
-      if (mode === 'note') await api(`/v1/conversations/${conv.id}/notes`, { method: 'POST', body: { body: text } });
-      else await api(`/v1/conversations/${conv.id}/reply`, { method: 'POST', body: { text, seenActivity: conv.activitySeq, clientMessageId: key.current, takeover } });
-      setText(''); key.current = newKey();
+      await fn();
+      setText(''); setFile(null); setValues((v) => v.map(() => '')); key.current = newKey();
     } catch (e) {
       const code = e instanceof ApiError ? e.code : 'error';
       setProblem({ code, message: code === 'conversation_changed' ? d.changed : explain(e, d) });
@@ -288,20 +326,101 @@ function Composer({ conv, locale, canTakeOver, blockedReason, assignedOther, onD
     }
   }
 
+  function submit(takeover = false) {
+    if (mode === 'template') {
+      if (!tpl) return;
+      return run(() => api(`/v1/conversations/${conv.id}/template`, { method: 'POST',
+        body: { templateId: tpl.id, params: values.slice(0, tpl.paramCount), seenActivity: conv.activitySeq, clientMessageId: key.current, takeover } }));
+    }
+    if (!text.trim() && !(mode === 'reply' && file)) return;
+    if (mode === 'note') return run(() => api(`/v1/conversations/${conv.id}/notes`, { method: 'POST', body: { body: text } }));
+    return run(() => api(`/v1/conversations/${conv.id}/reply`, { method: 'POST',
+      body: { text, fileId: file?.id, seenActivity: conv.activitySeq, clientMessageId: key.current, takeover } }));
+  }
+
+  async function attach(f: File) {
+    setBusy(true); setProblem(null);
+    try {
+      const form = new FormData();
+      form.append('file', f);
+      const res = await fetch('/v1/files', { method: 'POST', body: form, credentials: 'same-origin', headers: { 'X-Requested-With': 'conversaflow' } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new ApiError(res.status, data?.error?.code ?? 'unknown', data?.error?.message ?? '');
+      if (data.status !== 'available') throw new ApiError(400, 'not_found_file', '');
+      setFile({ id: data.id, name: data.name });
+    } catch (e) {
+      setProblem({ code: 'attach', message: explain(e, d) });
+    } finally { setBusy(false); }
+  }
+
+  const preview = tpl ? [tpl.headerText, tpl.bodyText.replace(/\{\{(\d+)\}\}/g, (_, n: string) => values[Number(n) - 1] || `{{${n}}}`), tpl.footerText].filter(Boolean).join('\n\n') : '';
+  const canSendTemplate = !!tpl && values.slice(0, tpl.paramCount).filter((v) => v.trim()).length === tpl.paramCount && !templateBlocked;
+
   return (
     <form className="border-t border-slate-200 p-3" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
-      <div role="tablist" aria-label={d.replyTab} className="mb-2 flex gap-2">
-        {(['reply', 'note'] as const).map((m) => (
-          <button key={m} type="button" role="tab" aria-selected={mode === m} onClick={() => setMode(m)}
+      <div role="tablist" aria-label={d.replyTab} className="mb-2 flex flex-wrap gap-2">
+        {(['reply', 'template', 'note'] as const).map((m) => (
+          <button key={m} type="button" role="tab" aria-selected={mode === m} onClick={() => { setMode(m); setProblem(null); }}
             className={`rounded-full px-3 py-1 text-sm font-medium ${mode === m ? (m === 'note' ? 'bg-amber-100 text-amber-900' : 'bg-navy text-white') : 'text-slate-700 hover:bg-slate-100'}`}>
-            {m === 'reply' ? d.replyTab : d.noteTab}
+            {m === 'reply' ? d.replyTab : m === 'note' ? d.noteTab : d.templateTab}
           </button>
         ))}
       </div>
-      <label htmlFor={`compose-${conv.id}`} className="sr-only">{mode === 'reply' ? d.replyLabel : d.noteLabel}</label>
-      <textarea id={`compose-${conv.id}`} value={text} onChange={(e) => setText(e.target.value)} rows={3} dir="auto" maxLength={4000}
-        placeholder={mode === 'reply' ? d.replyLabel : d.noteLabel} disabled={replyBlocked}
-        className={`w-full resize-y rounded-lg border px-3 py-2 text-base ${mode === 'note' ? 'border-amber-300 bg-amber-50' : 'border-slate-300'} disabled:bg-slate-100`} />
+      {mode === 'template' ? (
+        <div className="space-y-2">
+          <p className="text-sm text-slate-700">{d.templateHelp}</p>
+          {templates && templates.length === 0 ? <p className="text-sm text-slate-700">{d.templateNone}</p> : (
+            <>
+              <label className="block text-sm font-medium text-slate-900" htmlFor={`tpl-${conv.id}`}>{d.templateLabel}</label>
+              <select id={`tpl-${conv.id}`} value={templateId} disabled={busy || templateBlocked}
+                onChange={(e) => { setTemplateId(e.target.value); const n = templates?.find((x) => x.id === e.target.value)?.paramCount ?? 0; setValues(Array.from({ length: n }, () => '')); }}
+                className="w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-base">
+                <option value="">{d.templateChoose}</option>
+                {(templates ?? []).map((x) => <option key={x.id} value={x.id}>{x.name} · {x.language} · {d.categories[x.category] ?? x.category}</option>)}
+              </select>
+              {tpl && Array.from({ length: tpl.paramCount }, (_, i) => (
+                <div key={i}>
+                  <label className="block text-sm font-medium text-slate-900" htmlFor={`tpl-${conv.id}-${i}`}>{fill(d.templateValue, { n: String(i + 1) })}</label>
+                  <input id={`tpl-${conv.id}-${i}`} value={values[i] ?? ''} maxLength={200} dir="auto" disabled={busy || templateBlocked}
+                    onChange={(e) => setValues((v) => v.map((x, j) => (j === i ? e.target.value.replace(/[\n\t]/g, ' ') : x)))}
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-base" />
+                </div>
+              ))}
+              {tpl && (
+                <div className="rounded-lg bg-slate-50 px-3 py-2">
+                  <p className="text-xs font-semibold text-slate-700">{d.templatePreview}</p>
+                  <p className="whitespace-pre-wrap break-words text-sm text-slate-900" dir="auto">{preview}</p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      ) : (
+        <>
+          <label htmlFor={`compose-${conv.id}`} className="sr-only">{mode === 'reply' ? d.replyLabel : d.noteLabel}</label>
+          <textarea id={`compose-${conv.id}`} value={text} onChange={(e) => setText(e.target.value)} rows={3} dir="auto" maxLength={4000}
+            placeholder={mode === 'reply' ? d.replyLabel : d.noteLabel} disabled={replyBlocked}
+            className={`w-full resize-y rounded-lg border px-3 py-2 text-base ${mode === 'note' ? 'border-amber-300 bg-amber-50' : 'border-slate-300'} disabled:bg-slate-100`} />
+          {mode === 'reply' && canAttach && !replyBlocked && (
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+              {file ? (
+                <>
+                  <span className="max-w-full truncate rounded-full bg-slate-100 px-2.5 py-1 text-slate-800" dir="auto">{file.name}</span>
+                  <button type="button" className="btn-secondary" onClick={() => setFile(null)}>{d.attachRemove}</button>
+                </>
+              ) : (
+                <label className="btn-secondary cursor-pointer">
+                  {busy ? d.attaching : d.attach}
+                  <input type="file" className="sr-only" disabled={busy}
+                    accept="image/jpeg,image/png,application/pdf,text/plain,audio/mpeg,audio/ogg,audio/mp4,video/mp4,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) void attach(f); e.target.value = ''; }} />
+                </label>
+              )}
+              <span className="text-xs text-slate-600">{d.attachHelp}</span>
+            </div>
+          )}
+        </>
+      )}
       {problem && (
         <div role="alert" className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
           {problem.message}
@@ -310,13 +429,70 @@ function Composer({ conv, locale, canTakeOver, blockedReason, assignedOther, onD
           )}
         </div>
       )}
-      {mode === 'reply' && assignedOther && !problem && !blockedReason && <p className="mt-1 text-sm text-slate-600">{d.assignedOther}</p>}
+      {mode !== 'note' && assignedOther && !problem && !blockedReason && <p className="mt-1 text-sm text-slate-600">{d.assignedOther}</p>}
       <div className="mt-2 flex justify-end">
-        <button type="submit" disabled={busy || replyBlocked || !text.trim()} className="btn-primary">
-          {busy ? d.sending : mode === 'reply' ? d.send : d.addNote}
-        </button>
+        {mode === 'template'
+          ? <button type="submit" disabled={busy || !canSendTemplate} className="btn-primary">{busy ? d.sending : d.templateSend}</button>
+          : <button type="submit" disabled={busy || replyBlocked || (!text.trim() && !(mode === 'reply' && file))} className="btn-primary">
+              {busy ? d.sending : mode === 'reply' ? d.send : d.addNote}
+            </button>}
       </div>
     </form>
+  );
+}
+
+function MediaItem({ m, locale, canOpen }: { m: Message; locale: Locale; canOpen: boolean }) {
+  const d = t(locale).inbox;
+  const [opening, setOpening] = useState(false);
+  async function open() {
+    if (!m.fileId) return;
+    setOpening(true);
+    try {
+      const link = await api<{ url: string }>(`/v1/files/${m.fileId}/link`, { method: 'POST' });
+      window.open(link.url, '_blank', 'noopener');
+    } catch { /* the link is short-lived and checked again on download */ } finally { setOpening(false); }
+  }
+  const ok = m.mediaStatus === 'available';
+  return (
+    <div className={`mb-1 rounded-lg border px-2.5 py-1.5 text-sm ${ok ? 'border-slate-300 bg-white' : 'border-amber-300 bg-amber-50'}`}>
+      <p className="font-medium text-slate-900">{d.media[m.mediaType ?? ''] ?? m.mediaType}{m.mediaFilename ? <> · <span dir="auto">{m.mediaFilename}</span></> : null}</p>
+      {m.direction === 'in' && <p className="text-xs text-slate-700">{d.mediaStatus[m.mediaStatus ?? ''] ?? m.mediaStatus}</p>}
+      {ok && canOpen && m.fileId && <button type="button" className="btn-secondary mt-1" disabled={opening} onClick={open}>{d.openFile}</button>}
+    </div>
+  );
+}
+
+function MarketingConsent({ conv, locale, canEdit, onChanged }: { conv: Conversation; locale: Locale; canEdit: boolean; onChanged: () => Promise<void> }) {
+  const d = t(locale).inbox;
+  const [editing, setEditing] = useState(false);
+  const [evidence, setEvidence] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const granted = !!conv.contact.marketingConsentAt;
+  async function save() {
+    setBusy(true); setError(null);
+    try {
+      await api(`/v1/contacts/${conv.contact.id}/marketing-consent`, { method: 'POST', body: { granted: !granted, evidence } });
+      setEditing(false); setEvidence(''); await onChanged();
+    } catch (e) { setError(explain(e, d)); } finally { setBusy(false); }
+  }
+  return (
+    <div className="text-sm text-slate-700">
+      <span>{granted ? d.marketingYes : d.marketingNo}</span>
+      {canEdit && !conv.contact.optedOut && !editing && (
+        <button type="button" className="ms-2 font-medium text-teal underline" onClick={() => setEditing(true)}>{granted ? d.marketingWithdraw : d.marketingRecord}</button>
+      )}
+      {editing && (
+        <span className="mt-1 flex flex-wrap items-center gap-2">
+          <label className="sr-only" htmlFor={`consent-${conv.id}`}>{d.marketingEvidence}</label>
+          <input id={`consent-${conv.id}`} value={evidence} onChange={(e) => setEvidence(e.target.value)} minLength={5} maxLength={300} dir="auto"
+            placeholder={d.marketingEvidence} className="min-w-0 flex-1 rounded-lg border border-slate-300 px-2 py-1.5 text-base" />
+          <button type="button" className="btn-primary" disabled={busy || evidence.trim().length < 5} onClick={save}>{d.marketingSave}</button>
+          <button type="button" className="btn-secondary" onClick={() => setEditing(false)}>{d.cancel}</button>
+        </span>
+      )}
+      {error && <span role="alert" className="ms-2 text-red-800">{error}</span>}
+    </div>
   );
 }
 
