@@ -22,6 +22,8 @@ let otherOwner: Client;
 let sandbox: SandboxAdapter;
 let tenant: string;
 const NUMBER = `pn${randomUUID().slice(0, 8)}`;
+/** Sends from this company's number only: a sender run here may also send other test files' queued messages. */
+const ownSent = () => sandbox.sent.filter((x) => x.providerNumberId === NUMBER).length;
 let seq = 0;
 const nextWaId = () => `9733${String(Date.now()).slice(-6)}${String(++seq).padStart(2, '0')}`;
 
@@ -196,10 +198,10 @@ describe('outbound media', () => {
     const conv = await newConversation();
     const up = (await agent.upload('quote-1042.pdf', 'application/pdf', Buffer.from('%PDF-1.4 quote'))).body;
     expect(up.status).toBe('available');
-    const before = sandbox.sent.length;
+    const before = ownSent();
     const res = await agent.post(`/v1/conversations/${conv.id}/reply`, { text: 'Your quote', fileId: up.id, seenActivity: conv.activitySeq, clientMessageId: randomUUID() }).expect(201);
     expect(res.body.status).toBe('sent');
-    expect(sandbox.sent.length).toBe(before + 1);
+    expect(ownSent()).toBe(before + 1);
     expect(sandbox.sent.at(-1)!.body).toContain('[document quote-1042.pdf');
     expect(sandbox.sent.at(-1)!.body).toContain('Your quote');
     const m = (await getConv(conv.id)).messages.find((x: { id: string }) => x.id === res.body.id);
@@ -235,9 +237,9 @@ describe('outbound media', () => {
       await tx.query(`UPDATE files SET status = 'rejected' WHERE id = $1`, [up.id]);
       return m.id;
     });
-    const before = sandbox.sent.length;
+    const before = ownSent();
     await new Sender(t.deps.db, t.deps.channels, {}, undefined, t.deps.storage).dispatchDue();
-    expect(sandbox.sent.length).toBe(before);
+    expect(ownSent()).toBe(before);
     expect((await getConv(conv.id)).messages.find((x: { id: string }) => x.id === msgId)).toMatchObject({ status: 'failed', failureKind: 'blocked', errorCode: 'file_unavailable' });
   });
 });

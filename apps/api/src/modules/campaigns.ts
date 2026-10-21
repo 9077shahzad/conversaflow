@@ -205,7 +205,7 @@ export class CampaignsService {
     return { ...c, progress: Object.fromEntries(counts.map((x) => [x.k, x.n])) };
   }
 
-  /** Schedules a draft or paused campaign (null = now). The template must be approved now; it is checked again at send. */
+  /** Schedules a draft campaign (null = now). The template must be approved now; it is checked again at send. */
   async schedule(actor: TenantActor, id: string, input: unknown) {
     const body = parse(ScheduleInput, input);
     return this.transition(actor, id, ['draft'], 'scheduled', 'campaign.scheduled', async (tx) => {
@@ -223,8 +223,13 @@ export class CampaignsService {
     return this.transition(actor, id, ['scheduled', 'running'], 'paused', 'campaign.paused');
   }
 
+  /** A campaign paused before it started goes back to "scheduled", so its recipients are still chosen when it starts
+   *  (review finding S4-3); one paused while running continues where it stopped. */
   resume(actor: TenantActor, id: string) {
-    return this.transition(actor, id, ['paused'], 'running', 'campaign.resumed', async (tx) => {
+    return this.transition(actor, id, ['paused'], async (tx) =>
+      (await tx.query<{ started: boolean }>('SELECT started_at IS NOT NULL AS started FROM campaigns WHERE id = $1', [id])).rows[0]!.started
+        ? 'running' : 'scheduled',
+    'campaign.resumed', async (tx) => {
       await tx.query('UPDATE campaigns SET scheduled_at = coalesce(scheduled_at, now()), lease_until = NULL WHERE id = $1', [id]);
     });
   }
@@ -238,7 +243,8 @@ export class CampaignsService {
     });
   }
 
-  private async transition(actor: TenantActor, id: string, from: string[], to: string, action: string, extra?: (tx: Tx) => Promise<void>) {
+  private async transition(actor: TenantActor, id: string, from: string[], target: string | ((tx: Tx) => Promise<string>), action: string,
+    extra?: (tx: Tx) => Promise<void>) {
     if (!isUuid(id)) throw Errors.notFound('Campaign');
     return withContext(this.deps.db, actor, async (tx) => {
       const c = (await tx.query<{ status: string }>('SELECT status FROM campaigns WHERE id = $1 FOR UPDATE', [id])).rows[0];
@@ -246,6 +252,7 @@ export class CampaignsService {
       if (!from.includes(c.status)) {
         throw new AppError(409, 'campaign_state', `A ${c.status} campaign cannot be changed this way.`, { status: c.status });
       }
+      const to = typeof target === 'string' ? target : await target(tx);
       if (extra) await extra(tx); // first: e.g. the scheduled time a scheduled campaign must have
       await tx.query(`UPDATE campaigns SET status = $2, status_changed_by = $3, status_changed_at = now(), updated_at = now() WHERE id = $1`,
         [id, to, actor.membershipId]);
@@ -311,6 +318,10 @@ export class CampaignRunner {
   /** Processes one batch. Returns how many messages it queued. Safe to repeat and to run twice at once. */
   async runBatch(tenantId: string, campaignId: string): Promise<{ queued: number; skipped: number; status: string }> {
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      // One batch at a time per company, so two workers on different campaigns cannot both use the same room under the
+      // daily limit or both message one contact inside the frequency limits (review finding S4-4). Taken before the
+      // campaign row lock, always in this order.
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:campaign-batch`]);
       const c = (await tx.query<{ id: string; status: string; scheduled_at: Date | null; connection_id: string; template_id: string;
         params: z.infer<typeof ParamSource>[]; audience: z.infer<typeof Audience>; created_by: string }>(
         'SELECT id, status, scheduled_at, connection_id, template_id, params, audience, created_by FROM campaigns WHERE id = $1 FOR UPDATE',
@@ -363,10 +374,15 @@ export class CampaignRunner {
         queued++;
         if (this.faults.crashAfterQueued !== undefined && queued >= this.faults.crashAfterQueued) throw new CampaignBatchCrash();
       }
-      const left = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM campaign_recipients WHERE campaign_id = $1 AND state = 'pending'`, [campaignId])).rows[0]!.n;
-      if (left === 0) await tx.query(`UPDATE campaigns SET status = 'completed', finished_at = now(), updated_at = now() WHERE id = $1`, [campaignId]);
+      // Completed only when nobody is left to queue AND none of its messages is still waiting to be sent, so the campaign
+      // can be paused or cancelled for as long as anything can still be stopped (review finding S4-2).
+      const left = (await tx.query<{ n: number }>(
+        `SELECT (SELECT count(*) FROM campaign_recipients WHERE campaign_id = $1 AND state = 'pending')
+              + (SELECT count(*) FROM messages WHERE campaign_id = $1 AND status = 'queued') AS n`, [campaignId])).rows[0]!.n;
+      const done = Number(left) === 0;
+      if (done) await tx.query(`UPDATE campaigns SET status = 'completed', finished_at = now(), updated_at = now() WHERE id = $1`, [campaignId]);
       await release();
-      return { queued, skipped, status: left === 0 ? 'completed' : 'running' };
+      return { queued, skipped, status: done ? 'completed' : 'running' };
     });
   }
 }

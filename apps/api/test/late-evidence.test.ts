@@ -227,3 +227,25 @@ describe('retry eligibility: ordinary replies versus approved templates', () => 
     expect(again.body.error.code).toBe('template_not_approved');
   });
 });
+
+describe('review of slice 4', () => {
+  it('S4-5: a late answer saved before the timeout outcome makes the message "sent", not uncertain', async () => {
+    const conv = await newConversation();
+    const q = await queueOnly(conv.id, 'Race');
+    const wamid = `wamid.race.${randomUUID()}`;
+    sandbox.nextIds.push(wamid);
+    sandbox.script.push({ slowMs: 250 });
+    const s = new Sender(t.deps.db, t.deps.channels, {}, 150, undefined, 3_000);
+    expect(await s.leaseNow(tenant, q.jobId)).toBe(true);
+    const p = s.processJob(tenant, q.jobId);
+    await new Promise((r) => setTimeout(r, 60));
+    // Something else holds the job row while the timeout fires, so the late answer is saved before the timeout outcome.
+    const locker = app(async (tx) => { await tx.query('SELECT 1 FROM send_jobs WHERE id = $1 FOR UPDATE', [q.jobId]); await new Promise((r) => setTimeout(r, 600)); });
+    await p; await locker; await s.settleLate();
+    const m = await msgOf(conv.id, q.messageId);
+    expect(m.status).toBe('sent');
+    expect(await providerId(q.messageId)).toBe(wamid);
+    expect((await attempts(q.messageId)).map((a) => a.outcome).sort()).toEqual(['late_accepted', 'uncertain']);
+    expect(sandbox.sent.filter((x) => x.providerMessageId === wamid)).toHaveLength(1);
+  });
+});

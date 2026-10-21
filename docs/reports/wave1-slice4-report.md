@@ -139,26 +139,34 @@ sandbox provider only.
 | Pause, resume and cancel | Pausing holds queued messages and queues no more; resuming continues without sending anything twice; cancelling stops everything not yet sent |
 | Permission | `campaigns.manage`, with two-step sign-in; given to owner and admin through the SR-1 list |
 
-**Checks immediately before each send.** Each recipient is checked again when their message is queued and again by the
-sender just before it leaves:
-- opt-out, including one received after scheduling or after queueing;
-- marketing consent still recorded;
-- not on the suppression list;
-- frequency limit;
-- template still approved;
-- campaign still running, and its creator still holds `campaigns.manage`;
-- replies not paused for the conversation.
+**Checks before each send.** Each recipient is checked when their message is queued, and again by the sender just
+before it leaves:
 
-A paused or scheduled campaign holds the message without counting an attempt. A cancelled campaign blocks it.
+| Check | When queued | Just before sending |
+| --- | --- | --- |
+| Opt-out, including one received after scheduling or after queueing | Yes | Yes |
+| Marketing consent still recorded | Yes | Yes |
+| Not on the suppression list | Yes | Yes |
+| Template still approved (and for this number's account) | Yes | Yes |
+| Campaign still running; its creator still holds `campaigns.manage` | Yes | Yes |
+| Replies not paused for the conversation | — | Yes |
+| Frequency limits and the number's daily limit | Yes | No (counted when queued) |
+
+A paused or scheduled campaign holds the message without counting an attempt. A cancelled campaign blocks it. A
+campaign message cannot be retried from the inbox, because a retry would be an ordinary message and would skip these
+checks.
 
 **No duplicate sending.**
 - One recipient row per contact per campaign (database constraint).
 - Each recipient's message uses the recipient id as its idempotency key, so a second attempt to queue it is refused.
 - The recipient update and the message are written in one transaction, so a crash leaves both or neither.
-- Campaigns are picked up by the worker through one reviewed lookup with a lease, so two workers do not run the same
-  batch at once. If they do (lease expired), the constraints above still prevent a second message.
+- Campaigns are picked up by the worker through one reviewed lookup with a lease, and one company's batches run one at
+  a time, so two workers do not run batches together. If the lease expires, the constraints above still prevent a
+  second message.
+- A campaign is completed only when nobody is left to queue and none of its messages is still waiting, so it can be
+  paused or cancelled until then.
 
-**Tests (13, in `campaigns.test.ts`).**
+**Tests (18, in `campaigns.test.ts`; 13 first, 5 added after the review).**
 - Permission and two-step sign-in; other companies cannot see campaigns.
 - Preview counts, exclusion reasons, samples, and no cost guess.
 - An opt-out after scheduling is respected at queue time and at send time.
@@ -172,6 +180,9 @@ A paused or scheduled campaign holds the message without counting an attempt. A 
 - A template paused by WhatsApp after scheduling stops the sends.
 - Pause, resume and cancel.
 - Suppression list management and audit.
+- After the review: no inbox retry of a campaign message; cancel still possible after everyone is queued; completion
+  after the messages leave; resume of a campaign paused before it started; two campaigns batched at once stay within
+  the daily and frequency limits.
 
 **Screens.** A Campaigns page in English and Arabic: list with status and counts, the create form with the audience
 preview, scheduling, and pause, resume and cancel. Without two-step sign-in, the page explains that campaigns need it
@@ -201,7 +212,25 @@ __LOCAL_RESULTS__
 
 ## Review findings
 
-__REVIEW__
+An independent reviewer worked on a separate clone of `264379b`, without seeing the work being produced, and proved
+each finding below with a probe test. Fixed in `__C2__`. S4-1 to S4-5 each have a regression test. All six new tests were run against the unfixed `264379b`
+and failed there, and they pass with the fixes.
+
+| # | Finding | Severity | Status |
+| --- | --- | --- | --- |
+| S4-1 | A failed campaign message (for example, stopped because the number was added to the suppression list) could be retried from the inbox. The retry was an ordinary template message, so it skipped the suppression list, a cancelled campaign, the creator's permission and the frequency limits, and was sent | **High** | **Fixed** (`__C2__`): campaign messages cannot be retried individually (server refuses; button not offered, with the reason shown) |
+| S4-2 | As soon as every recipient was queued, the campaign was marked completed and could no longer be paused or cancelled, though queued messages could still be waiting to leave | Medium | **Fixed**: completed only when none of its messages is still waiting |
+| S4-3 | A scheduled campaign that was paused and then resumed completed with nothing sent | Medium | **Fixed**: resumes as scheduled if it had not started |
+| S4-4 | Two workers batching different campaigns at the same moment could together exceed the number's daily limit and message one contact inside the frequency limits (needs more than one worker; today there is one) | Medium | **Fixed**: one batch at a time per company |
+| S4-5 | A late answer saved before the timeout outcome left the message "uncertain" although WhatsApp's acceptance was recorded. The id was kept and nothing was resent, so the requirement held, but the inbox kept offering a retry with a duplicate warning | Low | **Fixed**: the message becomes "sent" in either order. Attempt times now use the actual clock time |
+| S4-6 | Wording: the campaign introduction said the contact frequency is checked just before sending (it is checked when queued); the "too large" label for customer files named 16 MB, though images and stickers have lower WhatsApp limits | Low | **Fixed** in English and Arabic |
+| S4-7 | Info: any API session can call the campaign lookup and so extend other companies' campaign leases (no data exposed, and no code does this); the daily limit counts campaign messages per number, whereas Meta counts unique customers per business portfolio; the "days needed" estimate ignores what was already used today; files refused on arrival show no scan basis because they were never scanned; messages marked "exhausted" before 0032 have no attempt records | Info | Recorded. The lookup and daily-limit points are for the live adapter and the next review of the lookup |
+
+The reviewer also confirmed as met: the SR-1 upgrade (only listed permissions, only built-in roles, custom roles
+untouched, both paths tested), late-answer reconciliation and exact matching, the evidence rule for "declined on each of
+5 attempts", retry eligibility for replies and templates, the sandbox and scanner labels, the 16 MB limit on all three
+paths, the cost estimate using verified rates only, the send-time checks, and row security on the new tables with the
+lookup pinned by the guard.
 
 ## Open items (none accepted)
 

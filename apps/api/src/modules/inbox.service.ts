@@ -325,7 +325,7 @@ export class InboxService {
                 (SELECT f.scan_basis FROM files f WHERE f.id = m.file_id) AS "scanBasis",
                 m.attempts, m.retry_of AS "retryOf", m.retry_number AS "retryNumber", r.id AS "retriedAs",
                 (m.direction = 'out' AND m.status IN ('failed', 'uncertain') AND r.id IS NULL AND m.retry_number < $2) AS "retryable",
-                t.status AS "templateStatus", t.category AS "templateCategory",
+                t.status AS "templateStatus", t.category AS "templateCategory", m.campaign_id AS "campaignId",
                 CASE WHEN m.direction = 'out' AND m.status IN ('failed', 'uncertain') THEN
                   (SELECT coalesce(json_agg(json_build_object('attempt', a.attempt, 'outcome', a.outcome, 'code', a.code, 'at', a.created_at)
                                             ORDER BY a.created_at), '[]'::json) FROM send_attempts a WHERE a.message_id = m.id)
@@ -341,6 +341,7 @@ export class InboxService {
         if (m.direction !== 'out' || (m.status !== 'failed' && m.status !== 'uncertain')) { m.retryBlock = null; continue; }
         m.retryBlock =
           m.retriedAs ? 'already_retried'
+          : m.campaignId ? 'campaign_message'
           : m.retryNumber >= MANUAL_RETRY_LIMIT ? 'retry_limit_reached'
           : c.status === 'resolved' ? 'conversation_resolved'
           : contact.optedOut ? 'contact_opted_out'
@@ -553,11 +554,17 @@ export class InboxService {
         id: string; conversation_id: string; status: string; body: string | null; direction: string; error_code: string | null;
         failure_kind: string | null; retry_number: number; original_author_membership_id: string | null;
         kind: string; template_id: string | null; template_params: string[] | null; pricing_category: string | null; file_id: string | null;
+        campaign_id: string | null;
       }>(
         `SELECT id, conversation_id, status, body, direction, error_code, failure_kind, retry_number, original_author_membership_id,
-                kind, template_id, template_params, pricing_category, file_id
+                kind, template_id, template_params, pricing_category, file_id, campaign_id
          FROM messages WHERE id = $1`, [messageId])).rows[0];
       if (!orig || orig.direction !== 'out') throw Errors.notFound('Message');
+      // A campaign message is never retried one by one: a retry would be an ordinary message and would skip the
+      // campaign's own checks (suppression list, cancellation, frequency and daily limits). Review finding S4-1.
+      if (orig.campaign_id) {
+        throw Errors.conflict('campaign_message', 'Campaign messages are not retried individually. Start a new campaign if needed.');
+      }
       const c = await this.loadVisible(tx, actor, orig.conversation_id, true);
       if (orig.status !== 'failed' && orig.status !== 'uncertain') {
         throw Errors.conflict('not_retryable', 'Only a failed or uncertain message can be retried.');

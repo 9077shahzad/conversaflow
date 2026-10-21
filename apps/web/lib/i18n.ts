@@ -161,7 +161,7 @@ const en = {
     errors: {
       replies_paused: 'A supervisor has paused replies on this conversation.', template_required: 'More than 24 hours have passed; only an approved template can be sent.',
       contact_opted_out: 'This customer has opted out of messages.', conversation_changed: 'New messages arrived. Read them, then try again.',
-      confirmation_required: 'Please confirm that the customer may receive this twice.', already_retried: 'This message has already been retried.',
+      confirmation_required: 'Please confirm that the customer may receive this twice.', already_retried: 'This message has already been retried.', campaign_message: 'Campaign messages are not retried one by one.',
       assigned_to_other: 'Someone else is handling this conversation.', forbidden: 'You do not have permission to do this.',
       conversation_resolved: 'This conversation is closed.', channel_disabled: 'This channel is turned off.', already_paused: 'Another supervisor has already paused replies here.',
       not_paused: 'Replies are not paused here.', not_found: 'This conversation is no longer available to you.', not_retryable: 'Only a failed or uncertain message can be retried.',
@@ -190,7 +190,7 @@ const en = {
     } as Record<string, string>,
     mediaStatus: {
       pending: 'Checking for viruses…', available: 'Checked: no virus found', rejected: 'Blocked: failed the virus check',
-      unsupported: 'Not shown: this file type is not accepted', too_large: 'Not shown: the file is over the 16 MB limit', failed: 'Could not be downloaded',
+      unsupported: 'Not shown: this file type is not accepted', too_large: 'Not shown: the file is larger than allowed for its type (WhatsApp\'s limit for that type, or our {mb} MB limit if lower)', failed: 'Could not be downloaded',
     } as Record<string, string>,
     openFile: 'Open file',
     scanBasis: {
@@ -223,7 +223,7 @@ const en = {
   },
   campaigns: {
     title: 'Campaigns',
-    intro: 'Send an approved template to customers who have agreed to receive marketing messages. Everyone is checked again just before their message is sent: opt-outs, consent, the suppression list and how recently they were contacted.',
+    intro: 'Send an approved template to customers who have agreed to receive marketing messages. Everyone is checked when their message is queued (opt-outs, consent, the suppression list and how recently they were contacted) and again just before it is sent (opt-outs, consent and the suppression list).',
     sandboxNote: 'Sandbox: sending and delivery results are simulated. Nothing reaches WhatsApp.',
     newTitle: 'New campaign', name: 'Campaign name', template: 'Approved template', chooseTemplate: 'Choose a template',
     noTemplates: 'No approved templates yet. Create one on the Templates page.',
@@ -466,7 +466,7 @@ const ar: typeof en = {
     errors: {
       replies_paused: 'أوقف أحد المشرفين الردود على هذه المحادثة.', template_required: 'مرّ أكثر من 24 ساعة؛ لا يمكن إلا إرسال قالب معتمد.',
       contact_opted_out: 'ألغى هذا العميل اشتراكه في الرسائل.', conversation_changed: 'وصلت رسائل جديدة. اقرأها ثم حاول مرة أخرى.',
-      confirmation_required: 'يُرجى التأكيد على أن العميل قد يتلقى الرسالة مرتين.', already_retried: 'أُعيدت محاولة إرسال هذه الرسالة من قبل.',
+      confirmation_required: 'يُرجى التأكيد على أن العميل قد يتلقى الرسالة مرتين.', already_retried: 'أُعيدت محاولة إرسال هذه الرسالة من قبل.', campaign_message: 'لا تُعاد محاولة رسائل الحملات كلٌّ على حدة.',
       assigned_to_other: 'يتولى شخص آخر هذه المحادثة.', forbidden: 'ليست لديك صلاحية لهذا الإجراء.',
       conversation_resolved: 'هذه المحادثة مغلقة.', channel_disabled: 'هذه القناة متوقفة.', already_paused: 'أوقف مشرف آخر الردود هنا بالفعل.',
       not_paused: 'الردود ليست متوقفة هنا.', not_found: 'لم تعد هذه المحادثة متاحة لك.', not_retryable: 'لا يمكن إعادة المحاولة إلا لرسالة لم تُرسل أو غير مؤكدة الوصول.',
@@ -495,7 +495,7 @@ const ar: typeof en = {
     },
     mediaStatus: {
       pending: 'جارٍ الفحص من الفيروسات…', available: 'تم الفحص: لا يوجد فيروس', rejected: 'محظور: لم يجتز فحص الفيروسات',
-      unsupported: 'غير معروض: نوع الملف غير مقبول', too_large: 'غير معروض: الملف أكبر من الحد المسموح (16 ميغابايت)', failed: 'تعذّر تنزيل الملف',
+      unsupported: 'غير معروض: نوع الملف غير مقبول', too_large: 'غير معروض: الملف أكبر من المسموح لنوعه (حد واتساب لهذا النوع، أو حدّنا البالغ {mb} ميغابايت إن كان أقل)', failed: 'تعذّر تنزيل الملف',
     },
     openFile: 'فتح الملف',
     scanBasis: {
@@ -528,7 +528,7 @@ const ar: typeof en = {
   },
   campaigns: {
     title: 'الحملات',
-    intro: 'أرسل قالبًا معتمدًا إلى العملاء الذين وافقوا على تلقي الرسائل التسويقية. يُعاد التحقق من كل عميل قبل إرسال رسالته مباشرة: إلغاء الاشتراك والموافقة وقائمة الاستبعاد ومدى قرب آخر تواصل.',
+    intro: 'أرسل قالبًا معتمدًا إلى العملاء الذين وافقوا على تلقي الرسائل التسويقية. يُتحقق من كل عميل عند وضع رسالته في قائمة الإرسال (إلغاء الاشتراك والموافقة وقائمة الاستبعاد ومدى قرب آخر تواصل)، ثم مرة أخرى قبل الإرسال مباشرة (إلغاء الاشتراك والموافقة وقائمة الاستبعاد).',
     sandboxNote: 'بيئة تجريبية: الإرسال ونتائج التسليم محاكاة. لا يصل شيء إلى واتساب.',
     newTitle: 'حملة جديدة', name: 'اسم الحملة', template: 'قالب معتمد', chooseTemplate: 'اختر قالبًا',
     noTemplates: 'لا توجد قوالب معتمدة بعد. أنشئ قالبًا من صفحة القوالب.',

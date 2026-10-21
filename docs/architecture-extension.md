@@ -132,10 +132,19 @@ Retrying a message happens only in its conversation, through the normal retry an
   An opt-out received after scheduling is therefore respected at every later step.
 - **Frequency limits.** Per company: at most N campaign messages per contact in 7 days (default 2) and a minimum gap
   between campaign messages (default 24 hours). Per number: at most the company's daily limit of campaign messages in a
-  rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier).
+  rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier). These are checked
+  when a message is queued, not again by the sender. Batches of one company run one at a time (a lock per company), so
+  two workers on different campaigns cannot both use the same room. The daily count covers campaign messages only, per
+  number; Meta's own limit counts unique customers per business portfolio, which the live adapter must respect.
 - **Pause, resume, cancel.** Pausing stops queueing; messages already queued are held by the sender (no attempt is
-  counted) until resumed. Cancelling is final: waiting recipients are skipped and queued messages not yet sent are
-  stopped. Every change is audited.
+  counted) until resumed. A campaign paused before it started resumes as scheduled, so its recipients are still chosen
+  when it starts. Cancelling is final: waiting recipients are skipped and queued messages not yet sent are stopped. A
+  campaign is marked completed only when nobody is left to queue and none of its messages is still waiting, so it can
+  be paused or cancelled for as long as anything can be stopped. The sender reads the campaign under a share lock, so a
+  cancel either lands before a message moves to "submitting" (and stops it) or after (when it is already with
+  WhatsApp). Every change is audited.
+- **No individual retries.** A failed or uncertain campaign message cannot be retried from the inbox: a retry would be
+  an ordinary message and would skip the campaign's checks.
 - **No duplicate sending.** One recipient per contact per campaign (unique); one message per recipient (unique); the
   message's idempotency key is the recipient id; recipient and message are written in one transaction; the worker
   leases each campaign through `campaign_claim()` (owned by `cf_dispatch`, scheduling columns only, pinned by the

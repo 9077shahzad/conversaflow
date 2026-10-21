@@ -139,7 +139,7 @@ export class Sender {
             `SELECT c.status, EXISTS (SELECT 1 FROM memberships mb JOIN membership_roles mr ON mr.membership_id = mb.id
                        JOIN role_permissions rp ON rp.role_id = mr.role_id AND rp.permission_key = 'campaigns.manage'
                        WHERE mb.id = c.created_by AND mb.status = 'active') AS creator_ok
-             FROM campaigns c WHERE c.id = $1`, [row.campaign_id])).rows[0]!
+             FROM campaigns c WHERE c.id = $1 FOR SHARE OF c`, [row.campaign_id])).rows[0]!
         : null;
       if (camp && (camp.status === 'paused' || camp.status === 'scheduled')) {
         await tx.query(`UPDATE send_jobs SET state = 'pending', lease_until = NULL, next_attempt_at = now() + interval '60 seconds', updated_at = now() WHERE id = $1`, [jobId]);
@@ -323,7 +323,9 @@ export class Sender {
       await recordAttempt(tx, tenantId, messageId, attempt, 'late_accepted', null, providerMessageId);
       if (!(await keepProviderId(tx, messageId, providerMessageId))) return;
       const m = (await tx.query<{ conversation_id: string; sent_by_membership_id: string | null }>(
-        `UPDATE messages SET status = 'sent', error_code = NULL WHERE id = $1 AND status = 'uncertain'
+        // Also while still "submitting": the late answer can arrive before the timeout outcome is saved (review finding
+        // S4-5); the timeout path then leaves "sent" alone, because it changes only a message still "submitting".
+        `UPDATE messages SET status = 'sent', error_code = NULL WHERE id = $1 AND status IN ('submitting', 'uncertain')
          RETURNING conversation_id, sent_by_membership_id`, [messageId])).rows[0];
       await applyOrphanStatuses(tx, messageId, providerMessageId);
       if (m) await stopTimerOnReply(tx, tenantId, m.conversation_id, m.sent_by_membership_id, new Date());
@@ -343,7 +345,10 @@ export class Sender {
 
   /** Outcome unknown: it may have reached the customer. Never sent again automatically. Same guard as above. */
   private async finishUncertain(tx: Tx, row: JobRow, code: string) {
-    await tx.query(`UPDATE messages SET status = 'uncertain', failure_kind = NULL, error_code = $2 WHERE id = $1 AND status = 'submitting'`,
+    // If WhatsApp's id is already recorded (a late answer was saved first), acceptance is proven: "sent", not uncertain.
+    await tx.query(`UPDATE messages SET status = CASE WHEN provider_message_id IS NOT NULL THEN 'sent' ELSE 'uncertain' END,
+                           failure_kind = NULL, error_code = CASE WHEN provider_message_id IS NOT NULL THEN NULL ELSE $2 END
+                    WHERE id = $1 AND status = 'submitting'`,
       [row.message_id, code.slice(0, 100)]);
     await this.closeJob(tx, row.job_id, 'done', code);
   }
@@ -357,8 +362,9 @@ export class Sender {
 /** Appends one attempt's evidence (send_attempts is append-only). attempt null = the attempt being recovered. */
 async function recordAttempt(tx: Tx, tenantId: string, messageId: string, attempt: number | null, outcome: string, code: string | null, providerMessageId: string | null) {
   await tx.query(
-    `INSERT INTO send_attempts (tenant_id, message_id, attempt, outcome, code, provider_message_id)
-     VALUES ($1, $2, coalesce($3, (SELECT greatest(attempts, 1) FROM messages WHERE id = $2)), $4, $5, $6)`,
+    // clock_timestamp(), not now(): the time of the answer, not of the transaction start, so the log is in true order.
+    `INSERT INTO send_attempts (tenant_id, message_id, attempt, outcome, code, provider_message_id, created_at)
+     VALUES ($1, $2, coalesce($3, (SELECT greatest(attempts, 1) FROM messages WHERE id = $2)), $4, $5, $6, clock_timestamp())`,
     [tenantId, messageId, attempt, outcome, code?.slice(0, 100) ?? null, providerMessageId]);
 }
 

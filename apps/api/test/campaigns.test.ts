@@ -163,6 +163,8 @@ describe('sending', () => {
     const before = sandbox.sent.length;
     await sender().dispatchDue(100);
     expect(sandbox.sent.length).toBe(before + 1);
+    // Completed by the next batch, once none of its messages is still waiting (review finding S4-2).
+    await runner().runBatch(tenant, camp.id);
     const view = (await owner.get(`/v1/campaigns/${camp.id}`).expect(200)).body;
     expect(view.status).toBe('completed');
     expect(view.progress).toMatchObject({ sent: 1, 'skipped:opted_out': 1 });
@@ -331,5 +333,85 @@ describe('suppression list', () => {
     await agent.get('/v1/suppressions').expect(403);
     const audit = (await owner.get('/v1/audit-events').expect(200)).body as Array<{ action: string }>;
     expect(audit.map((x) => x.action)).toEqual(expect.arrayContaining(['suppression.added', 'suppression.removed']));
+  });
+});
+
+describe('review of slice 4', () => {
+  it('S4-1: a campaign message is never retried from the inbox (it would skip the suppression list and the campaign checks)', async () => {
+    await resetAudience();
+    const a = await customer('Retry Rana', { consent: true });
+    await allowMore(1);
+    const camp = await createCampaign('Retry check');
+    await owner.post(`/v1/campaigns/${camp.id}/schedule`, { at: null }).expect(200);
+    await runner().runBatch(tenant, camp.id);
+    await owner.post('/v1/suppressions', { waNumber: `+${a.wa}`, reason: 'complaint' }).expect(201);
+    await sender().dispatchDue(100);
+    const msg = (await messagesOf(camp.id))[0]!;
+    expect([msg.status, msg.error_code]).toEqual(['failed', 'suppressed']);
+    const convId = (await app((tx) => tx.query<{ conversation_id: string }>('SELECT conversation_id FROM messages WHERE id = $1', [msg.id]))).rows[0]!.conversation_id;
+    const conv = (await owner.get(`/v1/conversations/${convId}`).expect(200)).body;
+    expect(conv.messages.find((m: { id: string }) => m.id === msg.id).retryBlock).toBe('campaign_message');
+    const before = sandbox.sent.length;
+    const res = await owner.post(`/v1/messages/${msg.id}/retry`, { seenActivity: conv.activitySeq, clientMessageId: randomUUID() });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('campaign_message');
+    await sender().dispatchDue(100);
+    expect(sandbox.sent.length).toBe(before);
+    await noLimit();
+  });
+
+  it('S4-2: with everyone queued but not yet sent, the campaign stays running and can still be cancelled; nothing is sent', async () => {
+    await resetAudience();
+    await customer('Queued Qais', { consent: true });
+    await customer('Queued Huda', { consent: true });
+    const camp = await createCampaign('Cancel after queueing');
+    await owner.post(`/v1/campaigns/${camp.id}/schedule`, { at: null }).expect(200);
+    expect((await runner().runBatch(tenant, camp.id)).status).toBe('running');   // all queued, none sent yet
+    expect((await owner.get(`/v1/campaigns/${camp.id}`).expect(200)).body.status).toBe('running');
+    await owner.post(`/v1/campaigns/${camp.id}/cancel`).expect(200);
+    const before = sandbox.sent.length;
+    await sender().dispatchDue(100);
+    expect(sandbox.sent.length).toBe(before);
+    expect((await messagesOf(camp.id)).map((m) => `${m.status}:${m.error_code}`)).toEqual(['failed:campaign_cancelled', 'failed:campaign_cancelled']);
+  });
+
+  it('S4-2: once its messages have left, the campaign completes', async () => {
+    await resetAudience();
+    await customer('Done Dalia', { consent: true });
+    const camp = await createCampaign('Completes');
+    await owner.post(`/v1/campaigns/${camp.id}/schedule`, { at: null }).expect(200);
+    await runAll(camp.id);
+    const view = (await owner.get(`/v1/campaigns/${camp.id}`).expect(200)).body;
+    expect(view.status).toBe('completed');
+    expect(view.progress.sent).toBe(1);
+  });
+
+  it('S4-3: a campaign paused before it started and then resumed still chooses its recipients and sends', async () => {
+    await resetAudience();
+    await customer('Paused Pari', { consent: true });
+    const camp = await createCampaign('Pause before start');
+    await owner.post(`/v1/campaigns/${camp.id}/schedule`, { at: new Date(Date.now() + 3_600_000).toISOString() }).expect(200);
+    await owner.post(`/v1/campaigns/${camp.id}/pause`).expect(200);
+    expect((await owner.post(`/v1/campaigns/${camp.id}/resume`).expect(200)).body.status).toBe('scheduled');
+    await app((tx) => tx.query('UPDATE campaigns SET scheduled_at = now() WHERE id = $1', [camp.id]));   // the time arrives
+    await runAll(camp.id);
+    const view = (await owner.get(`/v1/campaigns/${camp.id}`).expect(200)).body;
+    expect(view.status).toBe('completed');
+    expect(view.progress.sent).toBe(1);
+  });
+
+  it('S4-4: two campaigns batched at the same moment cannot together exceed the daily limit or message one contact twice', async () => {
+    await resetAudience();
+    await customer('Shared Sami', { consent: true });
+    const one = await createCampaign('Concurrent one');
+    const two = await createCampaign('Concurrent two');
+    await owner.post(`/v1/campaigns/${one.id}/schedule`, { at: null }).expect(200);
+    await owner.post(`/v1/campaigns/${two.id}/schedule`, { at: null }).expect(200);
+    await allowMore(1);
+    await Promise.all([runner().runBatch(tenant, one.id), runner().runBatch(tenant, two.id)]);
+    const queued = [...await messagesOf(one.id), ...await messagesOf(two.id)];
+    expect(queued).toHaveLength(1);
+    for (const c of [one, two]) await owner.post(`/v1/campaigns/${c.id}/cancel`).expect(200);
+    await noLimit();
   });
 });
