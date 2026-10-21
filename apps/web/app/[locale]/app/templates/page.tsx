@@ -7,7 +7,7 @@ import { fill, isLocale, t, type Locale } from '@/lib/i18n';
 /** Message templates (Wave 1). The server checks every rule again; this screen only explains them. */
 interface Template {
   id: string; name: string; language: string; category: string; status: string; quality: string; lastEvent: string | null;
-  statusReason: string | null; bodyText: string; paramCount: number; statusChangedAt: string;
+  statusReason: string | null; bodyText: string; paramCount: number; statusChangedAt: string; provider: string | null;
 }
 interface Access { permissions: string[] }
 
@@ -58,6 +58,7 @@ export default function Templates() {
     <div className="mx-auto max-w-5xl">
       <h1 className="text-2xl font-bold text-navy sm:text-3xl">{d.title}</h1>
       <p className="mt-1 text-sm text-slate-700">{d.intro}</p>
+      {rows?.some((x) => x.provider === 'sandbox') && <p role="status" className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800">{d.sandboxNote}</p>}
       {notice && <p role="status" className={`mt-3 rounded-lg px-3 py-2 text-sm ${notice.ok ? 'bg-teal-soft text-slate-900' : 'bg-red-50 text-red-800'}`}>{notice.text}</p>}
       {canManage && (
         <div className="mt-3"><button type="button" className="btn-secondary" disabled={busy} onClick={sync}>{d.sync}</button></div>
@@ -72,7 +73,7 @@ export default function Templates() {
                   <span className="break-all font-semibold text-navy" dir="ltr">{x.name}</span>
                   <span className="text-sm text-slate-700">{t(locale).languageNames[x.language.slice(0, 2)] ?? x.language}</span>
                   <span className="text-sm text-slate-700">· {t(locale).inbox.categories[x.category] ?? x.category}</span>
-                  <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${tone(x.status)}`}>{d.statuses[x.status] ?? x.status}</span>
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${tone(x.status)}`}>{d.statuses[x.status] ?? x.status}{x.provider === 'sandbox' ? ` · ${d.simulatedReview}` : ''}</span>
                   <span className="text-xs text-slate-700">{d.quality}: {d.qualities[x.quality] ?? x.quality}</span>
                 </div>
                 <p className="mt-2 whitespace-pre-wrap break-words text-sm text-slate-900" dir="auto">{x.bodyText}</p>

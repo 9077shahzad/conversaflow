@@ -4,7 +4,7 @@ import type { TenantActor } from '../core/context';
 export const ALL_PERMISSIONS = [
   'tenant.read', 'tenant.update', 'members.read', 'members.invite', 'members.manage', 'roles.read', 'roles.manage',
   'billing.read', 'billing.manage', 'audit.read', 'files.read', 'files.write', 'contacts.read', 'contacts.write',
-  'inbox.read_all', 'inbox.reply', 'reports.read', 'inbox.assign', 'channels.manage', 'inbox.pause', 'templates.manage', 'channels.monitor',
+  'inbox.read_all', 'inbox.reply', 'reports.read', 'inbox.assign', 'channels.manage', 'inbox.pause', 'templates.manage', 'channels.monitor', 'campaigns.manage',
 ] as const;
 export type Permission = (typeof ALL_PERMISSIONS)[number];
 

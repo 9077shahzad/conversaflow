@@ -174,6 +174,23 @@ describe('inbound media', () => {
   });
 });
 
+describe('what results are based on', () => {
+  it('the environment says the channel is the sandbox, what scans are based on, and the file limit', async () => {
+    const env = (await agent.get('/v1/me/environment').expect(200)).body;
+    expect(env.whatsapp).toEqual({ sandbox: true, live: false });
+    // The local harness loads only the test signature, so scans are not checks against current virus definitions.
+    expect(env.scanner.basis).toBe('unverified_signatures');
+    expect(env.maxFileBytes).toBe(t.deps.config.MAX_UPLOAD_BYTES);
+  });
+
+  it('every stored file records its scan basis; a file over the limit is refused on upload', async () => {
+    const up = (await agent.upload('note.txt', 'text/plain', Buffer.from('hello')).expect(201)).body;
+    expect(up).toMatchObject({ status: 'available', scanBasis: 'unverified_signatures' });
+    expect(up.scannedAt).toBeTruthy();
+    await agent.upload('big.pdf', 'application/pdf', Buffer.alloc(t.deps.config.MAX_UPLOAD_BYTES + 1, 1)).expect((r) => expect([400, 413]).toContain(r.status));
+  });
+});
+
 describe('outbound media', () => {
   it('a clean company file is sent as a media message with its caption', async () => {
     const conv = await newConversation();

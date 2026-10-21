@@ -2,7 +2,7 @@ import { withContext } from '@conversaflow/database';
 import type { AuthSession, Deps, TenantActor } from '../core/context';
 import { hmac, safeEqual, sha256 } from '../core/crypto';
 import { AppError, Errors } from '../core/errors';
-import { storageKeyFor } from '../core/storage';
+import { scanWithBasis, storageKeyFor, type ScanBasis } from '../core/storage';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
 
@@ -15,7 +15,7 @@ const ALLOWED_TYPES = new Set([
 const LINK_TTL_SECONDS = 300;
 
 const FILE_COLUMNS = `id, original_name AS "name", content_type AS "contentType", size_bytes AS "sizeBytes", status,
-  created_at AS "createdAt"`;
+  created_at AS "createdAt", scan_basis AS "scanBasis", scanned_at AS "scannedAt"`;
 
 export interface UploadInput {
   originalName: string;
@@ -44,8 +44,9 @@ export class FilesService {
     if (!ALLOWED_TYPES.has(input.contentType)) throw Errors.badRequest('This file type is not allowed.');
     const name = sanitiseName(input.originalName);
     let verdict: 'clean' | 'infected';
+    let basis: ScanBasis;
     try {
-      verdict = await this.deps.scanner.scan(input.data);
+      ({ verdict, ...basis } = await scanWithBasis(this.deps.scanner, input.data));
     } catch {
       // Fail closed: no clear answer from the scanner means the file is not accepted or stored.
       throw new AppError(503, 'scanner_unavailable', 'Files cannot be checked for viruses right now. Please try again shortly.');
@@ -56,9 +57,11 @@ export class FilesService {
       const key = storageKeyFor(actor.tenantId, fileId);
       const status = verdict === 'clean' ? 'available' : 'rejected';
       const { rows } = await tx.query(
-        `INSERT INTO files (id, tenant_id, storage_key, original_name, content_type, size_bytes, sha256, status, uploaded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ${FILE_COLUMNS}`,
-        [fileId, actor.tenantId, key, name, input.contentType, input.data.length, sha256(input.data), status, actor.userId],
+        `INSERT INTO files (id, tenant_id, storage_key, original_name, content_type, size_bytes, sha256, status, uploaded_by,
+                            scan_basis, scan_signature_version, scanned_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now()) RETURNING ${FILE_COLUMNS}`,
+        [fileId, actor.tenantId, key, name, input.contentType, input.data.length, sha256(input.data), status, actor.userId,
+          basis.basis, basis.signatureVersion],
       );
       await AuditService.record(tx, {
         tenantId: actor.tenantId, actorUserId: actor.userId, action: status === 'available' ? 'file.uploaded' : 'file.rejected',

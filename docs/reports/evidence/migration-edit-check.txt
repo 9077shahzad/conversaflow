@@ -1,0 +1,26 @@
+Check: did any persistent environment apply the earlier versions of migrations 0025 and 0026?
+Run: 2026-10-21T04:47Z, on the development workspace.
+
+Files changed in place (first version in 571abe4, corrected in 0de62ee):
+  packages/database/migrations/0025_retry_lineage_failure_kinds.sql
+  packages/database/migrations/0026_templates.sql
+  0de62ee 2026-10-21 03:07:11 +0000 Slice 3 review fixes (findings 1-11)
+  571abe4 2026-10-21 02:42:03 +0000 BRD v1.2 Wave 1, slice 3: retry decision, templates, media, response targets, channel health
+
+Persistent databases that could have applied them:
+  - Hosted backend or database: none exists (no hosting approved).
+  - Netlify screens preview: never published (the earlier upload was blocked); its configuration (1eac98c) builds the web
+    screens only, with "No engine, database or email is connected".
+  - Git remotes: 0 configured (nothing pushed anywhere).
+  - Docker on this workspace: daemon not running; no containers or volumes reachable.
+  - System PostgreSQL cluster on this workspace (/var/lib/postgresql/16/main): databases present =
+      "postgres"
+      "template1"
+      "template0"
+    (defaults only; no ConversaFlow database).
+  - Local test clusters (scripts/with-local-services.sh, verify-clean-checkout.sh, review clones): created per run and deleted
+    on exit; leftover run folders found: 0.
+
+Conclusion: no persistent environment applied the earlier versions. Any other database (for example a developer's own
+machine, which this check cannot see) must be recreated rather than migrated if it applied 0025/0026 before 0de62ee;
+the migration runner refuses changed files by checksum, so this cannot happen silently.

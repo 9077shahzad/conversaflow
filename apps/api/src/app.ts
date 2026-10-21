@@ -14,7 +14,7 @@ import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 import {
   AuditController, AuthController, BillingController, ChannelsController, FilesController, HealthController, InboxController,
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
-  TemplatesController, ContactsController,
+  TemplatesController, ContactsController, CampaignsController, SuppressionsController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -28,6 +28,7 @@ import { SandboxAdapter } from './modules/channels';
 import { InboxService } from './modules/inbox.service';
 import { TemplatesService } from './modules/templates.service';
 import { HealthService } from './modules/health.service';
+import { CampaignsService } from './modules/campaigns';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
 import { SettingsService } from './modules/settings.service';
@@ -75,12 +76,12 @@ export class AppModule {
       controllers: [
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
-        InboxController, MessagesController, TemplatesController, ContactsController,
+        InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
-        service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService),
+        service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

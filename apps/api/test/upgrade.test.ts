@@ -10,6 +10,9 @@ import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { migrate } from '@conversaflow/database/dist/migrate';
+import { SYSTEM_ROLES } from '../src/modules/rbac';
+import { firstReleasePermissions } from './permission-history';
+
 
 const superUrl = process.env.DATABASE_SUPERUSER_URL;
 const passwords = {
@@ -67,6 +70,53 @@ describe.skipIf(!superUrl)('upgrading a database that already has data', () => {
       const forced = (await su.query<{ relname: string; f: boolean }>(
         `SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname IN ('messages', 'memberships', 'channel_connections', 'provider_accounts')`)).rows;
       expect(forced.every((r) => r.f)).toBe(true);
+      await su.end();
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.end();
+    }
+  }, 120_000);
+
+  it('SR-1: built-in roles of a company created before 0022 gain exactly the intended permissions; custom roles are untouched', async () => {
+    const name = `cf_roles_${randomUUID().slice(0, 8)}`;
+    const admin = new pg.Client({ connectionString: superUrl });
+    await admin.connect();
+    await admin.query(`CREATE DATABASE ${name} OWNER ${new URL(process.env.DATABASE_URL!).username}`);
+    const ownerUrl = (() => { const u = new URL(process.env.DATABASE_URL!); u.pathname = `/${name}`; return u.toString(); })();
+    const suUrl = (() => { const u = new URL(superUrl!); u.pathname = `/${name}`; return u.toString(); })();
+    try {
+      await migrate(ownerUrl, passwords, () => undefined, { upTo: '0021' });
+      const su = new pg.Client({ connectionString: suUrl });
+      await su.connect();
+      const base = firstReleasePermissions();
+      const tenant = randomUUID();
+      await su.query(`INSERT INTO tenants (id, slug, legal_name, country, timezone, currency) VALUES ($1, $2, 'Old Co', 'SA', 'Asia/Riyadh', 'SAR')`,
+        [tenant, `old-${tenant.slice(0, 8)}`]);
+      // The built-in roles as a company created at 0021 had them: today's definitions minus later permissions.
+      for (const [key, role] of Object.entries(SYSTEM_ROLES)) {
+        const id = (await su.query<{ id: string }>('INSERT INTO roles (tenant_id, key, name, is_system) VALUES ($1, $2, $3, true) RETURNING id', [tenant, key, role.name])).rows[0]!.id;
+        for (const p of role.permissions.filter((x) => base.has(x))) await su.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [tenant, id, p]);
+      }
+      // Two custom roles, one deliberately narrow and one named like a built-in purpose; neither may change.
+      const custom: Record<string, string[]> = { qa: ['contacts.read'], night_shift: ['inbox.reply', 'contacts.read'] };
+      for (const [key, perms] of Object.entries(custom)) {
+        const id = (await su.query<{ id: string }>('INSERT INTO roles (tenant_id, key, name, is_system) VALUES ($1, $2, $2, false) RETURNING id', [tenant, key])).rows[0]!.id;
+        for (const p of perms) await su.query('INSERT INTO role_permissions (tenant_id, role_id, permission_key) VALUES ($1, $2, $3)', [tenant, id, p]);
+      }
+
+      await migrate(ownerUrl, passwords, () => undefined);
+      const rows = (await su.query<{ key: string; is_system: boolean; perms: string[] }>(
+        `SELECT r.key, r.is_system, coalesce(array_agg(rp.permission_key ORDER BY rp.permission_key) FILTER (WHERE rp.permission_key IS NOT NULL), '{}') AS perms
+         FROM roles r LEFT JOIN role_permissions rp ON rp.role_id = r.id WHERE r.tenant_id = $1 GROUP BY r.key, r.is_system`, [tenant])).rows;
+      for (const [key, role] of Object.entries(SYSTEM_ROLES)) {
+        expect(rows.find((r) => r.key === key)!.perms, key).toEqual([...role.permissions].sort());
+      }
+      for (const [key, perms] of Object.entries(custom)) expect(rows.find((r) => r.key === key)!.perms, key).toEqual([...perms].sort());
+      // Running the step again (as later migrations will) changes nothing.
+      const before = (await su.query('SELECT count(*)::int AS n FROM role_permissions')).rows[0].n;
+      await su.query(`INSERT INTO role_permissions (tenant_id, role_id, permission_key)
+        SELECT r.tenant_id, r.id, g.permission_key FROM roles r JOIN system_role_grants g ON g.role_key = r.key WHERE r.is_system ON CONFLICT DO NOTHING`);
+      expect((await su.query('SELECT count(*)::int AS n FROM role_permissions')).rows[0].n).toBe(before);
       await su.end();
     } finally {
       await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);

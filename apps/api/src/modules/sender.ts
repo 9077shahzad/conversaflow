@@ -49,7 +49,12 @@ import { stopTimerOnReply } from './sla';
  *   e. One send job per message (database constraint), and a person's retry is a new message with its own job,
  *      limited to one per original message across the whole chain (migration 0025).
  */
-export const SEND_LIMITS = { maxAttempts: 5, leaseSeconds: 120, baseBackoffSeconds: 5, providerTimeoutMs: 30_000 };
+/**
+ * providerTimeoutMs: how long we wait before treating the attempt as uncertain. lateWindowMs: how much longer the
+ * request is kept open after that, only so that a late answer's message id can be recorded for reconciliation; the
+ * request is cancelled at the end of it. Both together stay well inside the lease.
+ */
+export const SEND_LIMITS = { maxAttempts: 5, leaseSeconds: 120, baseBackoffSeconds: 5, providerTimeoutMs: 30_000, lateWindowMs: 60_000 };
 export const SERVICE_WINDOW_MS = 24 * 3600_000;
 
 /** Test hooks that simulate a process stopping at a given point. Never set in production code paths. */
@@ -63,10 +68,10 @@ export type FailureKind = 'blocked' | 'rejected' | 'exhausted' | 'provider_repor
 type JobRow = {
   job_id: string; job_state: string; job_attempts: number; message_id: string; status: string; body: string | null;
   sent_by_membership_id: string | null; conversation_id: string; kind: string; template_id: string | null; template_params: string[] | null;
-  file_id: string | null;
+  file_id: string | null; campaign_id: string | null;
 };
 const JOB_SELECT = `SELECT j.id AS job_id, j.state AS job_state, j.attempts AS job_attempts, m.id AS message_id, m.status, m.body,
-                m.sent_by_membership_id, m.conversation_id, m.kind, m.template_id, m.template_params, m.file_id
+                m.sent_by_membership_id, m.conversation_id, m.kind, m.template_id, m.template_params, m.file_id, m.campaign_id
          FROM send_jobs j JOIN messages m ON m.id = j.message_id WHERE j.id = $1 FOR UPDATE OF j, m`;
 
 export class Sender {
@@ -77,7 +82,12 @@ export class Sender {
     private readonly providerTimeoutMs = SEND_LIMITS.providerTimeoutMs,
     /** Needed to send media messages; without it a media message is blocked before anything is sent. */
     private readonly storage?: ObjectStorage,
+    private readonly lateWindowMs = SEND_LIMITS.lateWindowMs,
   ) {}
+
+  /** Late answers still being awaited (tests wait for them with settleLate()). */
+  private readonly late = new Set<Promise<void>>();
+  async settleLate() { await Promise.all([...this.late]); }
 
   /** Worker entry point: leases due jobs across companies and processes them. Returns how many were processed. */
   async dispatchDue(limit = 20): Promise<number> {
@@ -113,6 +123,7 @@ export class Sender {
 
       if (row.status === 'submitting') {
         // A previous attempt stopped after it may have reached the provider. Never send again automatically.
+        await recordAttempt(tx, tenantId, row.message_id, null, 'interrupted', 'interrupted', null);
         await this.finishUncertain(tx, row, 'interrupted');
         return { done: 'uncertain' as const };
       }
@@ -121,10 +132,24 @@ export class Sender {
         return { done: 'nothing_to_do' as const };
       }
 
+      // Campaign messages: a paused campaign holds its queued messages (nothing is sent, no attempt is counted) until it
+      // is resumed; a cancelled one stops them. The campaign's creator must still be allowed to run campaigns.
+      const camp = row.campaign_id
+        ? (await tx.query<{ status: string; creator_ok: boolean }>(
+            `SELECT c.status, EXISTS (SELECT 1 FROM memberships mb JOIN membership_roles mr ON mr.membership_id = mb.id
+                       JOIN role_permissions rp ON rp.role_id = mr.role_id AND rp.permission_key = 'campaigns.manage'
+                       WHERE mb.id = c.created_by AND mb.status = 'active') AS creator_ok
+             FROM campaigns c WHERE c.id = $1`, [row.campaign_id])).rows[0]!
+        : null;
+      if (camp && (camp.status === 'paused' || camp.status === 'scheduled')) {
+        await tx.query(`UPDATE send_jobs SET state = 'pending', lease_until = NULL, next_attempt_at = now() + interval '60 seconds', updated_at = now() WHERE id = $1`, [jobId]);
+        return { done: 'retry_later' as const };
+      }
+
       const ctx = (await tx.query<{
         opted_out: boolean; last_inbound_at: Date | null; paused: boolean; paused_by: string | null; channel_status: string;
         provider: Provider; number: string; wa: string | null; assigned: string | null; sender_may_reply: boolean;
-        marketing_consent: boolean; conn_account: string;
+        marketing_consent: boolean; conn_account: string; suppressed: boolean;
       }>(
         `SELECT (ct.opted_out_at IS NOT NULL) AS opted_out, c.last_inbound_at,
                 (c.paused_at IS NOT NULL AND (c.paused_until IS NULL OR c.paused_until > now())) AS paused,
@@ -134,7 +159,9 @@ export class Sender {
                 EXISTS (SELECT 1 FROM memberships mb JOIN membership_roles mr ON mr.membership_id = mb.id
                         JOIN role_permissions rp ON rp.role_id = mr.role_id AND rp.permission_key = 'inbox.reply'
                         WHERE mb.id = $2 AND mb.status = 'active') AS sender_may_reply,
-                (ct.marketing_consent_at IS NOT NULL) AS marketing_consent, ch.account_ref AS conn_account
+                (ct.marketing_consent_at IS NOT NULL) AS marketing_consent, ch.account_ref AS conn_account,
+                EXISTS (SELECT 1 FROM suppressions s JOIN contact_identifiers ci ON ci.value = s.wa_number AND ci.kind = 'whatsapp'
+                        WHERE ci.contact_id = ct.id) AS suppressed
          FROM conversations c JOIN contacts ct ON ct.id = c.contact_id JOIN channel_connections ch ON ch.id = c.connection_id
          WHERE c.id = $1`, [row.conversation_id, row.sent_by_membership_id])).rows[0]!;
       // A template must still be approved, belong to this number's business account and, for marketing, have consent.
@@ -144,21 +171,31 @@ export class Sender {
         : null;
       // Conditions can change while a message waits (owner decision 21 Oct 2026); they are all checked again now.
       const refusal =
-        !ctx.sender_may_reply ? 'sender_not_allowed'
+        camp ? (
+          camp.status === 'cancelled' ? 'campaign_cancelled'
+          : !camp.creator_ok ? 'sender_not_allowed'
+          : ctx.paused ? 'replies_paused'
+          : ctx.opted_out ? 'contact_opted_out'
+          : !ctx.marketing_consent ? 'marketing_consent_required'
+          : ctx.suppressed ? 'suppressed'
+          : null)
+        : !ctx.sender_may_reply ? 'sender_not_allowed'
         : ctx.paused && ctx.paused_by !== row.sent_by_membership_id ? 'replies_paused'
         : ctx.assigned !== null && ctx.assigned !== row.sent_by_membership_id ? 'assigned_to_other'
-        : ctx.opted_out ? 'contact_opted_out'
+        : null;
+      const refusal2 = refusal
+        ?? (ctx.opted_out ? 'contact_opted_out'
         : ctx.channel_status !== 'active' ? 'channel_disabled'
         : tpl && tpl.account_ref !== ctx.conn_account ? 'template_account_mismatch'
         : tpl && tpl.status !== 'approved' ? 'template_not_approved'
         : tpl && tpl.category === 'marketing' && !ctx.marketing_consent ? 'marketing_consent_required'
         : !tpl && (!ctx.last_inbound_at || Date.now() - ctx.last_inbound_at.getTime() >= SERVICE_WINDOW_MS) ? 'template_required'
         : !ctx.wa ? 'no_whatsapp_identifier'
-        : null;
+        : null);
       // A media message's file must still be this company's, clean and acceptable; it is read before anything is sent.
       let media: Omit<MediaSendInput, 'providerNumberId' | 'to' | 'callbackData' | 'signal'> | null = null;
       let mediaRefusal: string | null = null;
-      if (!refusal && row.kind === 'media') {
+      if (!refusal2 && row.kind === 'media') {
         const f = (await tx.query<{ status: string; content_type: string; size_bytes: string; original_name: string; storage_key: string }>(
           'SELECT status, content_type, size_bytes, original_name, storage_key FROM files WHERE id = $1', [row.file_id])).rows[0];
         const type = f ? outboundTypeFor(f.content_type, Number(f.size_bytes)) : null;
@@ -169,19 +206,21 @@ export class Sender {
           } catch { mediaRefusal = 'file_unavailable'; }
         }
       }
-      if (refusal || mediaRefusal) {
-        await this.finishFailed(tx, row, 'blocked', (refusal ?? mediaRefusal)!, 'done');
+      if (refusal2 || mediaRefusal) {
+        await this.finishFailed(tx, row, 'blocked', (refusal2 ?? mediaRefusal)!, 'done');
         return { done: 'failed' as const };
       }
       if (this.faults.crashBeforeSubmit) throw new SimulatedCrash('before submission');
-      await tx.query(`UPDATE messages SET status = 'submitting', attempts = attempts + 1 WHERE id = $1`, [row.message_id]);
+      const attempt = (await tx.query<{ attempts: number }>(
+        `UPDATE messages SET status = 'submitting', attempts = attempts + 1 WHERE id = $1 RETURNING attempts`, [row.message_id])).rows[0]!.attempts;
       await tx.query(`UPDATE send_jobs SET attempts = attempts + 1, updated_at = now() WHERE id = $1`, [jobId]);
       if (tpl) await tx.query('UPDATE messages SET pricing_category = $2 WHERE id = $1', [row.message_id, tpl.category]);
-      return { row, provider: ctx.provider, number: ctx.number, to: ctx.wa as string, tpl, media };
+      return { row, provider: ctx.provider, number: ctx.number, to: ctx.wa as string, tpl, media, attempt };
     });
     if ('done' in prepared) return prepared.done as JobOutcome;
 
-    // Step 2: the provider call.
+    // Step 2: the provider call. After providerTimeoutMs the attempt counts as uncertain; the request stays open for
+    // lateWindowMs more so that a late answer's message id can still be recorded (never re-sent), then it is cancelled.
     let providerMessageId: string | null = null;
     let failure: ChannelSendError | null = null;
     try {
@@ -190,19 +229,26 @@ export class Sender {
       const abort = new AbortController();
       let timer: NodeJS.Timeout | undefined;
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          abort.abort();
-          reject(new ChannelSendError('provider_timeout', 'No answer from the provider in time.', 'uncertain'));
-        }, this.providerTimeoutMs);
+        timer = setTimeout(() => reject(new ChannelSendError('provider_timeout', 'No answer from the provider in time.', 'uncertain')), this.providerTimeoutMs);
       });
+      const base = { providerNumberId: prepared.number, to: prepared.to, callbackData: prepared.row.message_id, signal: abort.signal };
+      const call = prepared.tpl
+        ? adapter.sendTemplate({ ...base, templateName: prepared.tpl.name, language: prepared.tpl.language, params: prepared.row.template_params ?? [] })
+        : prepared.media
+          ? adapter.sendMedia({ ...base, ...prepared.media })
+          : adapter.sendText({ ...base, body: prepared.row.body ?? '' });
       try {
-        const base = { providerNumberId: prepared.number, to: prepared.to, callbackData: prepared.row.message_id, signal: abort.signal };
-        const call = prepared.tpl
-          ? adapter.sendTemplate({ ...base, templateName: prepared.tpl.name, language: prepared.tpl.language, params: prepared.row.template_params ?? [] })
-          : prepared.media
-            ? adapter.sendMedia({ ...base, ...prepared.media })
-            : adapter.sendText({ ...base, body: prepared.row.body ?? '' });
         providerMessageId = (await Promise.race([call, timeout])).providerMessageId;
+      } catch (err) {
+        if (err instanceof ChannelSendError && err.code === 'provider_timeout') {
+          const cancel = setTimeout(() => abort.abort(), this.lateWindowMs);
+          const late = call
+            .then((r) => this.recordLateAnswer(tenantId, prepared.row.message_id, prepared.attempt, r.providerMessageId))
+            .catch(() => undefined)
+            .finally(() => { clearTimeout(cancel); this.late.delete(late); });
+          this.late.add(late);
+        }
+        throw err;
       } finally {
         clearTimeout(timer);
       }
@@ -212,16 +258,19 @@ export class Sender {
     }
     if (this.faults.crashAfterSubmit) throw new SimulatedCrash('after submission');
 
-    // Step 3: record the outcome.
+    // Step 3: record the outcome, and the evidence for it.
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0]!;
       if (providerMessageId) {
         await lockProviderId(tx, providerMessageId);
+        await recordAttempt(tx, tenantId, row.message_id, prepared.attempt, 'accepted', null, providerMessageId);
         // `uncertain` is allowed too: another attempt may have given up on this one while it was still running.
         const marked = await tx.query(
           `UPDATE messages SET status = 'sent', provider_message_id = $2, error_code = NULL, failure_kind = NULL
            WHERE id = $1 AND status IN ('submitting', 'uncertain')`,
           [row.message_id, providerMessageId]);
+        // A status webhook may have settled it first (e.g. delivered): keep that status, but keep the id too.
+        if (marked.rowCount === 0) await keepProviderId(tx, row.message_id, providerMessageId);
         await tx.query(`UPDATE send_jobs SET state = 'done', lease_until = NULL, last_error = NULL, updated_at = now() WHERE id = $1`, [jobId]);
         await applyOrphanStatuses(tx, row.message_id, providerMessageId);
         // Only a reply this call actually recorded as sent answers the customer (review finding 7); a status webhook
@@ -230,6 +279,8 @@ export class Sender {
         return 'sent' as const;
       }
       const f = failure!;
+      await recordAttempt(tx, tenantId, row.message_id, prepared.attempt,
+        f.kind === 'not_accepted' ? 'not_accepted' : f.kind === 'rejected' ? 'rejected' : 'uncertain', f.code, null);
       if (f.kind === 'not_accepted' && row.job_attempts < SEND_LIMITS.maxAttempts) {
         const delay = SEND_LIMITS.baseBackoffSeconds * 2 ** (row.job_attempts - 1);
         await tx.query(`UPDATE messages SET status = 'queued', error_code = $2 WHERE id = $1 AND status = 'submitting'`, [row.message_id, f.code]);
@@ -240,8 +291,17 @@ export class Sender {
         return 'retry_later' as const;
       }
       if (f.kind === 'not_accepted') {
-        await this.finishFailed(tx, row, 'exhausted', `retries_exhausted:${f.code}`, 'dead');
-        return 'failed' as const;
+        // "Not accepted after 5 attempts" needs five recorded, definite refusals. If any attempt of this message had
+        // an ambiguous outcome, the provider may have it: uncertain, never a confirmed failure.
+        const evidence = (await tx.query<{ definite: number; other: number }>(
+          `SELECT count(*) FILTER (WHERE outcome = 'not_accepted')::int AS definite, count(*) FILTER (WHERE outcome <> 'not_accepted')::int AS other
+           FROM send_attempts WHERE message_id = $1`, [row.message_id])).rows[0]!;
+        if (evidence.definite >= SEND_LIMITS.maxAttempts && evidence.other === 0) {
+          await this.finishFailed(tx, row, 'exhausted', `retries_exhausted:${f.code}`, 'dead');
+          return 'failed' as const;
+        }
+        await this.finishUncertain(tx, row, 'mixed_attempt_outcomes');
+        return 'uncertain' as const;
       }
       if (f.kind === 'uncertain') {
         await this.finishUncertain(tx, row, f.code);
@@ -249,6 +309,24 @@ export class Sender {
       }
       await this.finishFailed(tx, row, 'rejected', f.code, 'done');
       return 'failed' as const;
+    });
+  }
+
+  /**
+   * The provider's answer arrived after we had stopped waiting. Its message id is recorded so status webhooks match
+   * by id as well as by our reference. Statuses only move forward: an uncertain message becomes sent; a delivered,
+   * read or failed message keeps its status. Nothing is sent again.
+   */
+  private async recordLateAnswer(tenantId: string, messageId: string, attempt: number, providerMessageId: string) {
+    await withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      await lockProviderId(tx, providerMessageId);
+      await recordAttempt(tx, tenantId, messageId, attempt, 'late_accepted', null, providerMessageId);
+      if (!(await keepProviderId(tx, messageId, providerMessageId))) return;
+      const m = (await tx.query<{ conversation_id: string; sent_by_membership_id: string | null }>(
+        `UPDATE messages SET status = 'sent', error_code = NULL WHERE id = $1 AND status = 'uncertain'
+         RETURNING conversation_id, sent_by_membership_id`, [messageId])).rows[0];
+      await applyOrphanStatuses(tx, messageId, providerMessageId);
+      if (m) await stopTimerOnReply(tx, tenantId, m.conversation_id, m.sent_by_membership_id, new Date());
     });
   }
 
@@ -274,6 +352,28 @@ export class Sender {
     await tx.query(`UPDATE send_jobs SET state = $2, lease_until = NULL, last_error = $3, updated_at = now() WHERE id = $1`,
       [jobId, state, code.slice(0, 200)]);
   }
+}
+
+/** Appends one attempt's evidence (send_attempts is append-only). attempt null = the attempt being recovered. */
+async function recordAttempt(tx: Tx, tenantId: string, messageId: string, attempt: number | null, outcome: string, code: string | null, providerMessageId: string | null) {
+  await tx.query(
+    `INSERT INTO send_attempts (tenant_id, message_id, attempt, outcome, code, provider_message_id)
+     VALUES ($1, $2, coalesce($3, (SELECT greatest(attempts, 1) FROM messages WHERE id = $2)), $4, $5, $6)`,
+    [tenantId, messageId, attempt, outcome, code?.slice(0, 100) ?? null, providerMessageId]);
+}
+
+/**
+ * Records the provider's id on a message that has none yet. Refuses (returns false) if another message already
+ * holds that id, which would mean the provider answered for a different message; that is logged, never merged.
+ */
+async function keepProviderId(tx: Tx, messageId: string, providerMessageId: string): Promise<boolean> {
+  const holder = (await tx.query<{ id: string }>('SELECT id FROM messages WHERE provider_message_id = $1', [providerMessageId])).rows[0];
+  if (holder && holder.id !== messageId) {
+    console.error('provider id already belongs to another message; not reassigned', providerMessageId);
+    return false;
+  }
+  await tx.query('UPDATE messages SET provider_message_id = $2 WHERE id = $1 AND provider_message_id IS NULL', [messageId, providerMessageId]);
+  return true;
 }
 
 /** Serialises everything that touches one provider message id, so a status can never slip between two steps. */

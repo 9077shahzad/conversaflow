@@ -208,7 +208,8 @@ describe('reliable sending', () => {
     const q = await queueOnly(conv.id, 'Slow provider', ids.agent!);
     sandbox.script.push({ slowMs: 2_000 });
     const before = sandbox.sent.length;
-    const s = new Sender(t.deps.db, t.deps.channels, {}, 200);
+    // A short late window too: the request is cancelled soon after the timeout (late answers: late-evidence.test.ts).
+    const s = new Sender(t.deps.db, t.deps.channels, {}, 200, undefined, 100);
     expect(await s.leaseNow(tenant, q.jobId)).toBe(true);
     const started = Date.now();
     expect(await s.processJob(tenant, q.jobId)).toBe('uncertain');
@@ -222,7 +223,7 @@ describe('reliable sending', () => {
     const conv = await newConversation();
     const q = await queueOnly(conv.id, 'Settled during the call', ids.agent!);
     sandbox.script.push({ slowMs: 3_000 });
-    const s = new Sender(t.deps.db, t.deps.channels, {}, 1_000);
+    const s = new Sender(t.deps.db, t.deps.channels, {}, 1_000, undefined, 100);
     expect(await s.leaseNow(tenant, q.jobId)).toBe(true);
     const running = s.processJob(tenant, q.jobId);
     await new Promise((r) => setTimeout(r, 300));

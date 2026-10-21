@@ -22,7 +22,12 @@ interface Message {
   originalAuthorMembershipId: string | null; retryNumber: number; retryable: boolean;
   templateId: string | null; pricingCategory: string | null;
   mediaType: string | null; mediaStatus: string | null; fileId: string | null; mediaFilename: string | null;
+  scanBasis: string | null;
+  /** Why this person cannot retry it now (null = they can), from the server. */
+  retryBlock: string | null;
+  attemptLog: Array<{ attempt: number; outcome: string; code: string | null; at: string }> | null;
 }
+interface Environment { whatsapp: { sandbox: boolean }; scanner: { basis: string }; maxFileBytes: number }
 interface Template { id: string; name: string; language: string; category: string; status: string; paramCount: number;
   headerText: string | null; bodyText: string; footerText: string | null }
 interface Note { id: string; body: string; authorMembershipId: string; createdAt: string }
@@ -31,6 +36,7 @@ interface Conversation {
   id: string; status: string; version: number; assignedMembershipId: string | null; activitySeq: number; windowOpen: boolean;
   contact: { id: string; displayName: string | null; optedOut: boolean; whatsapp: string | null; marketingConsentAt: string | null };
   sla: { kind: string; startedAt: string; dueAt: string } | null;
+  provider?: string;
   messages: Message[]; notes: Note[]; events: Event[]; people: Record<string, string>;
   pause: { active: boolean; reason?: string; pausedByMembershipId?: string; until?: string | null };
 }
@@ -56,6 +62,7 @@ function Inbox() {
   const [items, setItems] = useState<ListItem[] | null>(null);
   const [conv, setConv] = useState<Conversation | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
+  const [env, setEnv] = useState<Environment | null>(null);
   const can = useCallback((p: string) => !!access?.permissions.includes(p), [access]);
 
   const loadList = useCallback(async () => {
@@ -69,7 +76,7 @@ function Inbox() {
     try { setConv(await api<Conversation>(`/v1/conversations/${selected}`)); } catch { setConv(null); }
   }, [selected]);
 
-  useEffect(() => { api<Access>('/v1/me/access').then(setAccess).catch(() => undefined); }, []);
+  useEffect(() => { api<Access>('/v1/me/access').then(setAccess).catch(() => undefined); api<Environment>('/v1/me/environment').then(setEnv).catch(() => undefined); }, []);
   useEffect(() => { if (can('members.read')) api<Member[]>('/v1/members').then(setMembers).catch(() => undefined); }, [can]);
   useEffect(() => { void loadList(); const h = setInterval(loadList, 5000); return () => clearInterval(h); }, [loadList]);
   useEffect(() => { void loadConv(); const h = setInterval(loadConv, 5000); return () => clearInterval(h); }, [loadConv]);
@@ -124,7 +131,7 @@ function Inbox() {
         <section aria-label={conv?.contact.displayName ?? d.title} className={`${selected ? '' : 'hidden lg:block'} min-w-0`}>
           {!selected ? <p className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">{d.choose}</p>
             : !conv ? <p className="text-slate-600">{t(locale).common.loading}</p>
-            : <ConversationView key={conv.id} conv={conv} locale={locale} access={access} members={members} can={can}
+            : <ConversationView key={conv.id} conv={conv} locale={locale} access={access} members={members} can={can} env={env}
                 onBack={() => open(null)} onChanged={refresh} />}
         </section>
       </div>
@@ -132,8 +139,8 @@ function Inbox() {
   );
 }
 
-function ConversationView({ conv, locale, access, members, can, onBack, onChanged }: {
-  conv: Conversation; locale: Locale; access: Access | null; members: Member[]; can: (p: string) => boolean;
+function ConversationView({ conv, locale, access, members, can, env, onBack, onChanged }: {
+  conv: Conversation; locale: Locale; access: Access | null; members: Member[]; can: (p: string) => boolean; env: Environment | null;
   onBack: () => void; onChanged: () => Promise<void>;
 }) {
   const d = t(locale).inbox;
@@ -201,6 +208,7 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
         onSubmit={(reason, minutes) => act(async () => { await api(`/v1/conversations/${conv.id}/pause`, { method: 'POST', body: { reason, minutes } }); setPausing(false); })} />}
 
       <div className="space-y-2 px-4 pt-3">
+        {conv.provider === 'sandbox' && <Banner tone="slate">{d.sandboxBanner}</Banner>}
         {conv.pause.active && (
           <Banner tone="amber">
             {fill(d.pausedBanner, { name: name(conv.pause.pausedByMembershipId), reason: conv.pause.reason ?? '' })}{' '}
@@ -237,13 +245,14 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
                 {(m.body || m.kind !== 'media') && <p className="whitespace-pre-wrap break-words" dir="auto">{m.body ?? `[${m.providerType ?? m.kind}]`}</p>}
                 <p className="mt-1 text-xs text-slate-600">
                   <time dateTime={m.occurredAt}>{time(m.occurredAt, locale)}</time>
-                  {out && <> · {name(m.sentByMembershipId)} · <span className={m.status === 'failed' || m.status === 'uncertain' ? 'font-semibold text-red-700' : ''}>{d.statuses[m.status] ?? m.status}</span></>}
+                  {out && <> · {name(m.sentByMembershipId)} · <span className={m.status === 'failed' || m.status === 'uncertain' ? 'font-semibold text-red-700' : ''}>{d.statuses[m.status] ?? m.status}</span>
+                    {conv.provider === 'sandbox' && ['sent', 'delivered', 'read'].includes(m.status) && <> ({d.simulated})</>}</>}
                 </p>
                 {out && m.retryOf && m.originalAuthorMembershipId && m.sentByMembershipId !== m.originalAuthorMembershipId && (
                   <p className="text-xs text-slate-600">{fill(d.retryOfBy, { actor: name(m.sentByMembershipId), author: name(m.originalAuthorMembershipId) })}</p>
                 )}
                 {out && (m.status === 'failed' || m.status === 'uncertain') && (
-                  <DeliveryProblem m={m} conv={conv} locale={locale} busy={busy} blocked={pausedForMe || conv.contact.optedOut || !conv.windowOpen || assignedOther}
+                  <DeliveryProblem m={m} conv={conv} locale={locale} busy={busy}
                     onRetry={(confirm) => act(() => api(`/v1/messages/${m.id}/retry`, { method: 'POST', body: { seenActivity: conv.activitySeq, clientMessageId: newKey(), confirmPossibleDuplicate: confirm } }))} />
                 )}
               </div>
@@ -253,15 +262,15 @@ function ConversationView({ conv, locale, access, members, can, onBack, onChange
       </ol>
 
       {error && <p role="alert" className="mx-4 mb-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p>}
-      <Composer conv={conv} locale={locale} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} blockedReason={
+      <Composer conv={conv} locale={locale} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} blockedReason={
         pausedForMe ? d.badges.paused : conv.contact.optedOut ? d.badges.optedOut : !conv.windowOpen ? d.badges.windowClosed : null
       } templateBlocked={pausedForMe || conv.contact.optedOut} assignedOther={assignedOther} onDone={onChanged} />
     </div>
   );
 }
 
-function DeliveryProblem({ m, conv, locale, busy, blocked, onRetry }: {
-  m: Message; conv: Conversation; locale: Locale; busy: boolean; blocked: boolean; onRetry: (confirm: boolean) => void;
+function DeliveryProblem({ m, conv, locale, busy, onRetry }: {
+  m: Message; conv: Conversation; locale: Locale; busy: boolean; onRetry: (confirm: boolean) => void;
 }) {
   const d = t(locale).inbox;
   const [confirming, setConfirming] = useState(false);
@@ -276,9 +285,13 @@ function DeliveryProblem({ m, conv, locale, busy, blocked, onRetry }: {
       {!uncertain && <p>{d.failedConfirmed}</p>}
       {reason && <p>{fill(d.failedReason, { reason })}</p>}
       {uncertain && <p>{d.uncertainHelp}</p>}
+      {m.attemptLog && m.attemptLog.length > 0 && (
+        <p className="mt-1 text-xs">{d.attempts}: {m.attemptLog.map((a) => `${a.attempt} · ${d.attemptOutcomes[a.outcome] ?? a.outcome}${a.code ? ` (${a.code})` : ''}`).join('; ')}</p>
+      )}
       {m.retriedAs ? <p className="mt-1 font-medium">{d.retried}</p>
-        : !m.retryable ? <p className="mt-1">{d.retryLimit}</p>
-        : !blocked && (
+        : !m.retryable || m.retryBlock === 'retry_limit_reached' ? <p className="mt-1">{d.retryLimit}</p>
+        : m.retryBlock ? <p className="mt-1">{fill(d.retryNotPossible, { reason: d.errors[m.retryBlock] ?? m.retryBlock })}</p>
+        : (
           uncertain && !confirming
             ? <button type="button" className="btn-secondary mt-2" disabled={busy} onClick={() => setConfirming(true)}>{d.retry}</button>
             : <button type="button" className="btn-danger mt-2" disabled={busy} onClick={() => onRetry(uncertain)}>
@@ -289,8 +302,8 @@ function DeliveryProblem({ m, conv, locale, busy, blocked, onRetry }: {
   );
 }
 
-function Composer({ conv, locale, canTakeOver, canAttach, blockedReason, templateBlocked, assignedOther, onDone }: {
-  conv: Conversation; locale: Locale; canTakeOver: boolean; canAttach: boolean; blockedReason: string | null; templateBlocked: boolean;
+function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedReason, templateBlocked, assignedOther, onDone }: {
+  conv: Conversation; locale: Locale; canTakeOver: boolean; canAttach: boolean; maxFileBytes: number; blockedReason: string | null; templateBlocked: boolean;
   assignedOther: boolean; onDone: () => Promise<void>;
 }) {
   const d = t(locale).inbox;
@@ -340,7 +353,10 @@ function Composer({ conv, locale, canTakeOver, canAttach, blockedReason, templat
       body: { text, fileId: file?.id, seenActivity: conv.activitySeq, clientMessageId: key.current, takeover } }));
   }
 
+  const mb = String(Math.floor(maxFileBytes / (1024 * 1024)));
   async function attach(f: File) {
+    // The same limit the server enforces, shown before anything is uploaded.
+    if (f.size > maxFileBytes) { setProblem({ code: 'too_large', message: fill(d.tooBig, { mb }) }); return; }
     setBusy(true); setProblem(null);
     try {
       const form = new FormData();
@@ -418,7 +434,7 @@ function Composer({ conv, locale, canTakeOver, canAttach, blockedReason, templat
                     onChange={(e) => { const f = e.target.files?.[0]; if (f) void attach(f); e.target.value = ''; }} />
                 </label>
               )}
-              <span className="text-xs text-slate-600">{d.attachHelp}</span>
+              <span className="text-xs text-slate-600">{d.attachHelp} {fill(d.sizeLimit, { mb })}</span>
             </div>
           )}
         </>
@@ -459,6 +475,7 @@ function MediaItem({ m, locale, canOpen }: { m: Message; locale: Locale; canOpen
     <div className={`mb-1 rounded-lg border px-2.5 py-1.5 text-sm ${ok ? 'border-slate-300 bg-white' : 'border-amber-300 bg-amber-50'}`}>
       <p className="font-medium text-slate-900">{d.media[m.mediaType ?? ''] ?? m.mediaType}{m.mediaFilename ? <> · <span dir="auto">{m.mediaFilename}</span></> : null}</p>
       {m.direction === 'in' && <p className="text-xs text-slate-700">{d.mediaStatus[m.mediaStatus ?? ''] ?? m.mediaStatus}</p>}
+      {(m.mediaStatus === 'available' || m.mediaStatus === 'rejected') && m.scanBasis && <p className="text-xs text-slate-700">{d.scanBasis[m.scanBasis] ?? m.scanBasis}</p>}
       {ok && canOpen && m.fileId && <button type="button" className="btn-secondary mt-1" disabled={opening} onClick={open}>{d.openFile}</button>}
     </div>
   );

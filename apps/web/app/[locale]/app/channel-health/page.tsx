@@ -34,10 +34,12 @@ export default function ChannelHealth() {
   const [access, setAccess] = useState<Access | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [env, setEnv] = useState<{ whatsapp: { sandbox: boolean }; scanner: { basis: string } } | null>(null);
   const canManage = !!access?.permissions.includes('channels.manage');
 
   const load = useCallback(() => api<Health>('/v1/channels/health').then((x) => { setH(x); setFailed(false); }).catch(() => setFailed(true)), []);
-  useEffect(() => { void load(); api<Access>('/v1/me/access').then(setAccess).catch(() => undefined); const i = setInterval(load, 30_000); return () => clearInterval(i); }, [load]);
+  useEffect(() => { void load(); api<Access>('/v1/me/access').then(setAccess).catch(() => undefined);
+    api<{ whatsapp: { sandbox: boolean }; scanner: { basis: string } }>('/v1/me/environment').then(setEnv).catch(() => undefined); const i = setInterval(load, 30_000); return () => clearInterval(i); }, [load]);
 
   async function act(fn: () => Promise<string>) {
     setBusy(true); setNotice(null);
@@ -54,6 +56,12 @@ export default function ChannelHealth() {
     <div className="mx-auto max-w-5xl">
       <h1 className="text-2xl font-bold text-navy sm:text-3xl">{d.title}</h1>
       <p className="mt-1 text-sm text-slate-700">{d.intro}</p>
+      {env && (env.whatsapp.sandbox || env.scanner.basis !== 'official_current') && (
+        <div role="status" className="mt-2 space-y-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800">
+          {env.whatsapp.sandbox && <p>{d.sandboxNote}</p>}
+          {env.scanner.basis !== 'official_current' && <p>{d.scannerNote[env.scanner.basis] ?? d.scannerNote.unverified_signatures}</p>}
+        </div>
+      )}
       {failed && !h && <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{di.errorGeneric}</p>}
       {!h ? (!failed && <p className="mt-4 text-slate-600">{t(locale).common.loading}</p>) : (
         <>

@@ -15,6 +15,8 @@ import { InboxService } from '../modules/inbox.service';
 import type { SandboxAdapter } from '../modules/channels';
 import { TemplatesService } from '../modules/templates.service';
 import { MediaFetcher } from '../modules/media';
+import { CampaignRunner, CampaignsService } from '../modules/campaigns';
+import { Sender } from '../modules/sender';
 import { Notifier } from '../worker/notifier';
 
 const PASSWORD = 'Demo-Only-Password-2026';
@@ -99,7 +101,12 @@ async function main() {
 
     // Templates: two approved (the review decision arrives as a sandbox webhook), one still in review.
     const templates = new TemplatesService(deps);
-    const review = (providerTemplateId: string, event: string) => inbox.ingest('sandbox', {
+    // The simulated provider records the decision too, as WhatsApp would, then reports it by webhook.
+    const review = (providerTemplateId: string, event: string) => {
+      for (const list of sandbox.templates.values()) for (const x of list) if (x.providerTemplateId === providerTemplateId && event === 'APPROVED') x.status = 'approved';
+      return reviewHook(providerTemplateId, event);
+    };
+    const reviewHook = (providerTemplateId: string, event: string) => inbox.ingest('sandbox', {
       object: 'whatsapp_business_account',
       entry: [{ id: `sbx-${number}`, time: now, changes: [{ field: 'message_template_status_update',
         value: { event, message_template_id: Number(providerTemplateId), message_template_name: 'demo', message_template_language: 'en', reason: null } }] }],
@@ -124,6 +131,22 @@ async function main() {
           image: { id: 'demo-photo-1', mime_type: 'image/png', caption: 'Water under the kitchen sink' } }] } }] }],
     });
     await new MediaFetcher(deps.db, deps.channels, deps.storage, deps.scanner, config.MAX_UPLOAD_BYTES).dispatchDue();
+
+    // Campaigns: two customers who agreed to offers, an approved marketing template, one sent campaign and one draft.
+    for (const wa of ['966500000102', '966500000106']) {
+      const conv = await convOf(wa);
+      await inbox.setMarketingConsent(ownerActor, conv.contact.id, { granted: true, evidence: 'Asked for seasonal offers in chat (demo)' });
+    }
+    const offer = await templates.create(ownerActor, { name: 'autumn_offer', language: 'en', category: 'marketing',
+      bodyText: 'Hi {{1}}, our autumn AC service offer is open this week. Reply YES to book.', examples: ['Emma'] });
+    await review(offer.providerTemplateId, 'APPROVED');
+    const campaigns = new CampaignsService(deps);
+    const params = [{ source: 'contact_name', fallback: 'there' }];
+    const sent = await campaigns.create(ownerActor, { name: 'Autumn AC offer (Demo)', templateId: offer.id, params });
+    await campaigns.schedule(ownerActor, sent.id, { at: null });
+    await new CampaignRunner(deps.db).runBatch(tenant.id, sent.id);
+    await new Sender(deps.db, deps.channels).dispatchDue(50);
+    await campaigns.create(ownerActor, { name: 'Ramadan reminder (Demo draft)', templateId: offer.id, params });
   }
 
   console.log(JSON.stringify({ ownerEmail, password: PASSWORD, tenantId: tenant.id }));

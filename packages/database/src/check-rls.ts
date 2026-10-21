@@ -36,7 +36,7 @@ const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
 const COMPANY_TABLE_READERS: Record<string, string[]> = {
   cf_auth: ['invitations'],
   cf_channel: ['channel_connections', 'provider_accounts'],
-  cf_dispatch: ['send_jobs', 'media_jobs'],
+  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns'],
   cf_identity: ['memberships'],
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
@@ -89,6 +89,7 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'account_route(text,text)': '19be2ce700975b7c99cf8520ccb99891',
   'dispatch_claim(integer,integer)': '69cd1d0ac8475917c80b9676b32d79b4',
   'media_claim(integer,integer)': '60252793661bcad14021c70cf1292897',
+  'campaign_claim(integer,integer)': '67d00d321cc9f4d3ad02f8ec88136888',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
@@ -120,7 +121,7 @@ const SHARED_TABLES = [
   'auth_email_requests', 'auth_keys', 'auth_tokens', 'feature_flags', 'mfa_activation_codes', 'mfa_attempts', 'mfa_factors',
   'mfa_recovery_codes', 'mfa_reset_requests', 'permissions', 'plan_entitlements', 'plan_versions', 'plans', 'platform_audit_events',
   'platform_staff', 'provider_allowances', 'provider_rates', 'retention_policies', 'schema_migrations', 'sessions', 'tenants',
-  'trial_caps', 'trial_policy', 'user_credentials', 'users',
+  'trial_caps', 'trial_policy', 'user_credentials', 'users', 'system_role_grants',
 ];
 /**
  * Non-built-in functions called by any row-security policy, pinned to md5(pg_get_functiondef || owner). Replacing

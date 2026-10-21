@@ -1,6 +1,6 @@
 import { withContext, type Db } from '@conversaflow/database';
 import { sha256 } from '../core/crypto';
-import { storageKeyFor, type FileScanner, type ObjectStorage } from '../core/storage';
+import { scanWithBasis, storageKeyFor, type FileScanner, type ObjectStorage, type ScanBasis } from '../core/storage';
 import { ChannelSendError, type ChannelAdapter, type MediaType, type Provider } from './channels';
 import { sanitiseName } from './files.service';
 
@@ -113,7 +113,8 @@ export class MediaFetcher {
     if (data.length > Math.min(WHATSAPP_MEDIA[row.media_type].maxBytes, this.maxStoredBytes)) return this.settle(tenantId, row, 'too_large', 'too_large');
 
     let verdict: 'clean' | 'infected';
-    try { verdict = await this.scanner.scan(data); } catch {
+    let basis: ScanBasis;
+    try { ({ verdict, ...basis } = await scanWithBasis(this.scanner, data)); } catch {
       return this.later(tenantId, row, 'scanner_unavailable');
     }
 
@@ -125,9 +126,10 @@ export class MediaFetcher {
       const status = verdict === 'clean' ? 'available' : 'rejected';
       const name = sanitiseName(row.filename ?? `whatsapp-${row.media_type}-${row.message_id.slice(0, 8)}.${EXT[mime] ?? 'bin'}`);
       await tx.query(
-        `INSERT INTO files (id, tenant_id, storage_key, original_name, content_type, size_bytes, sha256, status, uploaded_by, source)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'whatsapp_inbound')`,
-        [fileId, tenantId, key, name, mime, data.length, sha256(data), status]);
+        `INSERT INTO files (id, tenant_id, storage_key, original_name, content_type, size_bytes, sha256, status, uploaded_by, source,
+                            scan_basis, scan_signature_version, scanned_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'whatsapp_inbound', $9, $10, now())`,
+        [fileId, tenantId, key, name, mime, data.length, sha256(data), status, basis.basis, basis.signatureVersion]);
       await tx.query(`UPDATE messages SET media_status = $2, file_id = $3, media_mime = $4 WHERE id = $1`,
         [row.message_id, status, status === 'available' ? fileId : null, mime]);
       await tx.query(`UPDATE media_jobs SET state = 'done', lease_until = NULL, last_error = $2, updated_at = now() WHERE id = $1`,

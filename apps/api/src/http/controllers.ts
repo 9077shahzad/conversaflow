@@ -22,6 +22,7 @@ import { TenantsService } from '../modules/tenants.service';
 import { InboxService } from '../modules/inbox.service';
 import { TemplatesService } from '../modules/templates.service';
 import { HealthService } from '../modules/health.service';
+import { CampaignsService } from '../modules/campaigns';
 import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
@@ -118,7 +119,22 @@ export class AuthController {
 
 @Controller('v1/me')
 export class MeController {
-  constructor(@Inject(AuthService) private readonly auth: AuthService, @Inject(TenantsService) private readonly tenants: TenantsService) {}
+  constructor(@Inject(AuthService) private readonly auth: AuthService, @Inject(TenantsService) private readonly tenants: TenantsService,
+    @Inject(DEPS) private readonly deps: Deps) {}
+
+  /**
+   * What this installation can actually verify, so screens never present simulated or test results as real ones:
+   * whether WhatsApp is the sandbox simulation, what malware scans are based on, and the file size limit.
+   */
+  @RequirePermission('tenant.read') @Get('environment')
+  async environment() {
+    const scan = this.deps.scanner.basis ? await this.deps.scanner.basis().catch(() => null) : null;
+    return {
+      whatsapp: { sandbox: !!this.deps.channels.sandbox, live: !!this.deps.channels.whatsapp_cloud },
+      scanner: { basis: scan?.basis ?? 'unverified_signatures', signatureVersion: scan?.signatureVersion ?? null },
+      maxFileBytes: this.deps.config.MAX_UPLOAD_BYTES,
+    };
+  }
 
   @Get()
   me(@CurrentSession() session: AuthSession) {
@@ -570,4 +586,48 @@ export class ContactsController {
   marketingConsent(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
     return this.inbox.setMarketingConsent(actor, id, body);
   }
+}
+
+@Controller('v1/campaigns')
+export class CampaignsController {
+  constructor(@Inject(CampaignsService) private readonly campaigns: CampaignsService) {}
+
+  @RequirePermission('campaigns.manage') @Get()
+  list(@CurrentActor() actor: TenantActor) { return this.campaigns.list(actor); }
+
+  /** What would happen if the campaign started now: eligible recipients, exclusions by reason, samples, cost. */
+  @RequirePermission('campaigns.manage') @Post('preview') @HttpCode(200)
+  preview(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.campaigns.preview(actor, body); }
+
+  @RequirePermission('campaigns.manage') @Post() @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.campaigns.create(actor, body); }
+
+  @RequirePermission('campaigns.manage') @Get(':id')
+  get(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.campaigns.get(actor, id); }
+
+  @RequirePermission('campaigns.manage') @Post(':id/schedule') @HttpCode(200)
+  schedule(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.campaigns.schedule(actor, id, body); }
+
+  @RequirePermission('campaigns.manage') @Post(':id/pause') @HttpCode(200)
+  pause(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.campaigns.pause(actor, id); }
+
+  @RequirePermission('campaigns.manage') @Post(':id/resume') @HttpCode(200)
+  resume(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.campaigns.resume(actor, id); }
+
+  @RequirePermission('campaigns.manage') @Post(':id/cancel') @HttpCode(200)
+  cancel(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.campaigns.cancel(actor, id); }
+}
+
+@Controller('v1/suppressions')
+export class SuppressionsController {
+  constructor(@Inject(CampaignsService) private readonly campaigns: CampaignsService) {}
+
+  @RequirePermission('campaigns.manage') @Get()
+  list(@CurrentActor() actor: TenantActor) { return this.campaigns.listSuppressions(actor); }
+
+  @RequirePermission('campaigns.manage') @Post() @HttpCode(201)
+  add(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.campaigns.addSuppression(actor, body); }
+
+  @RequirePermission('campaigns.manage') @Delete(':id') @HttpCode(204)
+  async remove(@CurrentActor() actor: TenantActor, @Param('id') id: string) { await this.campaigns.removeSuppression(actor, id); }
 }

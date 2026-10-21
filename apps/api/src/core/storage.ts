@@ -43,6 +43,23 @@ export class LocalStorage implements ObjectStorage {
 /** Malware scanning. Any failure to get a clear answer must be treated as "do not accept the file". */
 export interface FileScanner {
   scan(data: Buffer): Promise<'clean' | 'infected'>;
+  /**
+   * What a scan is based on, recorded with every file, so a result from a test signature is never presented as a
+   * check against current virus definitions.
+   */
+  basis?(): Promise<ScanBasis>;
+}
+
+export interface ScanBasis {
+  basis: 'official_current' | 'unverified_signatures' | 'test_double';
+  signatureVersion: number | null;
+}
+
+/** Scans and reports the basis together. A scanner without basis() is treated as unverified. */
+export async function scanWithBasis(scanner: FileScanner, data: Buffer): Promise<{ verdict: 'clean' | 'infected' } & ScanBasis> {
+  const verdict = await scanner.scan(data);
+  const b = scanner.basis ? await scanner.basis().catch(() => null) : null;
+  return { verdict, basis: b?.basis ?? 'unverified_signatures', signatureVersion: b?.signatureVersion ?? null };
 }
 
 export class ScannerUnavailableError extends Error {}
@@ -191,6 +208,16 @@ export class ClamdScanner implements FileScanner {
     });
   }
 
+  /**
+   * "official_current" only when clamd reports the official database as current right now; anything else (for example
+   * only the local test signature loaded) is "unverified_signatures".
+   */
+  async basis(): Promise<ScanBasis> {
+    const s = await this.signatureStatus();
+    return s.state === 'current' ? { basis: 'official_current', signatureVersion: s.databaseVersion ?? null }
+      : { basis: 'unverified_signatures', signatureVersion: null };
+  }
+
   /** Health check used at start-up and by monitoring. */
   ping(): Promise<boolean> {
     return new Promise((resolve) => {
@@ -210,5 +237,9 @@ export class SignatureScanner implements FileScanner {
   private static readonly EICAR = 'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*';
   async scan(data: Buffer): Promise<'clean' | 'infected'> {
     return data.includes(SignatureScanner.EICAR) ? 'infected' : 'clean';
+  }
+
+  async basis(): Promise<ScanBasis> {
+    return { basis: 'test_double', signatureVersion: null };
   }
 }

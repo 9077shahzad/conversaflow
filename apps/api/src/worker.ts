@@ -12,6 +12,7 @@ import { Notifier } from './worker/notifier';
 import { SandboxAdapter, type ChannelAdapter, type Provider } from './modules/channels';
 import { Sender } from './modules/sender';
 import { MediaFetcher } from './modules/media';
+import { CampaignRunner } from './modules/campaigns';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 
 const env = z
@@ -61,13 +62,24 @@ const scanner = env.SCANNER === 'clamd'
   : new SignatureScanner();
 const sender = new Sender(appDb, channels, {}, undefined, storage);
 const media = new MediaFetcher(appDb, channels, storage, scanner, env.MAX_UPLOAD_BYTES);
+const campaigns = new CampaignRunner(appDb);
 
 let stopping = false;
 process.on('SIGTERM', () => (stopping = true));
 process.on('SIGINT', () => (stopping = true));
 
 (async () => {
-  console.log('ConversaFlow worker started: account emails, outbound messages, inbound media');
+  console.log('ConversaFlow worker started: account emails, outbound messages, inbound media, campaigns');
+  void (async () => {
+    while (!stopping) {
+      try {
+        while ((await campaigns.dispatchDue(5)) > 0 && !stopping) { /* drain due batches */ }
+      } catch (err) {
+        console.error('campaign error', err instanceof Error ? err.message : err);
+      }
+      await new Promise((r) => setTimeout(r, env.MEDIA_POLL_MS));
+    }
+  })();
   void (async () => {
     while (!stopping) {
       try {

@@ -55,6 +55,14 @@ async function populate(owner: Client, label: string, tenantId: string) {
     messages: [{ from: wa, id: `wamid.iso.${label}.photo`, timestamp: String(Math.floor(Date.now() / 1000) + 3), type: 'image', image: { id: `m-${label}`, mime_type: 'image/png' } }] } }] }] });
   await request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
     .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, photo)).send(photo).expect(200);
+  // Slice 4: a suppression, a campaign and a recipient (send_attempts rows come from the reply above).
+  await owner.post('/v1/suppressions', { waNumber: `+${wa}`, reason: 'customer_request' }).expect(201);
+  const tpl = (await owner.get('/v1/templates').expect(200)).body[0];
+  const camp = (await owner.post('/v1/campaigns', { name: `Campaign ${label}`, templateId: tpl.id, params: [{ source: 'static', value: 'A' }] }).expect(201)).body;
+  await withContext(t.deps.db, { tenantId, userId: owner.userId! }, async (tx) => {
+    const contact = (await tx.query<{ id: string }>('SELECT id FROM contacts LIMIT 1')).rows[0]!.id;
+    await tx.query('INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id) VALUES ($1, $2, $3)', [tenantId, camp.id, contact]);
+  });
   // Settings, holidays, branches, teams and team members.
   await owner.post('/v1/settings/holidays', { day: '2026-12-25', name: `Holiday ${label}` }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;

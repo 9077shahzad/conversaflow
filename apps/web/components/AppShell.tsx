@@ -23,7 +23,7 @@ const ITEMS: Item[] = [
   { href: '/templates', key: 'templates', icon: 'M6 3h9l3 3v15H6zm3 7h6m-6 4h6m-6 4h4' },
   { href: '/channel-health', key: 'health', icon: 'M3 12h4l3-7 4 14 3-7h4' },
   { href: '/contacts', key: 'contacts', later: true, icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0' },
-  { href: '/campaigns', key: 'campaigns', later: true, icon: 'M4 10v4l12 5V5zM16 9h4v6h-4' },
+  { href: '/campaigns', key: 'campaigns', icon: 'M4 10v4l12 5V5zM16 9h4v6h-4' },
   { href: '/automations', key: 'automations', later: true, icon: 'M5 4h5v5H5zm9 11h5v5h-5zM7.5 9v4.5h9V15' },
   { href: '/reports', key: 'reports', later: true, icon: 'M5 20V10m7 10V4m7 16v-7' },
   { href: '/settings/company', key: 'company', icon: 'M4 21V5l8-3 8 3v16M9 21v-5h6v5' },

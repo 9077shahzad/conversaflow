@@ -322,10 +322,35 @@ export class InboxService {
                 m.failure_kind AS "failureKind", m.original_author_membership_id AS "originalAuthorMembershipId",
                 m.template_id AS "templateId", m.pricing_category AS "pricingCategory",
                 m.media_type AS "mediaType", m.media_status AS "mediaStatus", m.file_id AS "fileId", m.media_filename AS "mediaFilename",
+                (SELECT f.scan_basis FROM files f WHERE f.id = m.file_id) AS "scanBasis",
                 m.attempts, m.retry_of AS "retryOf", m.retry_number AS "retryNumber", r.id AS "retriedAs",
-                (m.direction = 'out' AND m.status IN ('failed', 'uncertain') AND r.id IS NULL AND m.retry_number < $2) AS "retryable"
-         FROM messages m LEFT JOIN messages r ON r.retry_of = m.id
+                (m.direction = 'out' AND m.status IN ('failed', 'uncertain') AND r.id IS NULL AND m.retry_number < $2) AS "retryable",
+                t.status AS "templateStatus", t.category AS "templateCategory",
+                CASE WHEN m.direction = 'out' AND m.status IN ('failed', 'uncertain') THEN
+                  (SELECT coalesce(json_agg(json_build_object('attempt', a.attempt, 'outcome', a.outcome, 'code', a.code, 'at', a.created_at)
+                                            ORDER BY a.created_at), '[]'::json) FROM send_attempts a WHERE a.message_id = m.id)
+                END AS "attemptLog"
+         FROM messages m LEFT JOIN messages r ON r.retry_of = m.id LEFT JOIN message_templates t ON t.id = m.template_id
          WHERE m.conversation_id = $1 ORDER BY m.occurred_at, m.id`, [c.id, MANUAL_RETRY_LIMIT])).rows;
+      // Why a failed or uncertain message cannot be retried by this person right now (null = it can). An ordinary reply
+      // needs the 24-hour window; an approved template does not, but must still be approved (and, for marketing,
+      // have recorded consent). The server applies the same checks again when the retry is requested and sent.
+      const windowOpenNow = c.last_inbound_at !== null && Date.now() - c.last_inbound_at.getTime() < SERVICE_WINDOW_HOURS * 3600_000;
+      const pausedForMe = pauseActive(c) && c.paused_by_membership_id !== actor.membershipId;
+      for (const m of messages) {
+        if (m.direction !== 'out' || (m.status !== 'failed' && m.status !== 'uncertain')) { m.retryBlock = null; continue; }
+        m.retryBlock =
+          m.retriedAs ? 'already_retried'
+          : m.retryNumber >= MANUAL_RETRY_LIMIT ? 'retry_limit_reached'
+          : c.status === 'resolved' ? 'conversation_resolved'
+          : contact.optedOut ? 'contact_opted_out'
+          : pausedForMe ? 'replies_paused'
+          : c.assigned_membership_id && c.assigned_membership_id !== actor.membershipId ? 'assigned_to_other'
+          : m.kind === 'template' ? (m.templateStatus !== 'approved' ? 'template_not_approved'
+            : m.templateCategory === 'marketing' && !contact.marketingConsentAt ? 'marketing_consent_required' : null)
+          : !windowOpenNow ? 'template_required'
+          : null;
+      }
       const notes = (await tx.query(
         `SELECT id, body, author_membership_id AS "authorMembershipId", created_at AS "createdAt"
          FROM internal_notes WHERE conversation_id = $1 ORDER BY created_at, id`, [c.id])).rows;
@@ -337,6 +362,8 @@ export class InboxService {
         id: c.id, status: c.status, version: c.version, assignedMembershipId: c.assigned_membership_id,
         lastMessageId: c.last_message_id, activitySeq: Number(c.activity_seq), windowOpen, contact, messages, notes, events,
         sla: c.sla_kind ? { kind: c.sla_kind, startedAt: c.sla_started_at, dueAt: c.sla_due_at } : null,
+        // 'sandbox' means every send, acceptance and status here is simulated; nothing reached WhatsApp.
+        provider: (await tx.query<{ provider: string }>('SELECT provider FROM channel_connections WHERE id = $1', [c.connection_id])).rows[0]?.provider,
         firstResponseAt: c.first_response_at,
         people: await this.names(tx, [c.assigned_membership_id, c.paused_by_membership_id,
           ...messages.map((m) => m.sentByMembershipId), ...messages.map((m) => m.originalAuthorMembershipId), ...notes.map((n) => n.authorMembershipId), ...events.map((e) => e.actorMembershipId)]),

@@ -59,7 +59,8 @@ const CreateRequest = z.object({
 const TEMPLATE_COLUMNS = `t.id, t.name, t.language, t.category, t.status, t.last_event AS "lastEvent", t.status_reason AS "statusReason",
   t.quality, t.header_text AS "headerText", t.body_text AS "bodyText", t.footer_text AS "footerText", t.param_count AS "paramCount",
   t.examples, t.provider_template_id AS "providerTemplateId", t.account_ref AS "accountRef", t.created_at AS "createdAt",
-  t.status_changed_at AS "statusChangedAt"`;
+  t.status_changed_at AS "statusChangedAt",
+  (SELECT a.provider FROM provider_accounts a WHERE a.id = t.account_ref) AS provider`;
 
 export class TemplatesService {
   constructor(private readonly deps: Deps) {}

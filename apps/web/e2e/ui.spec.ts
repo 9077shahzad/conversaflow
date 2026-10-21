@@ -124,6 +124,12 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText('visit_reminder', { exact: true })).toBeVisible();
       await checkPage(page, locale, 'templates', view);
 
+      await page.goto(`/${locale}/app/campaigns`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'الحملات' : 'Campaigns');
+      // The demo owner has not set up two-step sign-in, which campaigns require: the page says so plainly.
+      await expect(page.getByText(locale === 'ar' ? /تتطلب الحملات التحقق بخطوتين/ : /Campaigns need two-step sign-in/)).toBeVisible();
+      await checkPage(page, locale, 'campaigns', view);
+
       await page.goto(`/${locale}/app/channel-health`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'حالة القناة' : 'Channel health');
       await expect(page.getByText(locale === 'ar' ? 'رسائل تحتاج إلى متابعة' : 'Messages needing a person')).toBeVisible();
@@ -256,7 +262,7 @@ test.describe('inbox behaviour (desktop)', () => {
     await page.getByLabel('Your reply').fill('Yes, we service AC units in Dammam. Which day suits you?');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page.getByText('Yes, we service AC units in Dammam. Which day suits you?')).toBeVisible();
-    await expect(page.getByText(/· Sent$/).first()).toBeVisible();
+    await expect(page.getByText(/· Sent \(simulated\)$/).first()).toBeVisible();
     await expect(page.getByLabel('Your reply')).toHaveValue('');
 
     await page.getByRole('button', { name: /Noura \(Demo\)/ }).click();
@@ -286,7 +292,7 @@ test.describe('inbox behaviour (desktop)', () => {
     await expect(page.getByText('Hello Huda, this is a reminder of your visit on Sunday 10:00. Reply here if you need to change it.')).toHaveCount(1);
     await page.getByRole('button', { name: 'Send template' }).click();
     await expect(page.getByText('Template · utility')).toBeVisible();
-    await expect(page.getByText(/· Sent$/).first()).toBeVisible();
+    await expect(page.getByText(/· Sent \(simulated\)$/).first()).toBeVisible();
     expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? null)).toEqual([]);
     await context.close();
   });
@@ -310,4 +316,5 @@ test.describe('inbox behaviour (desktop)', () => {
     await expect(page.getByText('اتصل العميل وطلب عدم إرسال رسائل.')).toBeVisible();
     await context.close();
   });
+
 });

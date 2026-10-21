@@ -56,12 +56,27 @@ until a measured need appears.
   5. The timeout is well below the 120-second lease, so normally no second worker can take the job while the first is
      still waiting. Duplicate prevention does not depend on this timing: a worker that stalls past its lease still
      cannot cause a second send (rule 1), and its late result is recorded on the same message.
-  6. A request-level idempotency key for Meta's send endpoint was not verified in the sources checked (21 Oct 2026).
-     Until one is confirmed in Meta's documentation, rules 1–4 are the protection. The remaining duplicate risk is a
+  6. **Late answers (21 Oct 2026).** After the 30-second wait the request is kept open for up to 60 more seconds (still
+     inside the lease) only to capture a late answer. If WhatsApp's message id then arrives, it is recorded on the same
+     message (`send_attempts` outcome `late_accepted`): an uncertain message becomes sent; a delivered, read or failed
+     message keeps its status; nothing is resent. The request is then cancelled.
+  7. **Exact matching.** A status update is matched to a message by WhatsApp's message id, or, while we do not know that
+     id, by our own message id echoed back as `biz_opaque_callback_data` — never by the customer's number or by time.
+     A reference cannot attach a second provider id to a message that already has one, and one provider id can never
+     belong to two messages (unique per company). Tested with several messages to the same customer whose answers were
+     lost and whose updates arrive out of order.
+  8. **Evidence.** Every attempt is recorded in `send_attempts`. "Not accepted after 5 attempts" (`exhausted`) is used
+     only when all five attempts are recorded as definite refusals and no attempt of that message was ambiguous;
+     otherwise the message stays uncertain.
+  9. A request-level idempotency key for Meta's send endpoint was not verified in the sources checked (21 Oct 2026).
+     Until one is confirmed in Meta's documentation, rules 1–8 are the protection. The remaining duplicate risk is a
      person retrying an uncertain message, which needs explicit confirmation.
 - **Conditions are re-checked at the moment of sending:** the sender still has permission to reply and is still an
   active member, the conversation is not assigned to someone else, replies are not paused (except for the person who
   paused them), the customer has not opted out, the channel is on and the 24-hour window is open.
+- **Retry eligibility by type:** an ordinary reply or media message can be retried only while the 24-hour window is
+  open; an approved template can be retried outside it, but only while still approved (and, for marketing, with
+  recorded consent). The server gives each failed message the reason it cannot be retried now, if any.
 - **Manual retry (owner decisions 20 and 21 Oct 2026):** anyone who may reply to the conversation now may retry a
   failed message, including a colleague's. The retry is a new message linked to the original; the database records the
   original author and the person retrying, and derives the retry chain itself (`retry_root`, `retry_number`), so a
@@ -102,6 +117,30 @@ downloads, and template status. Recovery actions are restricted to ones that can
 re-applying delivery updates that arrived early, downloading a customer's file again, and re-reading template status.
 Retrying a message happens only in its conversation, through the normal retry and its checks. Viewing needs
 `channels.monitor`; recovery needs `channels.manage` (two-step sign-in), and every action is audited.
+
+## Campaigns (slice 4)
+
+- **Audience.** Contacts with a WhatsApp number and **recorded marketing consent**, not opted out, not on the
+  suppression list, optionally only those who wrote within N days. Consent is required for every campaign, whatever the
+  template's category. The preview shows the eligible count, every exclusion with its reason, personalised samples,
+  how many days the number's daily limit will need, and a cost estimate.
+- **Cost estimate.** Only verified Meta rates are used. Where no verified rate is on file for a market (today: Saudi
+  Arabia and the UAE marketing rates are still drafts from a secondary source), the estimate says so and shows no total.
+- **When recipients are chosen.** At the moment the campaign starts, not when it was scheduled. Each recipient is checked
+  again when its message is queued (opt-out, consent, suppression, frequency limit, template still approved) and again
+  by the sender just before it leaves (campaign still running, opt-out, consent, suppression, conversation not paused).
+  An opt-out received after scheduling is therefore respected at every later step.
+- **Frequency limits.** Per company: at most N campaign messages per contact in 7 days (default 2) and a minimum gap
+  between campaign messages (default 24 hours). Per number: at most the company's daily limit of campaign messages in a
+  rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier).
+- **Pause, resume, cancel.** Pausing stops queueing; messages already queued are held by the sender (no attempt is
+  counted) until resumed. Cancelling is final: waiting recipients are skipped and queued messages not yet sent are
+  stopped. Every change is audited.
+- **No duplicate sending.** One recipient per contact per campaign (unique); one message per recipient (unique); the
+  message's idempotency key is the recipient id; recipient and message are written in one transaction; the worker
+  leases each campaign through `campaign_claim()` (owned by `cf_dispatch`, scheduling columns only, pinned by the
+  guard). A crash in the middle of a batch queues nothing; the next run queues everyone exactly once. Individual send
+  failures are recorded per message and do not stop the others; nothing is resent on later runs.
 
 ## Reliable processing (remaining)
 
