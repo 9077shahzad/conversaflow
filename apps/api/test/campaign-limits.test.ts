@@ -93,8 +93,8 @@ async function sentEarlier(o: { contactId: string; connectionId: string; campaig
       [tenant, conv, randomUUID(), ownerMembership, o.hoursAgo, o.status ?? 'sent', o.failureKind ?? null,
         o.failureKind ? 'earlier' : null, template.id, o.campaignId])).rows[0]!;
     await tx.query(
-      `INSERT INTO campaign_send_counts (tenant_id, message_id, campaign_id, connection_id, contact_id, counted_at)
-       VALUES ($1, $2, $3, $4, $5, now() - make_interval(secs => $6))`,
+      `INSERT INTO campaign_send_counts (tenant_id, message_id, attempt, campaign_id, connection_id, contact_id, counted_at)
+       VALUES ($1, $2, 1, $3, $4, $5, now() - make_interval(secs => $6))`,
       [tenant, m.id, o.campaignId, o.connectionId, o.contactId, Math.round(o.hoursAgo * 3600)]);
   });
 }
@@ -211,6 +211,63 @@ describe('send-time check under concurrency', () => {
   });
 });
 
+describe('a retry after a pause is checked in full at its own time (finding B-1)', () => {
+  async function attemptOnce(messageId: string) {
+    await app((tx) => tx.query(`UPDATE send_jobs SET next_attempt_at = now() WHERE message_id = $1 AND state = 'pending'`, [messageId]));
+    const job = (await app((tx) => tx.query<{ id: string }>('SELECT id FROM send_jobs WHERE message_id = $1', [messageId]))).rows[0]!.id;
+    const s = sender();
+    if (await s.leaseNow(tenant, job)) await s.processJob(tenant, job);
+  }
+
+  it('declined, paused; meanwhile another campaign uses the number\'s room: on resume the retry waits for room and is not sent', async () => {
+    await resetAudience();
+    const n = await newNumber();
+    await customer('Declined Dalal');
+    await setLimits({ daily: 100000, per7d: 14, gapHours: 0 });
+    const a = await startCampaign('Declined then paused', n.id);
+    const m = (await messagesOf(a.id))[0]!;
+    sandbox.script.push({ notAccepted: '130429' });
+    await attemptOnce(m.id);                                              // declined: back in the queue
+    await owner.post(`/v1/campaigns/${a.id}/pause`).expect(200);
+    await setLimits({ gapHours: 1 });                                     // Dalal's queued message keeps her out of b
+    await customer('Meanwhile Majid');
+    const b = await startCampaign('Used the room meanwhile', n.id);
+    await attemptOnce((await messagesOf(b.id))[0]!.id);
+    expect((await messagesOf(b.id))[0]!.status).toBe('sent');
+    await setLimits({ daily: await used(n.id, false) });                  // no room left now
+    await owner.post(`/v1/campaigns/${a.id}/resume`).expect(200);
+    await attemptOnce(m.id);
+    const after = (await messagesOf(a.id))[0]!;
+    expect([after.status, after.attempts]).toEqual(['queued', 1]);         // held, no new attempt
+    expect((await jobOf(m.id)).last_error).toBe('daily_limit');
+    expect(sentTo(n.number)).toBe(1);
+    await owner.post(`/v1/campaigns/${a.id}/cancel`).expect(200);
+    await attemptOnce(m.id);
+    await setLimits({ daily: 100000, gapHours: 24 });
+  });
+
+  it('declined, paused; meanwhile another campaign reaches the same contact: on resume the retry is not sent (frequency limit)', async () => {
+    await resetAudience();
+    const n = await newNumber();
+    await customer('Twice Tamara');
+    await setLimits({ daily: 100000, per7d: 2, gapHours: 0 });
+    const a = await startCampaign('Declined, contact', n.id);
+    const m = (await messagesOf(a.id))[0]!;
+    sandbox.script.push({ notAccepted: '130429' });
+    await attemptOnce(m.id);
+    await owner.post(`/v1/campaigns/${a.id}/pause`).expect(200);
+    const b = await startCampaign('Reached her meanwhile', n.id);
+    await attemptOnce((await messagesOf(b.id))[0]!.id);
+    expect((await messagesOf(b.id))[0]!.status).toBe('sent');
+    await setLimits({ per7d: 1 });
+    await owner.post(`/v1/campaigns/${a.id}/resume`).expect(200);
+    await attemptOnce(m.id);
+    expect((await messagesOf(a.id))[0]).toMatchObject({ status: 'failed', failure_kind: 'blocked', error_code: 'frequency_limit' });
+    expect(sentTo(n.number)).toBe(1);
+    await setLimits({ per7d: 2, gapHours: 24 });
+  });
+});
+
 describe('atomic check and count', () => {
   it('two transactions checking the last place at the same moment: the second waits for the first and is refused', async () => {
     await resetAudience();
@@ -237,7 +294,7 @@ describe('atomic check and count', () => {
   });
 });
 
-describe('temporary refusals by WhatsApp (final recheck, finding P2-1)', () => {
+describe('temporary refusals by WhatsApp (final recheck, findings P2-1 and B-1)', () => {
   const countRows = async (messageId: string) => (await app((tx) => tx.query('SELECT 1 FROM campaign_send_counts WHERE message_id = $1', [messageId]))).rowCount;
   const attemptsOf = async (messageId: string) => (await app((tx) => tx.query<{ outcome: string }>(
     'SELECT outcome FROM send_attempts WHERE message_id = $1 ORDER BY created_at', [messageId]))).rows.map((r) => r.outcome);
@@ -249,7 +306,7 @@ describe('temporary refusals by WhatsApp (final recheck, finding P2-1)', () => {
     if (await s.leaseNow(tenant, job)) await s.processJob(tenant, job);
   }
 
-  it('declined once, then accepted: retried and sent once, counted once, the minimum gap does not block its own retry', async () => {
+  it('declined once, then accepted: retried and sent once; only the accepted hand-over counts; the minimum gap does not block its own retry', async () => {
     await resetAudience();
     const n = await newNumber();
     await customer('Retry Rasha');
@@ -262,8 +319,8 @@ describe('temporary refusals by WhatsApp (final recheck, finding P2-1)', () => {
     await attempt(m.id);
     expect((await messagesOf(camp.id))[0]!.status).toBe('sent');
     expect(await attemptsOf(m.id)).toEqual(['not_accepted', 'accepted']);
-    expect(await countRows(m.id)).toBe(1);
-    expect(await used(n.id, false)).toBe(1);
+    expect(await countRows(m.id)).toBe(2);                                // one per hand-over
+    expect(await used(n.id, false)).toBe(1);                              // the declined one does not count
     expect(sentTo(n.number)).toBe(1);
   });
 
@@ -292,7 +349,7 @@ describe('temporary refusals by WhatsApp (final recheck, finding P2-1)', () => {
     const m = (await messagesOf(camp.id))[0]!;
     sandbox.script.push({ notAccepted: '130429' });
     await attempt(m.id);
-    expect(await used(n.id, false)).toBe(1);                              // holds its place while it waits to be retried
+    expect(await used(n.id, false)).toBe(0);                              // a declined hand-over does not count
     await owner.post(`/v1/campaigns/${camp.id}/cancel`).expect(200);
     await attempt(m.id);
     expect((await messagesOf(camp.id))[0]).toMatchObject({ status: 'failed', failure_kind: 'blocked', error_code: 'campaign_cancelled' });

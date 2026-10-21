@@ -6,9 +6,9 @@
  *
  * What counts (migration 0034):
  * - only campaign messages; ordinary replies and individually sent templates do not count;
- * - a message counts once, from the moment the sender first hands it to WhatsApp, and keeps counting whatever happens
- *   next (including while a temporary refusal is retried), except when it never reached anyone: WhatsApp refused it
- *   ("rejected"), declined it on every attempt ("exhausted"), or a later check stopped it ("blocked") — 0035;
+ * - each hand-over to WhatsApp counts, from its own time, unless that attempt was definitely declined ("not
+ *   accepted") or refused ("rejected"), or the message ended as "rejected", "exhausted" or "blocked" (0036). An
+ *   attempt in flight, uncertain, interrupted or accepted counts. A retry is therefore checked in full at its own time;
  * - when queueing, messages already queued but not yet sent are counted too (as if sent now), so a campaign does not
  *   queue more than can go. At send time they are not: each is counted when it goes.
  *
@@ -44,9 +44,9 @@ export type SendTimeVerdict =
 export async function claimCampaignSend(tx: Tx, tenantId: string, m: { messageId: string; campaignId: string; conversationId: string },
   testHooks?: { afterCheck?: () => Promise<void> }): Promise<SendTimeVerdict> {
   await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:campaign-limits`]);
-  // Already counted at an earlier hand-over that WhatsApp temporarily declined: it keeps its place while it is retried,
-  // and is not checked against its own count (final recheck, finding P2-1).
-  if ((await tx.query('SELECT 1 FROM campaign_send_counts WHERE message_id = $1', [m.messageId])).rowCount) return { ok: true };
+  // Every hand-over is checked in full, including a retry after WhatsApp declined an earlier attempt: that attempt no
+  // longer counts once its outcome is recorded (0036), so the message is never checked against itself, and a retry made
+  // long after its first hand-over (for example after a pause) is checked at its own time (findings P2-1 and B-1).
   const lim = await campaignLimits(tx);
   const conv = (await tx.query<{ contact_id: string; connection_id: string }>(
     'SELECT contact_id, connection_id FROM conversations WHERE id = $1', [m.conversationId])).rows[0]!;
@@ -60,8 +60,10 @@ export async function claimCampaignSend(tx: Tx, tenantId: string, m: { messageId
   }
   // Tests only: hold here, after the check and before the count is recorded, to prove the lock makes the pair atomic.
   if (testHooks?.afterCheck) await testHooks.afterCheck();
+  // Counted as the attempt about to be made (the sender increments the message's attempt count in this transaction).
   await tx.query(
-    `INSERT INTO campaign_send_counts (tenant_id, message_id, campaign_id, connection_id, contact_id) VALUES ($1, $2, $3, $4, $5)`,
+    `INSERT INTO campaign_send_counts (tenant_id, message_id, attempt, campaign_id, connection_id, contact_id)
+     SELECT $1, $2, attempts + 1, $3, $4, $5 FROM messages WHERE id = $2`,
     [tenantId, m.messageId, m.campaignId, conv.connection_id, conv.contact_id]);
   return { ok: true };
 }
