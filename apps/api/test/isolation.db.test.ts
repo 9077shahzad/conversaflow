@@ -62,6 +62,11 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await withContext(t.deps.db, { tenantId, userId: owner.userId! }, async (tx) => {
     const contact = (await tx.query<{ id: string }>('SELECT id FROM contacts LIMIT 1')).rows[0]!.id;
     await tx.query('INSERT INTO campaign_recipients (tenant_id, campaign_id, contact_id) VALUES ($1, $2, $3)', [tenantId, camp.id, contact]);
+    // 0034: a send-count row (normally written by the sender when a campaign message is handed over).
+    const any = (await tx.query<{ id: string; connection_id: string }>(
+      `SELECT m.id, c.connection_id FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.contact_id = $1 LIMIT 1`, [contact])).rows[0]!;
+    await tx.query('INSERT INTO campaign_send_counts (tenant_id, message_id, campaign_id, connection_id, contact_id) VALUES ($1, $2, $3, $4, $5)',
+      [tenantId, any.id, camp.id, any.connection_id, contact]);
   });
   // Settings, holidays, branches, teams and team members.
   await owner.post('/v1/settings/holidays', { day: '2026-12-25', name: `Holiday ${label}` }).expect(201);

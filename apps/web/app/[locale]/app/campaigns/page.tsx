@@ -13,7 +13,8 @@ type Param = { source: 'contact_name'; fallback: string } | { source: 'static'; 
 interface Preview {
   eligible: number; contacts: number; excluded: Record<string, number>; sample: Array<{ name: string | null; text: string }>;
   dailyLimit: number; daysNeeded: number;
-  cost: { complete: boolean; total: number | null; currency: string; lines: Array<{ market: string; recipients: number; rate: number | null }> };
+  cost: { state: 'estimated' | 'unavailable' | 'no_recipients'; complete: boolean; total: number | null; currency: string; missingMarkets: string[];
+    lines: Array<{ market: string; recipients: number; rate: number | null }> };
 }
 interface Campaign {
   id: string; name: string; status: string; scheduledAt: string | null; templateName: string; templateLanguage: string;
@@ -134,9 +135,10 @@ export default function Campaigns() {
                 <p>{fill(d.daysNeeded, { limit: String(preview.dailyLimit), days: String(preview.daysNeeded) })}</p>
                 <p className="font-semibold">{d.cost}</p>
                 <p>{preview.cost.lines.map((l) => fill(d.costLine, { market: l.market, n: String(l.recipients) })).join(' · ')}</p>
-                <p>{preview.cost.complete && preview.cost.total !== null
+                <p>{preview.cost.state === 'estimated' && preview.cost.total !== null
                   ? fill(d.costTotal, { total: String(preview.cost.total), currency: preview.cost.currency })
-                  : fill(d.costMissing, { markets: preview.cost.lines.filter((l) => l.rate === null).map((l) => l.market).join(', ') })}</p>
+                  : preview.cost.state === 'no_recipients' ? d.costNone
+                  : fill(d.costMissing, { markets: preview.cost.missingMarkets.map((m) => d.markets[m] ?? m).join(', ') })}</p>
                 {preview.sample.length > 0 && <>
                   <p className="font-semibold">{d.sample}</p>
                   <ul className="space-y-1">{preview.sample.map((s, i) => <li key={i} className="whitespace-pre-wrap break-words rounded bg-white px-2 py-1" dir="auto">{s.text}</li>)}</ul>

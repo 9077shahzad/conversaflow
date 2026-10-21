@@ -124,16 +124,28 @@ Retrying a message happens only in its conversation, through the normal retry an
   suppression list, optionally only those who wrote within N days. Consent is required for every campaign, whatever the
   template's category. The preview shows the eligible count, every exclusion with its reason, personalised samples,
   how many days the number's daily limit will need, and a cost estimate.
-- **Cost estimate.** Only verified Meta rates are used. Where no verified rate is on file for a market (today: Saudi
-  Arabia and the UAE marketing rates are still drafts from a secondary source), the estimate says so and shows no total.
+- **Cost estimate.** Only verified Meta rates are used. Three distinct answers: an estimate from verified rates; "estimate
+  unavailable" with the markets that lack a verified rate (today: Saudi Arabia and UAE marketing rates are drafts from a
+  secondary source), which is explicitly not a cost of zero and shows no figure; and "no cost" when nobody would
+  receive the campaign.
 - **When recipients are chosen.** At the moment the campaign starts, not when it was scheduled. Each recipient is checked
   again when its message is queued (opt-out, consent, suppression, frequency limit, template still approved) and again
   by the sender just before it leaves (campaign still running, opt-out, consent, suppression, conversation not paused).
   An opt-out received after scheduling is therefore respected at every later step.
 - **Frequency limits.** Per company: at most N campaign messages per contact in 7 days (default 2) and a minimum gap
   between campaign messages (default 24 hours). Per number: at most the company's daily limit of campaign messages in a
-  rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier). These are checked
-  when a message is queued, not again by the sender. Batches of one company run one at a time (a lock per company), so
+  rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier).
+- **What counts toward the limits** (migration 0034, `campaign-limits.ts`): campaign messages only, from the moment the
+  sender hands them to WhatsApp, timed from then. They keep counting whatever happens next (sent, delivered, read,
+  uncertain, reported undelivered), except messages WhatsApp definitely refused ("rejected", "exhausted"). Ordinary
+  replies and individually sent templates do not count. When queueing, messages already queued count too, as if sent
+  now; at send time each message is counted when it goes.
+- **Checked twice.** When queueing (planning: how many to queue, who to skip) and again immediately before sending. The
+  send-time check takes a per-company lock, checks the contact's 7-day count and minimum gap and the number's 24-hour
+  count, and records the message as counted in the same transaction that moves it to "submitting". Two senders or
+  two campaigns therefore cannot both take the last place. A contact over its limits is not sent the message
+  ("frequency_limit"); a number without room holds the message, with no attempt counted, until the oldest counted
+  message turns 24 hours old. This covers messages delayed by a pause, a backlog or a lowered limit. Batches of one company run one at a time (a lock per company), so
   two workers on different campaigns cannot both use the same room. A batch that changes nothing (no room yet, or
   waiting for its queued messages to leave) keeps its lease for 30 seconds, so the worker does not pick it up again at
   once. The daily count covers campaign messages only, per

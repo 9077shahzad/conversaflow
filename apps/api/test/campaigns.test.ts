@@ -57,10 +57,16 @@ const params = [{ source: 'contact_name', fallback: 'there' }];
 const createCampaign = async (name: string, extra: Record<string, unknown> = {}) =>
   (await owner.post('/v1/campaigns', { name, templateId: marketing.id, params, ...extra }).expect(201)).body;
 const runner = (faults = {}) => new CampaignRunner(t.deps.db, faults);
-/** Sets the number's rolling 24-hour campaign limit to what has been used so far plus `extra`. */
-async function allowMore(extra: number) {
+/** The company's one number. */
+const connectionId = async () => (await app((tx) => tx.query<{ id: string }>('SELECT id FROM channel_connections WHERE provider_number_id = $1', [NUMBER]))).rows[0]!.id;
+/**
+ * Sets the number's rolling 24-hour campaign limit to what is used so far plus `extra`. With `waiting` (queue time),
+ * queued campaign messages count as used; without it (send time), only messages already handed to WhatsApp do.
+ */
+async function allowMore(extra: number, waiting = true) {
+  const conn = await connectionId();
   await app(async (tx) => {
-    const used = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM messages WHERE campaign_id IS NOT NULL AND created_at > now() - interval '24 hours'`)).rows[0]!.n;
+    const used = (await tx.query<{ n: number }>('SELECT campaign_daily_used($1, $2) AS n', [conn, waiting])).rows[0]!.n;
     await tx.query('UPDATE tenant_settings SET campaign_daily_limit = $1', [used + extra]);
   });
 }
@@ -125,17 +131,23 @@ describe('audience preview and cost estimate', () => {
       'Hi Basim, our autumn AC service offer is open this week. Reply YES to book.',
     ]));
     // No verified Meta marketing rate is on file for Saudi Arabia: no total, and the line says so.
-    expect(p.cost).toMatchObject({ category: 'marketing', complete: false, total: null });
+    // Unavailable is not zero: no figure, and the reason (which market has no verified rate) is given.
+    expect(p.cost).toMatchObject({ category: 'marketing', state: 'unavailable', complete: false, total: null, missingMarkets: ['SA'] });
+    expect(p.cost.note).toContain('not a cost of zero');
     expect(p.cost.lines).toEqual([expect.objectContaining({ market: 'SA', recipients: 2, rate: null })]);
     // With a verified rate on file, the total is computed from it (a test rate, removed afterwards).
     await t.ownerDb.query(`INSERT INTO provider_rates (provider, market, category, unit, currency, rate, effective_from, source_url, source_checked_on, status, reconciliation_note)
-      VALUES ('meta_whatsapp', 'SA', 'marketing', 'message', 'USD', 0.05, '2026-01-01', 'https://example.test/rate', '2026-10-21', 'verified', 'test only')`).catch(() => undefined);
-    const rated = await withContext(t.deps.db, { tenantId: tenant, userId: null }, async (tx) => (await tx.query('SELECT count(*)::int AS n FROM provider_rates WHERE market = $1 AND category = $2', ['SA', 'marketing'])).rows[0].n);
-    if (rated > 0) {
+      VALUES ('meta_whatsapp', 'SA', 'marketing', 'message', 'USD', 0.05, '2026-01-01', 'https://example.test/rate', '2026-10-21', 'verified', 'test only')`);
+    try {
       const p2 = (await owner.post('/v1/campaigns/preview', { templateId: marketing.id, params }).expect(200)).body;
-      expect(p2.cost).toMatchObject({ complete: true, total: 0.1 });
-      await t.ownerDb.query(`DELETE FROM provider_rates WHERE source_url = 'https://example.test/rate'`).catch(() => undefined);
+      expect(p2.cost).toMatchObject({ state: 'estimated', complete: true, total: 0.1, missingMarkets: [] });
+    } finally {
+      await t.ownerDb.query(`DELETE FROM provider_rates WHERE source_url = 'https://example.test/rate'`);
     }
+    // Nobody eligible: a real cost of zero, labelled as such, distinct from "unavailable".
+    await resetAudience();
+    const none = (await owner.post('/v1/campaigns/preview', { templateId: marketing.id, params }).expect(200)).body;
+    expect(none.cost).toMatchObject({ state: 'no_recipients', total: 0 });
     // Parameters must match the template.
     await owner.post('/v1/campaigns/preview', { templateId: marketing.id, params: [] }).expect(400);
   });

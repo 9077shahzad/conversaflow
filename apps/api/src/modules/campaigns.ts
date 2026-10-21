@@ -6,6 +6,7 @@ import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
 import { providerRateOn } from './provider-rates';
+import { campaignLimits, dailyRoom, type Limits } from './campaign-limits';
 import { checkParamValue, renderTemplate } from './templates.service';
 
 /**
@@ -43,12 +44,7 @@ const SuppressionInput = z.object({
 
 export type SkipReason = 'opted_out' | 'no_consent' | 'suppressed' | 'frequency_limit' | 'no_whatsapp' | 'template_not_approved' | 'campaign_cancelled' | 'replies_paused';
 
-type Limits = { perContact7d: number; minGapHours: number; daily: number };
-async function limits(tx: Tx): Promise<Limits> {
-  const r = (await tx.query<{ a: number | null; b: number | null; c: number | null }>(
-    `SELECT campaign_max_per_contact_7d AS a, campaign_min_gap_hours AS b, campaign_daily_limit AS c FROM tenant_settings`)).rows[0];
-  return { perContact7d: r?.a ?? 2, minGapHours: r?.b ?? 24, daily: r?.c ?? 250 };
-}
+const limits = campaignLimits;
 
 /**
  * The audience as it stands right now: every contact with a WhatsApp number, with the first reason (if any) it would
@@ -64,12 +60,7 @@ async function evaluateAudience(tx: Tx, audience: z.infer<typeof Audience>, lim:
               WHEN EXISTS (SELECT 1 FROM suppressions s WHERE s.wa_number = wa.value) THEN 'suppressed'
               WHEN $1::int IS NOT NULL AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.contact_id = ct.id
                      AND c.last_inbound_at > now() - make_interval(days => $1::int)) THEN 'not_recent'
-              WHEN (SELECT count(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                    WHERE c.contact_id = ct.id AND m.campaign_id IS NOT NULL AND m.created_at > now() - interval '7 days'
-                      AND m.status NOT IN ('failed')) >= $2
-                OR EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                    WHERE c.contact_id = ct.id AND m.campaign_id IS NOT NULL AND m.status NOT IN ('failed')
-                      AND m.created_at > now() - make_interval(hours => $3)) THEN 'frequency_limit'
+              WHEN campaign_contact_blocked(ct.id, $2::int, $3::int, true) THEN 'frequency_limit'
             END AS reason
      FROM contacts ct
      LEFT JOIN LATERAL (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) wa ON true
@@ -104,9 +95,14 @@ async function estimate(tx: Tx, category: string, numbers: string[]) {
     if (!rate) complete = false; else total += rate.rate * recipients;
     lines.push({ market, recipients, rate: rate?.rate ?? null, currency: 'USD', source: rate?.sourceUrl ?? null, effectiveFrom: rate?.effectiveFrom ?? null });
   }
-  return { category, lines, total: complete ? Math.round(total * 100) / 100 : null, currency: 'USD', complete,
-    note: complete ? 'Verified Meta rates; assumes every eligible recipient receives the message.'
-      : 'No verified Meta rate is on file for at least one market, so no total is shown.' };
+  // Three different answers, never confused: an estimate from verified rates; no estimate (a rate is not verified; this
+  // is NOT a cost of zero); and no cost because nobody would receive the message.
+  const state = numbers.length === 0 ? 'no_recipients' : complete ? 'estimated' : 'unavailable';
+  return { category, lines, state, total: state === 'unavailable' ? null : Math.round(total * 100) / 100, currency: 'USD', complete,
+    missingMarkets: lines.filter((l) => l.rate === null).map((l) => l.market),
+    note: state === 'estimated' ? 'Verified Meta rates; assumes every eligible recipient receives the message.'
+      : state === 'unavailable' ? 'No verified Meta rate is on file for at least one market, so no estimate is shown. This is not a cost of zero.'
+      : 'Nobody would receive this campaign now, so it would cost nothing.' };
 }
 
 function resolveParams(params: z.infer<typeof ParamSource>[], contactName: string | null): string[] {
@@ -342,11 +338,9 @@ export class CampaignRunner {
         }
         await tx.query(`UPDATE campaigns SET status = 'running', started_at = now(), updated_at = now() WHERE id = $1`, [campaignId]);
       }
-      // The number's rolling 24-hour limit across all campaigns of this connection.
-      const used = (await tx.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
-         WHERE m.campaign_id IS NOT NULL AND cv.connection_id = $1 AND m.created_at > now() - interval '24 hours'`, [c.connection_id])).rows[0]!.n;
-      const room = Math.max(0, Math.min(CAMPAIGN_LIMITS.batchSize, lim.daily - used));
+      // The number's rolling 24-hour limit across all campaigns of this connection (see campaign-limits.ts for what
+      // counts). This is planning only; the sender checks again, atomically, just before each message leaves.
+      const room = Math.min(CAMPAIGN_LIMITS.batchSize, await dailyRoom(tx, c.connection_id, lim, true));
       const tpl = (await tx.query<Tpl>(
         'SELECT id, status, category, param_count, account_ref, header_text, body_text, footer_text FROM message_templates WHERE id = $1', [c.template_id])).rows[0]!;
       const batch = room === 0 ? [] : (await tx.query<{ id: string; contact_id: string }>(
@@ -402,12 +396,7 @@ export async function recipientRefusal(tx: Tx, contactId: string, tpl: { status:
               WHEN ct.marketing_consent_at IS NULL THEN 'no_consent'
               WHEN EXISTS (SELECT 1 FROM suppressions s WHERE s.wa_number = wa.value) THEN 'suppressed'
               WHEN $2 <> 'approved' THEN 'template_not_approved'
-              WHEN (SELECT count(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                    WHERE c.contact_id = ct.id AND m.campaign_id IS NOT NULL AND m.created_at > now() - interval '7 days'
-                      AND m.status NOT IN ('failed')) >= $3
-                OR EXISTS (SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                    WHERE c.contact_id = ct.id AND m.campaign_id IS NOT NULL AND m.status NOT IN ('failed')
-                      AND m.created_at > now() - make_interval(hours => $4)) THEN 'frequency_limit'
+              WHEN campaign_contact_blocked(ct.id, $3::int, $4::int, true) THEN 'frequency_limit'
             END AS reason
      FROM contacts ct
      LEFT JOIN LATERAL (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) wa ON true

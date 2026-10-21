@@ -2,6 +2,7 @@ import { withContext, type Db, type Tx } from '@conversaflow/database';
 import type { ObjectStorage } from '../core/storage';
 import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type MediaSendInput, type Provider } from './channels';
 import { outboundTypeFor } from './media';
+import { claimCampaignSend } from './campaign-limits';
 import { stopTimerOnReply } from './sla';
 
 /**
@@ -209,6 +210,21 @@ export class Sender {
       if (refusal2 || mediaRefusal) {
         await this.finishFailed(tx, row, 'blocked', (refusal2 ?? mediaRefusal)!, 'done');
         return { done: 'failed' as const };
+      }
+      // Campaign limits, checked again now and atomically (owner instruction of 21 Oct 2026): a contact over its
+      // frequency limits is not sent the message; a number with no room left under its daily limit holds it (no attempt
+      // counted) until room frees up. On success the message is counted in this same transaction.
+      if (camp) {
+        const v = await claimCampaignSend(tx, tenantId, { messageId: row.message_id, campaignId: row.campaign_id!, conversationId: row.conversation_id });
+        if (!v.ok && v.reason === 'frequency_limit') {
+          await this.finishFailed(tx, row, 'blocked', 'frequency_limit', 'done');
+          return { done: 'failed' as const };
+        }
+        if (!v.ok) {
+          await tx.query(`UPDATE send_jobs SET state = 'pending', lease_until = NULL, next_attempt_at = $2, last_error = 'daily_limit', updated_at = now() WHERE id = $1`,
+            [jobId, v.retryAt]);
+          return { done: 'retry_later' as const };
+        }
       }
       if (this.faults.crashBeforeSubmit) throw new SimulatedCrash('before submission');
       const attempt = (await tx.query<{ attempts: number }>(
