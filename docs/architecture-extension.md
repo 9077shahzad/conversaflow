@@ -134,7 +134,9 @@ Retrying a message happens only in its conversation, through the normal retry an
   between campaign messages (default 24 hours). Per number: at most the company's daily limit of campaign messages in a
   rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier). These are checked
   when a message is queued, not again by the sender. Batches of one company run one at a time (a lock per company), so
-  two workers on different campaigns cannot both use the same room. The daily count covers campaign messages only, per
+  two workers on different campaigns cannot both use the same room. A batch that changes nothing (no room yet, or
+  waiting for its queued messages to leave) keeps its lease for 30 seconds, so the worker does not pick it up again at
+  once. The daily count covers campaign messages only, per
   number; Meta's own limit counts unique customers per business portfolio, which the live adapter must respect.
 - **Pause, resume, cancel.** Pausing stops queueing; messages already queued are held by the sender (no attempt is
   counted) until resumed. A campaign paused before it started resumes as scheduled, so its recipients are still chosen

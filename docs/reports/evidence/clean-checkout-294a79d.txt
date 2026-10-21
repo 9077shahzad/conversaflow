@@ -83,3 +83,12 @@ DATABASE_PLATFORM_URL -> role cf_platform, superuser=off, bypassrls=false
 
 ## API tests
 $ pnpm --filter @conversaflow/api test
+ Test Files  28 passed (28)
+      Tests  435 passed (435)
+
+## Browser checks (English and Arabic, three sizes, security policy)
+$ pnpm --filter @conversaflow/web e2e
+  15 passed (1.5m)
+
+## Result
+ALL CHECKS PASSED for 294a79d86c05f28bac2ec8ee076b7983e1c21f93

@@ -13,7 +13,10 @@ sandbox labels), the 16 MB limit kept and shown, then campaigns.
 
 | Commit | What | Evidence |
 | --- | --- | --- |
-| `__C1__` | Slice 4: migrations 0031–0033, SR-1 upgrade, late answers and exact matching, attempt evidence, retry eligibility by message type, sandbox and scanner labels, 16 MB limit shown, campaigns and suppression list, screens in English and Arabic | __C1_EVIDENCE__ |
+| `264379b` | Slice 4: migrations 0031–0033, SR-1 upgrade, late answers and exact matching, attempt evidence, retry eligibility by message type, sandbox and scanner labels, 16 MB limit shown, campaigns and suppression list, screens in English and Arabic | Clean checkout **passed** (`clean-checkout-264379b.txt`). Independently **reviewed**: 1 High, 3 Medium, 2 Low, Info |
+| `294a79d` | Review fixes S4-1 to S4-7 | Clean checkout **passed** (`clean-checkout-294a79d.txt`). Targeted recheck: all findings **verified fixed**; one new Medium (N1) |
+| `074644f` | Recheck N1 fix | Clean checkout **passed** (`clean-checkout-074644f.txt`) |
+| (this report) | Report, acceptance matrix and evidence files only (no code) | — |
 
 ## 1. SR-1: permissions for companies that already exist
 
@@ -104,7 +107,8 @@ and signature version, and the file size limit. Channel health and Templates sho
 
 Kept for now, as instructed.
 - **Shown:** in the reply box ("Up to 16 MB per file."), when a chosen file is too big ("This file is larger than 16 MB,
-  the current limit."), and on customer files refused for size ("over the 16 MB limit").
+  the current limit."), and on customer files refused for size ("larger than allowed for its type (WhatsApp's limit for that type, or our 16 MB
+  limit if lower)"; WhatsApp's own limits are lower for images and stickers).
 - **Enforced:** the browser checks the size before upload; the server refuses larger uploads; customer files over the
   limit are not downloaded and are shown as too large. All three use the same setting (`MAX_UPLOAD_BYTES`, default
   16 MB); the screens read it from the environment endpoint.
@@ -166,7 +170,7 @@ checks.
 - A campaign is completed only when nobody is left to queue and none of its messages is still waiting, so it can be
   paused or cancelled until then.
 
-**Tests (18, in `campaigns.test.ts`; 13 first, 5 added after the review).**
+**Tests (19, in `campaigns.test.ts`; 13 first, 6 added after the review and recheck).**
 - Permission and two-step sign-in; other companies cannot see campaigns.
 - Preview counts, exclusion reasons, samples, and no cost guess.
 - An opt-out after scheduling is respected at queue time and at send time.
@@ -182,7 +186,7 @@ checks.
 - Suppression list management and audit.
 - After the review: no inbox retry of a campaign message; cancel still possible after everyone is queued; completion
   after the messages leave; resume of a campaign paused before it started; two campaigns batched at once stay within
-  the daily and frequency limits.
+  the daily and frequency limits; a waiting campaign keeps its lease instead of being picked up again at once.
 
 **Screens.** A Campaigns page in English and Arabic: list with status and counts, the create form with the audience
 preview, scheduling, and pause, resume and cancel. Without two-step sign-in, the page explains that campaigns need it
@@ -196,7 +200,29 @@ campaigns; its definition is pinned in the guard. `system_role_grants` is on the
 
 ### Local
 
-__LOCAL_RESULTS__
+Fresh clone, frozen lockfile, fresh PostgreSQL 16 / Redis 7 / ClamAV (test signature), restricted roles. Evidence files
+are in `docs/reports/evidence/`, one per commit.
+
+| Check | `264379b` | `294a79d` | `074644f` |
+| --- | --- | --- | --- |
+| Secret scan, lint, type check, build | Passed | Passed | Passed |
+| Dependency audit (strict, all packages) | No advisories | No advisories | No advisories |
+| Migrations | 0001–0033 | 0001–0033 | 0001–0033 |
+| Isolation check (CI guard) | Passed | Passed | Passed |
+| API tests | 429/429 in 28 files | 435/435 in 28 files | 436/436 in 28 files |
+| Browser checks (Chromium; English and Arabic, three sizes) | 15/15 | 15/15 | 15/15 |
+
+The six regression tests for S4-1 to S4-5 were also run against the unfixed `264379b`, and all six failed there as
+expected.
+
+These results come from the sandbox provider and ClamAV's test signature only. None of them is a check against live
+WhatsApp, Meta's template review or current virus definitions.
+
+The upgrade tests (from 0021 for SR-1, and the populated-database test from slice 3, now through 0033) need a
+disposable superuser. They run in the local harness, and will be skipped in GitHub CI unless one is provided there.
+
+`clean-checkout-294a79d.txt` was committed part-written with `074644f`, because that run was still writing it. The
+complete file is committed with this report.
 
 ### GitHub CI
 
@@ -213,18 +239,29 @@ __LOCAL_RESULTS__
 ## Review findings
 
 An independent reviewer worked on a separate clone of `264379b`, without seeing the work being produced, and proved
-each finding below with a probe test. Fixed in `__C2__`. S4-1 to S4-5 each have a regression test. All six new tests were run against the unfixed `264379b`
+each finding below with a probe test. Fixed in `294a79d`. S4-1 to S4-5 each have a regression test. All six new tests were run against the unfixed `264379b`
 and failed there, and they pass with the fixes.
 
 | # | Finding | Severity | Status |
 | --- | --- | --- | --- |
-| S4-1 | A failed campaign message (for example, stopped because the number was added to the suppression list) could be retried from the inbox. The retry was an ordinary template message, so it skipped the suppression list, a cancelled campaign, the creator's permission and the frequency limits, and was sent | **High** | **Fixed** (`__C2__`): campaign messages cannot be retried individually (server refuses; button not offered, with the reason shown) |
+| S4-1 | A failed campaign message (for example, stopped because the number was added to the suppression list) could be retried from the inbox. The retry was an ordinary template message, so it skipped the suppression list, a cancelled campaign, the creator's permission and the frequency limits, and was sent | **High** | **Fixed** (`294a79d`): campaign messages cannot be retried individually (server refuses; button not offered, with the reason shown) |
 | S4-2 | As soon as every recipient was queued, the campaign was marked completed and could no longer be paused or cancelled, though queued messages could still be waiting to leave | Medium | **Fixed**: completed only when none of its messages is still waiting |
 | S4-3 | A scheduled campaign that was paused and then resumed completed with nothing sent | Medium | **Fixed**: resumes as scheduled if it had not started |
 | S4-4 | Two workers batching different campaigns at the same moment could together exceed the number's daily limit and message one contact inside the frequency limits (needs more than one worker; today there is one) | Medium | **Fixed**: one batch at a time per company |
 | S4-5 | A late answer saved before the timeout outcome left the message "uncertain" although WhatsApp's acceptance was recorded. The id was kept and nothing was resent, so the requirement held, but the inbox kept offering a retry with a duplicate warning | Low | **Fixed**: the message becomes "sent" in either order. Attempt times now use the actual clock time |
 | S4-6 | Wording: the campaign introduction said the contact frequency is checked just before sending (it is checked when queued); the "too large" label for customer files named 16 MB, though images and stickers have lower WhatsApp limits | Low | **Fixed** in English and Arabic |
 | S4-7 | Info: any API session can call the campaign lookup and so extend other companies' campaign leases (no data exposed, and no code does this); the daily limit counts campaign messages per number, whereas Meta counts unique customers per business portfolio; the "days needed" estimate ignores what was already used today; files refused on arrival show no scan basis because they were never scanned; messages marked "exhausted" before 0032 have no attempt records | Info | Recorded. The lookup and daily-limit points are for the live adapter and the next review of the lookup |
+
+**Recheck of `294a79d`.** The same reviewer re-ran its probes against the fixes and verified S4-1 to S4-6 fixed (S4-7
+partly: attempt times corrected; the other Info points recorded above). It found no deadlock between the company
+batch lock, the campaign row lock and the sender's share lock (six rounds of concurrent batches, sends and
+pause/resume: 8 messages, 8 unique, 8 sent), and no way for a campaign to wait forever on a message with a dead job.
+One new finding:
+
+| # | Finding | Severity | Status |
+| --- | --- | --- | --- |
+| N1 | A running campaign that was waiting (for room under the daily limit, or for its queued messages to leave) could be picked up again at once, so the worker's loop kept running batches and never paused between polls, competing for the same locks | Medium | **Fixed** (`074644f`): a batch that changed nothing keeps its lease for 30 seconds; any progress releases it as before. Test added |
+| N2 | The sender's return value for the late-answer case still says "uncertain" although the stored message is "sent" | Info | Recorded; only the internal return value, not what is stored or shown |
 
 The reviewer also confirmed as met: the SR-1 upgrade (only listed permissions, only built-in roles, custom roles
 untouched, both paths tested), late-answer reconciliation and exact matching, the evidence rule for "declined on each of
@@ -263,7 +300,7 @@ and cost ledger, Click-to-WhatsApp ad reports.
 
 | Level | State |
 | --- | --- |
-| Local | __LOCAL_SUMMARY__ |
+| Local | Passed at `264379b`, `294a79d` and `074644f` (latest: 436/436 API, 15/15 browser, guard passed). Earlier evidence unchanged at `4eda821`, `0de62ee` and `dcece7b` |
 | GitHub CI | Pending |
 | Hosted | Pending |
 | Pilot | Pending |

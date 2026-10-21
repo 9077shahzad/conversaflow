@@ -2,7 +2,7 @@
 
 Each item lists how it is proved and where it stands, with **local, CI, hosted and pilot evidence kept separate**.
 "Local" means a named commit passed in the local harness (PostgreSQL 16, Redis 7, ClamAV with the test signature,
-restricted database roles, Chromium for browser checks). Updated 20 Oct 2026 for slice 1 (`3c6d20d`, fixes `1665c0f`) and slice 2 (`138869e`, review fixes `e3c49dc`, `1c3854c`, `4eda821`; reviewed and rechecked) and slice 3 (`571abe4`, fixes `cbc2f7f`, `0de62ee`, `dcece7b`; reviewed and rechecked). Updated 21 Oct 2026 for slice 4 (see `wave1-slice4-report.md`; commits and their results are listed there).
+restricted database roles, Chromium for browser checks). Updated 20 Oct 2026 for slice 1 (`3c6d20d`, fixes `1665c0f`) and slice 2 (`138869e`, review fixes `e3c49dc`, `1c3854c`, `4eda821`; reviewed and rechecked) and slice 3 (`571abe4`, fixes `cbc2f7f`, `0de62ee`, `dcece7b`; reviewed and rechecked). Updated 21 Oct 2026 for slice 4 (`264379b`, fixes `294a79d`, `074644f`; reviewed and rechecked; see `wave1-slice4-report.md`).
 
 | # | Acceptance item | How it is proved | Local | CI | Hosted | Pilot |
 | --- | --- | --- | --- | --- | --- | --- |
