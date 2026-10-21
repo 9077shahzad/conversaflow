@@ -19,7 +19,7 @@ import { checkParamValue, renderTemplate } from './templates.service';
  * idempotency key is the recipient id, so queueing the same recipient twice fails on the existing key. Recipient and
  * message are written in one transaction.
  */
-export const CAMPAIGN_LIMITS = { batchSize: 50, leaseSeconds: 120 };
+export const CAMPAIGN_LIMITS = { batchSize: 50, leaseSeconds: 120, idleRecheckSeconds: 30 };
 
 const ParamSource = z.discriminatedUnion('source', [
   z.object({ source: z.literal('static'), value: z.string().trim().min(1).max(200) }),
@@ -381,7 +381,12 @@ export class CampaignRunner {
               + (SELECT count(*) FROM messages WHERE campaign_id = $1 AND status = 'queued') AS n`, [campaignId])).rows[0]!.n;
       const done = Number(left) === 0;
       if (done) await tx.query(`UPDATE campaigns SET status = 'completed', finished_at = now(), updated_at = now() WHERE id = $1`, [campaignId]);
-      await release();
+      // A batch that changed nothing (waiting for room under the daily limit, or for its queued messages to leave) keeps
+      // its lease for a while, so the worker does not pick the same campaign again at once and spin (recheck N1).
+      if (!done && queued + skipped === 0) {
+        await tx.query(`UPDATE campaigns SET lease_until = now() + make_interval(secs => $2), updated_at = now() WHERE id = $1`,
+          [campaignId, CAMPAIGN_LIMITS.idleRecheckSeconds]);
+      } else await release();
       return { queued, skipped, status: done ? 'completed' : 'running' };
     });
   }

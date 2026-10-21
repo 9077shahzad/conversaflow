@@ -400,6 +400,27 @@ describe('review of slice 4', () => {
     expect(view.progress.sent).toBe(1);
   });
 
+  it('N1: a campaign waiting for room keeps its lease, so the worker does not pick it again at once; queueing releases it', async () => {
+    await resetAudience();
+    await customer('Wait Wafa', { consent: true });
+    await customer('Wait Waleed', { consent: true });
+    await allowMore(1);
+    const camp = await createCampaign('Waiting for room');
+    await owner.post(`/v1/campaigns/${camp.id}/schedule`, { at: null }).expect(200);
+    const leaseLeft = async () => (await app((tx) => tx.query<{ s: number | null }>(
+      'SELECT extract(epoch FROM lease_until - now())::int AS s FROM campaigns WHERE id = $1', [camp.id]))).rows[0]!.s;
+    expect((await runner().runBatch(tenant, camp.id)).queued).toBe(1);   // progress: lease released
+    expect(await leaseLeft()).toBeNull();
+    expect((await runner().runBatch(tenant, camp.id)).queued).toBe(0);   // no room: nothing changed
+    expect(await leaseLeft()).toBeGreaterThan(20);                       // kept, so not claimable again at once
+    const claimed = await withContext(t.deps.db, { tenantId: null, userId: null }, async (tx) =>
+      (await tx.query<{ campaign_id: string }>('SELECT * FROM campaign_claim(20, 120)')).rows.map((r) => r.campaign_id));
+    expect(claimed).not.toContain(camp.id);
+    await owner.post(`/v1/campaigns/${camp.id}/cancel`).expect(200);
+    await sender().dispatchDue(100);
+    await noLimit();
+  });
+
   it('S4-4: two campaigns batched at the same moment cannot together exceed the daily limit or message one contact twice', async () => {
     await resetAudience();
     await customer('Shared Sami', { consent: true });
