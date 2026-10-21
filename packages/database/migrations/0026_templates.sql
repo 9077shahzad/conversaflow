@@ -27,15 +27,23 @@ CREATE POLICY provider_accounts_tenant ON provider_accounts FOR ALL TO cf_app
 GRANT SELECT, INSERT ON provider_accounts TO cf_app;
 GRANT UPDATE (status) ON provider_accounts TO cf_app;
 
--- Every connection belongs to an account. Existing connections each get their own account record.
+-- Every connection belongs to an account. Existing connections each get their own account record, with a placeholder
+-- account id ('acct-<number id>'): template webhooks for those accounts will not route until the real WABA id is set
+-- by onboarding. Backfilled with FORCE row-level security switched off for this transaction only (the migration owner
+-- is subject to it; review of slice 3, finding 1).
 ALTER TABLE channel_connections ADD COLUMN account_ref uuid;
+ALTER TABLE channel_connections NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE provider_accounts NO FORCE ROW LEVEL SECURITY;
 INSERT INTO provider_accounts (tenant_id, provider, account_id)
   SELECT tenant_id, provider, 'acct-' || provider_number_id FROM channel_connections;
 UPDATE channel_connections c SET account_ref = a.id FROM provider_accounts a
   WHERE a.tenant_id = c.tenant_id AND a.provider = c.provider AND a.account_id = 'acct-' || c.provider_number_id;
 ALTER TABLE channel_connections ALTER COLUMN account_ref SET NOT NULL;
+-- Validating the new foreign key reads existing rows too, so it also runs before FORCE is switched back on.
 ALTER TABLE channel_connections ADD CONSTRAINT channel_connections_account_fk
   FOREIGN KEY (tenant_id, account_ref) REFERENCES provider_accounts (tenant_id, id);
+ALTER TABLE channel_connections FORCE ROW LEVEL SECURITY;
+ALTER TABLE provider_accounts FORCE ROW LEVEL SECURITY;
 GRANT INSERT (account_ref) ON channel_connections TO cf_app;
 
 -- Routing of account-level webhooks: cf_channel may read only these columns of active accounts.

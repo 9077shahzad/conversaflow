@@ -177,6 +177,25 @@ describe('review status by webhook', () => {
     expect(row).toMatchObject({ category: 'marketing', lastEvent: 'CATEGORY_CHANGED' });
   });
 
+  it('updates that arrive out of order: an older review decision does not overwrite a newer one', async () => {
+    const tpl = await createTemplate('order_check', 'utility');
+    const now = Math.floor(Date.now() / 1000);
+    await review(ACCOUNT, tpl.providerTemplateId, 'PAUSED', 'Low quality', now).expect(200);
+    const late = await review(ACCOUNT, tpl.providerTemplateId, 'APPROVED', null, now - 100).expect(200);
+    expect(late.body).toMatchObject({ applied: 0, stale: 1 });
+    const row = (await owner.get('/v1/templates').expect(200)).body.find((x: { id: string }) => x.id === tpl.id);
+    expect(row).toMatchObject({ status: 'paused', lastEvent: 'PAUSED' });
+    // The same for a category change: an older completed change does not undo a newer one.
+    await templateEvent(ACCOUNT, 'template_category_update', { message_template_id: Number(tpl.providerTemplateId), new_category: 'MARKETING', previous_category: 'UTILITY' }, now).expect(200);
+    await templateEvent(ACCOUNT, 'template_category_update', { message_template_id: Number(tpl.providerTemplateId), new_category: 'UTILITY', previous_category: 'MARKETING' }, now - 50).expect(200);
+    expect((await owner.get('/v1/templates').expect(200)).body.find((x: { id: string }) => x.id === tpl.id).category).toBe('marketing');
+  });
+
+  it('parameters in the header or footer are refused', async () => {
+    const res = await owner.post('/v1/templates', { name: 'header_param', language: 'en', category: 'utility', headerText: 'Hi {{1}}', bodyText: 'Your visit is confirmed today.', examples: [] }).expect(400);
+    expect(res.body.error.message).toMatch(/main text only/);
+  });
+
   it('template events for another company\'s account, or an unknown template, change nothing here', async () => {
     const tpl = await createTemplate('isolation_check', 'utility');
     const res = await review(OTHER_ACCOUNT, tpl.providerTemplateId, 'APPROVED').expect(200);

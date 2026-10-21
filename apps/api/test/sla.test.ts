@@ -35,6 +35,12 @@ describe('business-hours arithmetic', () => {
     expect(addBusinessMinutes(new Date('2026-10-19T13:30:00Z'), 90, {}, 'Asia/Riyadh', none)!.toISOString()).toBe('2026-10-19T15:00:00.000Z');
   });
 
+  it('overlapping intervals are counted once (review finding 6)', () => {
+    const overlapping: BusinessHours = { mon: [['09:00', '17:00'], ['10:00', '12:00']] };
+    // Monday 09:00 Riyadh (06:00 UTC) + 8 hours of work = 17:00 Riyadh, not earlier.
+    expect(addBusinessMinutes(new Date('2026-10-19T06:00:00Z'), 480, overlapping, 'Asia/Riyadh', none)!.toISOString()).toBe('2026-10-19T14:00:00.000Z');
+  });
+
   it('handles a daylight-saving change (Riga, 25 Oct 2026)', () => {
     const riga: BusinessHours = { fri: [['09:00', '18:00']], mon: [['09:00', '18:00']] };
     // Friday 23 Oct 17:30 EEST (14:30 UTC) + 60 min → 30 min Friday, then Monday 26 Oct 09:30 EET (07:30 UTC).
@@ -138,6 +144,11 @@ describe('timers in conversations', () => {
     const after = await getConv(conv.id);
     expect(after.sla).toBeNull();
     expect(after.events.map((e: { kind: string }) => e.kind)).toContain('sla_met');
+  });
+
+  it('settings refuse overlapping opening hours', async () => {
+    const res = await owner.patch('/v1/settings', { businessHours: { mon: [['09:00', '17:00'], ['10:00', '12:00']] } }).expect(400);
+    expect(JSON.stringify(res.body)).toMatch(/must not overlap/);
   });
 
   it('with no target set, no timer runs', async () => {

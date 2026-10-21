@@ -42,7 +42,8 @@ export default function ChannelHealth() {
   async function act(fn: () => Promise<string>) {
     setBusy(true); setNotice(null);
     try { setNotice({ ok: true, text: await fn() }); await load(); } catch (e) {
-      setNotice({ ok: false, text: e instanceof ApiError ? (di.errors[e.code] ?? e.message ?? di.errorGeneric) : di.errorGeneric });
+      // Known refusals in the screen's language; the server's English wording only on the English screen.
+      setNotice({ ok: false, text: e instanceof ApiError ? (di.errors[e.code] ?? (locale === 'en' && e.message ? e.message : di.errorGeneric)) : di.errorGeneric });
     } finally { setBusy(false); }
   }
   const when = (iso: string | null) => (iso ? new Intl.DateTimeFormat(locale === 'ar' ? 'ar-SA-u-nu-latn-ca-gregory' : 'en-GB',

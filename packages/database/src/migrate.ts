@@ -15,7 +15,8 @@ import pg from 'pg';
 
 const migrationsDir = join(__dirname, '..', 'migrations');
 
-export async function migrate(ownerUrl: string, passwords: RolePasswords, log = console.log): Promise<string[]> {
+/** `upTo` stops after the named migration (by file-name prefix), for upgrade tests that need an older schema. */
+export async function migrate(ownerUrl: string, passwords: RolePasswords, log = console.log, options: { upTo?: string } = {}): Promise<string[]> {
   const client = new pg.Client({ connectionString: ownerUrl });
   await client.connect();
   const applied: string[] = [];
@@ -30,6 +31,7 @@ export async function migrate(ownerUrl: string, passwords: RolePasswords, log = 
     );
     const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort();
     for (const file of files) {
+      if (options.upTo && file.slice(0, options.upTo.length) > options.upTo) break;
       const sql = await readFile(join(migrationsDir, file), 'utf8');
       const checksum = createHash('sha256').update(sql).digest('hex');
       const previous = done.get(file);

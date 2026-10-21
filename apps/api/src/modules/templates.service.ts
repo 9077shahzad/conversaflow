@@ -74,6 +74,8 @@ export class TemplatesService {
     const body = parse(CreateRequest, input);
     const problem = checkTemplateBody(body.bodyText, body.examples);
     if (problem) throw Errors.badRequest(problem);
+    // Header and footer parameters are not supported yet; refuse them rather than send them unfilled.
+    if (/\{\{/.test(body.headerText ?? '') || /\{\{/.test(body.footerText ?? '')) throw Errors.badRequest('Parameters are allowed in the main text only.');
     const account = await withContext(this.deps.db, actor, async (tx) => {
       const rows = (await tx.query<{ id: string; provider: Provider; account_id: string }>(
         `SELECT id, provider, account_id FROM provider_accounts WHERE status = 'active' AND ($1::uuid IS NULL OR id = $1::uuid)`,
@@ -138,7 +140,8 @@ export class TemplatesService {
           if (r.status === l.status && r.quality === l.quality && r.category === l.category) { result.unchanged++; continue; }
           await tx.query(
             `UPDATE message_templates SET status = $2, quality = $3, category = $4, status_reason = $5, last_event = 'SYNC',
-                    status_changed_at = CASE WHEN status <> $2 THEN now() ELSE status_changed_at END WHERE id = $1`,
+                    status_changed_at = CASE WHEN status <> $2 THEN now() ELSE status_changed_at END,
+                    status_event_at = now(), quality_event_at = now(), category_event_at = now() WHERE id = $1`,
             [l.id, r.status, r.quality, r.category, r.reason]);
           result.updated++;
         }
@@ -154,10 +157,20 @@ export class TemplatesService {
 }
 
 /** Applies one template webhook event inside the company's context. */
-export async function applyTemplateEvent(tx: Tx, accountRef: string, e: Extract<ParsedEvent, { kind: 'template' }>): Promise<'applied' | 'unknown_template'> {
-  const t = (await tx.query<{ id: string }>(
-    'SELECT id FROM message_templates WHERE account_ref = $1 AND provider_template_id = $2 FOR UPDATE', [accountRef, e.providerTemplateId])).rows[0];
+export async function applyTemplateEvent(tx: Tx, accountRef: string, e: Extract<ParsedEvent, { kind: 'template' }>): Promise<'applied' | 'unknown_template' | 'stale_template'> {
+  const t = (await tx.query<{ id: string; status_event_at: Date | null; quality_event_at: Date | null; category_event_at: Date | null }>(
+    `SELECT id, status_event_at, quality_event_at, category_event_at FROM message_templates
+     WHERE account_ref = $1 AND provider_template_id = $2 FOR UPDATE`, [accountRef, e.providerTemplateId])).rows[0];
   if (!t) return 'unknown_template';
+  // Updates may arrive out of order (review of slice 3, finding 5): one older than the last applied update of the same
+  // kind is recorded but ignored.
+  const last = e.change.type === 'status' ? t.status_event_at : e.change.type === 'quality' ? t.quality_event_at : t.category_event_at;
+  if (last && e.occurredAt.getTime() < last.getTime()) return 'stale_template';
+  await tx.query(
+    `UPDATE message_templates SET status_event_at = CASE WHEN $2 = 'status' THEN $3 ELSE status_event_at END,
+            quality_event_at = CASE WHEN $2 = 'quality' THEN $3 ELSE quality_event_at END,
+            category_event_at = CASE WHEN $2 = 'category' THEN $3 ELSE category_event_at END WHERE id = $1`,
+    [t.id, e.change.type, e.occurredAt]);
   if (e.change.type === 'status') {
     const status = TEMPLATE_EVENT_STATUS[e.change.event];
     await tx.query(

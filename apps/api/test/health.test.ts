@@ -106,6 +106,20 @@ describe('health overview', () => {
   });
 });
 
+describe('who sees which items', () => {
+  it('a role that may watch the channel but not read every conversation sees only unassigned and its own items', async () => {
+    await owner.post('/v1/roles', { key: 'monitor', name: 'Monitor', permissions: ['channels.monitor', 'inbox.reply'] }).expect(201);
+    const watcher = await addMember(t, owner, 'health-watch', 'monitor');
+    const conv = await newConversation();
+    sandbox.script.push({ reject: '131026' });
+    await agent.post(`/v1/conversations/${conv.id}/reply`, { text: 'Assigned to the agent', seenActivity: conv.activitySeq, clientMessageId: randomUUID() }).expect(201);
+    const theirs = (await watcher.get('/v1/channels/health').expect(200)).body;
+    expect(theirs.attention.some((a: { conversationId: string }) => a.conversationId === conv.id)).toBe(false);
+    expect(theirs.delivery.failed7d.rejected).toBeGreaterThanOrEqual(1); // counts stay company-wide
+    expect((await health()).attention.some((a: { conversationId: string }) => a.conversationId === conv.id)).toBe(true);
+  });
+});
+
 describe('recovery actions', () => {
   it('re-applies delivery statuses that arrived before their message; only channel managers may; nothing is sent', async () => {
     const conv = await newConversation();

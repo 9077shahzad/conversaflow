@@ -22,6 +22,9 @@ export class HealthService {
   constructor(private readonly deps: Deps) {}
 
   async overview(actor: TenantActor) {
+    // The item lists name customers, so they follow the inbox's visibility rule (review of slice 3, finding 10): a role
+    // without inbox.read_all sees only unassigned conversations and its own. Counts stay company-wide.
+    const visible: [boolean, string | null] = [actor.permissions.has('inbox.read_all'), isUuid(actor.membershipId) ? actor.membershipId : null];
     return withContext(this.deps.db, actor, async (tx) => {
       const connections = (await tx.query(
         `SELECT ch.id, ch.label, ch.display_phone AS "displayPhone", ch.status, ch.provider,
@@ -67,14 +70,16 @@ export class HealthService {
          FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN contacts ct ON ct.id = c.contact_id
          WHERE m.direction = 'out' AND m.status IN ('failed', 'uncertain') AND m.created_at > now() - interval '7 days'
            AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.retry_of = m.id)
-         ORDER BY (m.status = 'uncertain') DESC, m.created_at DESC LIMIT 50`)).rows;
+           AND ($1::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $2::uuid)
+         ORDER BY (m.status = 'uncertain') DESC, m.created_at DESC LIMIT 50`, visible)).rows;
       const mediaProblems = (await tx.query(
         `SELECT m.id, m.conversation_id AS "conversationId", m.media_type AS "mediaType", m.media_status AS "mediaStatus",
                 j.last_error AS "lastError", m.created_at AS "createdAt",
                 (m.media_status = 'failed' AND m.created_at > now() - make_interval(days => $1)) AS "canRetry"
-         FROM messages m LEFT JOIN media_jobs j ON j.message_id = m.id
+         FROM messages m LEFT JOIN media_jobs j ON j.message_id = m.id JOIN conversations c ON c.id = m.conversation_id
          WHERE m.direction = 'in' AND m.kind = 'media' AND m.media_status IN ('failed', 'pending') AND m.created_at > now() - interval '7 days'
-         ORDER BY m.created_at DESC LIMIT 50`, [MEDIA_ID_LIFETIME_DAYS])).rows;
+           AND ($2::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $3::uuid)
+         ORDER BY m.created_at DESC LIMIT 50`, [MEDIA_ID_LIFETIME_DAYS, ...visible])).rows;
 
       const count = (status: string, kind: string | null) =>
         outcomes.filter((o) => o.status === status && (kind === null || o.failure_kind === kind)).reduce((a, o) => a + o.n, 0);

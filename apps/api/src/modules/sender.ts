@@ -40,6 +40,8 @@ import { stopTimerOnReply } from './sla';
  *   c. The provider timeout (`providerTimeoutMs`, 30 s) only limits how long we wait for an answer. It does not stop
  *      the provider from processing a request it has already received, so a timeout is always `uncertain`, never a
  *      failure. A late answer that arrives after we stopped waiting is discarded; the status webhook reconciles it.
+ *      If the status webhook arrives first, while we are still waiting, it wins: a timeout or failure never overwrites
+ *      a message that is no longer `submitting` (review of slice 3, finding 3).
  *   d. The timeout is well below the lease (120 s), so in normal operation no second worker can lease the job while
  *      the first is still waiting. Duplicate prevention does not depend on this timing: even if a worker stalls past
  *      its lease, rule (a) still applies, and a late `sent` from the stalled worker is recorded against the same
@@ -216,13 +218,15 @@ export class Sender {
       if (providerMessageId) {
         await lockProviderId(tx, providerMessageId);
         // `uncertain` is allowed too: another attempt may have given up on this one while it was still running.
-        await tx.query(
+        const marked = await tx.query(
           `UPDATE messages SET status = 'sent', provider_message_id = $2, error_code = NULL, failure_kind = NULL
            WHERE id = $1 AND status IN ('submitting', 'uncertain')`,
           [row.message_id, providerMessageId]);
         await tx.query(`UPDATE send_jobs SET state = 'done', lease_until = NULL, last_error = NULL, updated_at = now() WHERE id = $1`, [jobId]);
         await applyOrphanStatuses(tx, row.message_id, providerMessageId);
-        await stopTimerOnReply(tx, tenantId, row.conversation_id, row.sent_by_membership_id, new Date());
+        // Only a reply this call actually recorded as sent answers the customer (review finding 7); a status webhook
+        // that settled it first has already stopped the timer.
+        if (marked.rowCount === 1) await stopTimerOnReply(tx, tenantId, row.conversation_id, row.sent_by_membership_id, new Date());
         return 'sent' as const;
       }
       const f = failure!;
@@ -248,16 +252,20 @@ export class Sender {
     });
   }
 
-  /** A confirmed failure: the customer did not receive this message. */
+  /**
+   * A confirmed failure: the customer did not receive this message. Only a message still `queued` or `submitting` is
+   * changed: a status webhook may already have settled it while the provider call was running (review of slice 3,
+   * finding 3), and that answer wins. The job is closed either way.
+   */
   private async finishFailed(tx: Tx, row: JobRow, kind: Exclude<FailureKind, 'provider_reported'>, code: string, jobState: 'done' | 'dead') {
-    await tx.query(`UPDATE messages SET status = 'failed', failure_kind = $2, error_code = $3 WHERE id = $1`,
+    await tx.query(`UPDATE messages SET status = 'failed', failure_kind = $2, error_code = $3 WHERE id = $1 AND status IN ('queued', 'submitting')`,
       [row.message_id, kind, code.slice(0, 100)]);
     await this.closeJob(tx, row.job_id, jobState, code);
   }
 
-  /** Outcome unknown: it may have reached the customer. Never sent again automatically. */
+  /** Outcome unknown: it may have reached the customer. Never sent again automatically. Same guard as above. */
   private async finishUncertain(tx: Tx, row: JobRow, code: string) {
-    await tx.query(`UPDATE messages SET status = 'uncertain', failure_kind = NULL, error_code = $2 WHERE id = $1`,
+    await tx.query(`UPDATE messages SET status = 'uncertain', failure_kind = NULL, error_code = $2 WHERE id = $1 AND status = 'submitting'`,
       [row.message_id, code.slice(0, 100)]);
     await this.closeJob(tx, row.job_id, 'done', code);
   }

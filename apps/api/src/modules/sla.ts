@@ -51,7 +51,12 @@ export function addBusinessMinutes(start: Date, minutes: number, hours: Business
   let { ymd, dow } = localDate(start, tz);
   for (let i = 0; i < 400; i++) {
     if (!holidays.has(ymd)) {
-      const intervals = [...(hours[DAY_KEYS[dow]!] ?? [])].sort((a, b) => a[0].localeCompare(b[0]));
+      // Merged, so overlapping intervals saved before validation existed are not counted twice.
+      const intervals: Array<[string, string]> = [];
+      for (const [o, c] of [...(hours[DAY_KEYS[dow]!] ?? [])].sort((a, b) => a[0].localeCompare(b[0]))) {
+        const prev = intervals.at(-1);
+        if (prev && o <= prev[1]) { if (c > prev[1]) prev[1] = c; } else intervals.push([o, c]);
+      }
       for (const [open, close] of intervals) {
         const from = Math.max(localToUtc(ymd, open, tz).getTime(), start.getTime());
         const to = localToUtc(ymd, close, tz).getTime();

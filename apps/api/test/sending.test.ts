@@ -218,6 +218,20 @@ describe('reliable sending', () => {
     expect(sandbox.sent.length).toBe(before); // the cancelled call never completed
   });
 
+  it('a status webhook that settles the message while the provider call is still running is not overwritten by the timeout', async () => {
+    const conv = await newConversation();
+    const q = await queueOnly(conv.id, 'Settled during the call', ids.agent!);
+    sandbox.script.push({ slowMs: 3_000 });
+    const s = new Sender(t.deps.db, t.deps.channels, {}, 1_000);
+    expect(await s.leaseNow(tenant, q.jobId)).toBe(true);
+    const running = s.processJob(tenant, q.jobId);
+    await new Promise((r) => setTimeout(r, 300));
+    await deliver(status(`wamid.race.${randomUUID()}`, 'delivered', q.messageId)).expect(200);
+    expect(await running).toBe('uncertain'); // the call itself timed out ...
+    expect(await msg(conv.id, q.messageId)).toMatchObject({ status: 'delivered', failureKind: null }); // ... but the webhook's answer stands
+    expect(await job(q.messageId)).toMatchObject({ state: 'done' });
+  });
+
   it('accepted but the answer was lost: "uncertain" until the status webhook settles it, sent once', async () => {
     const conv = await newConversation();
     sandbox.script.push({ acceptedButLost: 'connection_reset' });
@@ -462,6 +476,28 @@ describe('strengthened CI guard (open Low finding)', () => {
     } finally {
       await su.query(`ALTER ROLE cf_app IN DATABASE "${db}" RESET app.tenant_id`);
       await su.end();
+    }
+    expect(await guard()).toEqual([]);
+  });
+
+  it('review finding 4: company tables outside public, partitioned parents and foreign tables are covered', async () => {
+    try {
+      await t.ownerDb.query('CREATE SCHEMA zz_other');
+      await t.ownerDb.query('CREATE TABLE zz_other.copy (tenant_id uuid, body text)');
+      await t.ownerDb.query('CREATE TABLE zz_parts (tenant_id uuid NOT NULL, body text) PARTITION BY LIST (tenant_id)');
+      await t.ownerDb.query(`CREATE TABLE zz_parts_a PARTITION OF zz_parts FOR VALUES IN ('00000000-0000-0000-0000-000000000001')`);
+      await t.ownerDb.query('ALTER TABLE zz_parts_a ENABLE ROW LEVEL SECURITY');
+      await t.ownerDb.query('ALTER TABLE zz_parts_a FORCE ROW LEVEL SECURITY');
+      await t.ownerDb.query('CREATE POLICY zz_parts_a_tenant ON zz_parts_a FOR ALL TO cf_app USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())');
+      const problems = await guard();
+      expect(problems).toEqual(expect.arrayContaining([
+        'zz_other.copy: has tenant_id outside schema public; company data may live only in public',
+        'zz_other.copy: has tenant_id but row-level security is not enabled',
+        'zz_parts: has tenant_id but row-level security is not enabled',
+        'zz_parts: no RLS policy defined',
+      ]));
+    } finally {
+      await reset(['DROP SCHEMA IF EXISTS zz_other CASCADE', 'DROP TABLE IF EXISTS zz_parts CASCADE']);
     }
     expect(await guard()).toEqual([]);
   });

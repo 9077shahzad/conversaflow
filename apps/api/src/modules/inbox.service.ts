@@ -160,7 +160,7 @@ export class InboxService {
           if (!ins.rows[0]) { counts.duplicate++; continue; }
           const outcome = await applyTemplateEvent(tx, route.account_ref, e);
           await tx.query('UPDATE webhook_events SET processed_at = now(), outcome = $2 WHERE id = $1', [ins.rows[0].id, outcome]);
-          if (outcome === 'applied') counts.applied++; else counts.unknownTemplate++;
+          if (outcome === 'applied') counts.applied++; else if (outcome === 'stale_template') counts.stale++; else counts.unknownTemplate++;
         }
       });
     }
@@ -568,7 +568,12 @@ export class InboxService {
       const code = (err as { code?: string }).code;
       // Two people retrying at once, or a retry past the chain limit, are stopped by database constraints.
       if (code === '23505') throw Errors.conflict('already_retried', 'This message has already been retried.');
-      if (code === '23514') throw Errors.conflict('retry_limit_reached', 'This message has already been retried as often as allowed. Write a new reply instead.');
+      // Only the chain-length constraint means the limit; anything else (e.g. the message changed state at the same
+      // moment) is reported as not retryable (review of slice 3, finding 8).
+      if (code === '23514' && (err as { constraint?: string }).constraint === 'messages_retry_number_check') {
+        throw Errors.conflict('retry_limit_reached', 'This message has already been retried as often as allowed. Write a new reply instead.');
+      }
+      if (code === '23514') throw Errors.conflict('not_retryable', 'This message can no longer be retried. Reload the conversation.');
       throw err;
     });
     if (prepared.existing !== undefined) return this.message(actor, prepared.existing);

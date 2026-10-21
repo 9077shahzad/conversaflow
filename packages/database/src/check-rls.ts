@@ -149,21 +149,26 @@ export async function checkIsolation(ownerUrl: string): Promise<string[]> {
   await client.query('SET search_path = pg_catalog, public');
   const problems: string[] = [];
   try {
-    const tenantTables = await client.query<{ table: string; rls: boolean; forced: boolean; policies: number }>(`
-      SELECT c.relname AS table, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced,
-             (SELECT count(*)::int FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = c.relname) AS policies
+    // Every table holding company rows (a tenant_id column), in ANY schema, ordinary or partitioned, must have forced
+    // row-level security and a policy; company data may live only in schema public, and never in a foreign table
+    // (review of slice 3, finding 4: the rule used to look at ordinary tables in public only).
+    const tenantTables = await client.query<{ table: string; schema: string; kind: string; rls: boolean; forced: boolean; policies: number }>(`
+      SELECT c.oid::regclass::text AS table, n.nspname AS schema, c.relkind::text AS kind, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced,
+             (SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = c.oid) AS policies
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind = 'r'
+      WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' AND c.relkind IN ('r', 'p', 'f')
         AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)`);
     for (const t of tenantTables.rows) {
+      if (t.kind === 'f') { problems.push(`${t.table}: a foreign table with tenant_id; company data may not live outside this database`); continue; }
+      if (t.schema !== 'public') problems.push(`${t.table}: has tenant_id outside schema public; company data may live only in public`);
       if (!t.rls) problems.push(`${t.table}: has tenant_id but row-level security is not enabled`);
       if (!t.forced) problems.push(`${t.table}: row-level security is not FORCED`);
       if (t.policies === 0) problems.push(`${t.table}: no RLS policy defined`);
     }
 
     const unforced = await client.query<{ table: string }>(`
-      SELECT c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity AND NOT c.relforcerowsecurity`);
+      SELECT c.oid::regclass::text AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' AND c.relkind IN ('r', 'p') AND c.relrowsecurity AND NOT c.relforcerowsecurity`);
     for (const t of unforced.rows) problems.push(`${t.table}: RLS enabled but not forced`);
 
     for (const roleName of LOGIN_ROLES) {

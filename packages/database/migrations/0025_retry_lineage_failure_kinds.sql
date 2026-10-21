@@ -6,6 +6,12 @@
 --     being retried, never taken from the request, and the chain length is capped by a constraint.
 --  3. A failed message is always a CONFIRMED failure: we know the customer did not receive it. failure_kind says how
 --     we know. A send whose outcome is unknown is never 'failed'; it is 'uncertain' (see sender.ts).
+-- The migration owner is subject to FORCE row-level security like everyone else, so existing rows are backfilled with
+-- FORCE switched off for this transaction only, and every constraint is added after its backfill (review of slice 3,
+-- finding 1: corrected before this migration was applied anywhere but disposable local databases).
+ALTER TABLE messages NO FORCE ROW LEVEL SECURITY;
+-- memberships too: the new author foreign key is validated against existing rows.
+ALTER TABLE memberships NO FORCE ROW LEVEL SECURITY;
 
 -- Failure kinds ------------------------------------------------------------------------------------------------------
 --   blocked           stopped by our own checks before anything was sent (opt-out, pause, window, assignment ...)
@@ -31,12 +37,12 @@ ALTER TABLE messages ADD COLUMN retry_number smallint NOT NULL DEFAULT 0 CHECK (
 ALTER TABLE messages ADD CONSTRAINT messages_original_author_fk
   FOREIGN KEY (tenant_id, original_author_membership_id) REFERENCES memberships (tenant_id, id);
 ALTER TABLE messages ADD CONSTRAINT messages_retry_root_fk FOREIGN KEY (tenant_id, retry_root) REFERENCES messages (tenant_id, id);
-ALTER TABLE messages ADD CONSTRAINT messages_retry_lineage_complete
-  CHECK ((retry_of IS NULL) = (retry_root IS NULL) AND (retry_of IS NULL) = (retry_number = 0));
-CREATE UNIQUE INDEX messages_one_retry_per_position ON messages (tenant_id, retry_root, retry_number) WHERE retry_root IS NOT NULL;
 UPDATE messages SET original_author_membership_id = sent_by_membership_id WHERE direction = 'out';
 UPDATE messages m SET retry_root = m.retry_of, retry_number = 1 WHERE m.retry_of IS NOT NULL;
 UPDATE messages m SET original_author_membership_id = o.sent_by_membership_id FROM messages o WHERE m.retry_of = o.id;
+ALTER TABLE messages ADD CONSTRAINT messages_retry_lineage_complete
+  CHECK ((retry_of IS NULL) = (retry_root IS NULL) AND (retry_of IS NULL) = (retry_number = 0));
+CREATE UNIQUE INDEX messages_one_retry_per_position ON messages (tenant_id, retry_root, retry_number) WHERE retry_root IS NOT NULL;
 
 -- Derives the lineage from the message being retried, so a request cannot choose its own position in the chain.
 -- Runs as the inserting role (cf_app) under row-level security: the original must be visible in the same company.
@@ -67,5 +73,7 @@ BEGIN
   RETURN NEW;
 END $$;
 CREATE TRIGGER messages_retry_lineage BEFORE INSERT ON messages FOR EACH ROW EXECUTE FUNCTION messages_retry_lineage();
+ALTER TABLE messages FORCE ROW LEVEL SECURITY;
+ALTER TABLE memberships FORCE ROW LEVEL SECURITY;
 -- Lineage is fixed once written.
 REVOKE UPDATE (retry_of, retry_root, retry_number, original_author_membership_id) ON messages FROM cf_app;
