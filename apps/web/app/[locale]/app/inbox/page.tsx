@@ -265,7 +265,9 @@ function DeliveryProblem({ m, conv, locale, busy, blocked, onRetry }: {
 }) {
   const d = t(locale).inbox;
   const [confirming, setConfirming] = useState(false);
-  const reason = m.errorCode ? (d.reasons[m.errorCode.split(':').pop()!] ?? d.reasons[m.errorCode] ?? fill(d.reasonCode, { code: m.errorCode })) : null;
+  // Codes look like "131026" or "retries_exhausted:130429": try the whole code, then its first and last parts.
+  const reason = m.errorCode ? (d.reasons[m.errorCode] ?? d.reasons[m.errorCode.split(':')[0]!] ?? d.reasons[m.errorCode.split(':').pop()!]
+    ?? fill(d.reasonCode, { code: m.errorCode })) : null;
   const uncertain = m.status === 'uncertain';
   void conv;
   return (

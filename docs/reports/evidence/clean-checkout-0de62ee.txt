@@ -1,0 +1,91 @@
+# Clean-checkout verification — commit 0de62eed0ee286326e61889207610bf854b9b427 (2026-10-21 03:07:11 +0000)
+# Empty folder, fresh clone, install from the frozen lockfile, fresh disposable database.
+# Node v22.22.0, pnpm 10.28.0, Linux 6.18.44-fc-v139
+
+## Install
+$ pnpm install --frozen-lockfile
+installed exactly as locked
+
+## Secret scan
+$ pnpm secrets:scan
+Secret scan passed (225 files checked).
+
+## Lint
+$ pnpm lint
+lint: no problems
+
+## Build
+$ pnpm build
+build: all packages built
+
+## Type check
+$ pnpm typecheck
+ Tasks:    6 successful, 6 total
+
+## Dependency audit (all packages; production and development/build tools), strict
+$ pnpm deps:audit
+Dependency audit (all packages), 2026-10-21 — strict
+Totals: {"info":0,"low":0,"moderate":0,"high":0,"critical":0}; production: {"info":0,"low":0,"moderate":0,"high":0,"critical":0}
+No known vulnerabilities found in any dependency.
+Dependency audit passed.
+
+## Unit tests for the audit rules
+$ pnpm test:scripts
+# pass 14
+# fail 0
+
+## Migrations
+$ pnpm db:migrate
+applied 0001_foundation.sql
+applied 0002_identity.sql
+applied 0003_tenancy_rbac.sql
+applied 0004_plans_usage.sql
+applied 0005_audit_files.sql
+applied 0006_credential_separation.sql
+applied 0007_commercial_policies.sql
+applied 0008_settings_teams_platform.sql
+applied 0009_identity_binding.sql
+applied 0010_mfa_in_database.sql
+applied 0011_pilot_enrolment.sql
+applied 0012_mfa_security_notices.sql
+applied 0013_pilot_grants_narrowed.sql
+applied 0014_override_expiry_only_shortens.sql
+applied 0015_override_insert_bounded.sql
+applied 0016_mfa_email_confirmation.sql
+applied 0017_mfa_reset_two_person.sql
+applied 0018_candidate3_review_fixes.sql
+applied 0019_candidate3_recheck_fixes.sql
+applied 0020_invitation_created_at_fixed.sql
+applied 0021_invitation_delete_revoked.sql
+applied 0022_messaging_core.sql
+applied 0023_messaging_review_fixes.sql
+applied 0024_reliable_sending_pause_ownership.sql
+applied 0025_retry_lineage_failure_kinds.sql
+applied 0026_templates.sql
+applied 0027_media_messages.sql
+applied 0028_sla_timers.sql
+applied 0029_channel_health.sql
+applied 0030_template_event_order.sql
+
+## Isolation check (CI guard)
+$ pnpm db:check-rls
+Isolation check passed: every tenant table has forced RLS and a policy; no login role can bypass RLS; cf_app has no rights over credentials; only cf_notify can mint email tokens.
+
+## Database roles used by the tests
+$ psql: current_user, superuser, bypassrls per URL
+DATABASE_APP_URL -> role cf_app, superuser=off, bypassrls=false
+DATABASE_IDENTITY_URL -> role cf_identity, superuser=off, bypassrls=false
+DATABASE_NOTIFY_URL -> role cf_notify, superuser=off, bypassrls=false
+DATABASE_PLATFORM_URL -> role cf_platform, superuser=off, bypassrls=false
+
+## API tests
+$ pnpm --filter @conversaflow/api test
+ Test Files  25 passed (25)
+      Tests  403 passed (403)
+
+## Browser checks (English and Arabic, three sizes, security policy)
+$ pnpm --filter @conversaflow/web e2e
+  15 passed (1.0m)
+
+## Result
+ALL CHECKS PASSED for 0de62eed0ee286326e61889207610bf854b9b427
