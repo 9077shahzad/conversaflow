@@ -152,7 +152,7 @@ describe('what counts toward the limits', () => {
 });
 
 describe('send-time check under concurrency', () => {
-  it('two senders at once on the last place under the daily limit: exactly one message goes, the others wait without an attempt', async () => {
+  it('several senders running together, daily limit lowered after queueing: exactly one goes, the others wait without an attempt (end to end; the forced-overlap test proves the lock)', async () => {
     await resetAudience();
     const n = await newNumber();
     for (const name of ['Daily Dina', 'Daily Duha', 'Daily Dawud']) await customer(name);
@@ -178,7 +178,7 @@ describe('send-time check under concurrency', () => {
     await setLimits({ daily: 100000 });
   });
 
-  it('two campaigns queued for one contact, then sent by two senders at once: only one reaches the contact', async () => {
+  it('two campaigns queued for one contact, contact limit tightened after queueing, several senders running together: only one reaches the contact (end to end)', async () => {
     await resetAudience();
     const n = await newNumber();
     await customer('Shared Shatha');
@@ -234,6 +234,72 @@ describe('atomic check and count', () => {
     await owner.post(`/v1/campaigns/${camp.id}/cancel`).expect(200);
     await due(); await sender().dispatchDue(100);
     await setLimits({ daily: 100000 });
+  });
+});
+
+describe('temporary refusals by WhatsApp (final recheck, finding P2-1)', () => {
+  const countRows = async (messageId: string) => (await app((tx) => tx.query('SELECT 1 FROM campaign_send_counts WHERE message_id = $1', [messageId]))).rowCount;
+  const attemptsOf = async (messageId: string) => (await app((tx) => tx.query<{ outcome: string }>(
+    'SELECT outcome FROM send_attempts WHERE message_id = $1 ORDER BY created_at', [messageId]))).rows.map((r) => r.outcome);
+  /** Runs this message's job now (only this one, so other test files' jobs cannot take the scripted outcomes). */
+  async function attempt(messageId: string) {
+    await app((tx) => tx.query(`UPDATE send_jobs SET next_attempt_at = now() WHERE message_id = $1 AND state = 'pending'`, [messageId]));
+    const job = (await app((tx) => tx.query<{ id: string }>('SELECT id FROM send_jobs WHERE message_id = $1', [messageId]))).rows[0]!.id;
+    const s = sender();
+    if (await s.leaseNow(tenant, job)) await s.processJob(tenant, job);
+  }
+
+  it('declined once, then accepted: retried and sent once, counted once, the minimum gap does not block its own retry', async () => {
+    await resetAudience();
+    const n = await newNumber();
+    await customer('Retry Rasha');
+    await setLimits({ daily: 100000, per7d: 2, gapHours: 24 });
+    const camp = await startCampaign('Temporary refusal', n.id);
+    const m = (await messagesOf(camp.id))[0]!;
+    sandbox.script.push({ notAccepted: '130429' });
+    await attempt(m.id);
+    expect((await messagesOf(camp.id))[0]!.status).toBe('queued');
+    await attempt(m.id);
+    expect((await messagesOf(camp.id))[0]!.status).toBe('sent');
+    expect(await attemptsOf(m.id)).toEqual(['not_accepted', 'accepted']);
+    expect(await countRows(m.id)).toBe(1);
+    expect(await used(n.id, false)).toBe(1);
+    expect(sentTo(n.number)).toBe(1);
+  });
+
+  it('declined on all five attempts: "exhausted", and it no longer counts toward any limit', async () => {
+    await resetAudience();
+    const n = await newNumber();
+    const c = await customer('Declined Duaa');
+    await setLimits({ daily: 100000, per7d: 2, gapHours: 24 });
+    const camp = await startCampaign('Declined five times', n.id);
+    const m = (await messagesOf(camp.id))[0]!;
+    sandbox.script.push(...Array.from({ length: 5 }, () => ({ notAccepted: '130429' })));
+    for (let i = 0; i < 5; i++) await attempt(m.id);
+    expect((await messagesOf(camp.id))[0]).toMatchObject({ status: 'failed', failure_kind: 'exhausted' });
+    expect(await used(n.id, false)).toBe(0);
+    const blocked = (await app((tx) => tx.query<{ b: boolean }>('SELECT campaign_contact_blocked($1, 2, 24, false) AS b', [c.contactId]))).rows[0]!.b;
+    expect(blocked).toBe(false);
+    expect(sentTo(n.number)).toBe(0);
+  });
+
+  it('declined once, then stopped by a later check (campaign cancelled): "blocked", and it no longer counts', async () => {
+    await resetAudience();
+    const n = await newNumber();
+    const c = await customer('Stopped Sana');
+    await setLimits({ daily: 100000, per7d: 2, gapHours: 24 });
+    const camp = await startCampaign('Declined then cancelled', n.id);
+    const m = (await messagesOf(camp.id))[0]!;
+    sandbox.script.push({ notAccepted: '130429' });
+    await attempt(m.id);
+    expect(await used(n.id, false)).toBe(1);                              // holds its place while it waits to be retried
+    await owner.post(`/v1/campaigns/${camp.id}/cancel`).expect(200);
+    await attempt(m.id);
+    expect((await messagesOf(camp.id))[0]).toMatchObject({ status: 'failed', failure_kind: 'blocked', error_code: 'campaign_cancelled' });
+    expect(await used(n.id, false)).toBe(0);
+    const blocked = (await app((tx) => tx.query<{ b: boolean }>('SELECT campaign_contact_blocked($1, 2, 24, false) AS b', [c.contactId]))).rows[0]!.b;
+    expect(blocked).toBe(false);
+    expect(sentTo(n.number)).toBe(0);
   });
 });
 

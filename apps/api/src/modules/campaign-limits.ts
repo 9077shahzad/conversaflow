@@ -6,8 +6,9 @@
  *
  * What counts (migration 0034):
  * - only campaign messages; ordinary replies and individually sent templates do not count;
- * - a message counts from the moment the sender hands it to WhatsApp, and keeps counting whatever happens next,
- *   except when WhatsApp definitely refused it (failure kind "rejected" or "exhausted");
+ * - a message counts once, from the moment the sender first hands it to WhatsApp, and keeps counting whatever happens
+ *   next (including while a temporary refusal is retried), except when it never reached anyone: WhatsApp refused it
+ *   ("rejected"), declined it on every attempt ("exhausted"), or a later check stopped it ("blocked") — 0035;
  * - when queueing, messages already queued but not yet sent are counted too (as if sent now), so a campaign does not
  *   queue more than can go. At send time they are not: each is counted when it goes.
  *
@@ -43,6 +44,9 @@ export type SendTimeVerdict =
 export async function claimCampaignSend(tx: Tx, tenantId: string, m: { messageId: string; campaignId: string; conversationId: string },
   testHooks?: { afterCheck?: () => Promise<void> }): Promise<SendTimeVerdict> {
   await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:campaign-limits`]);
+  // Already counted at an earlier hand-over that WhatsApp temporarily declined: it keeps its place while it is retried,
+  // and is not checked against its own count (final recheck, finding P2-1).
+  if ((await tx.query('SELECT 1 FROM campaign_send_counts WHERE message_id = $1', [m.messageId])).rowCount) return { ok: true };
   const lim = await campaignLimits(tx);
   const conv = (await tx.query<{ contact_id: string; connection_id: string }>(
     'SELECT contact_id, connection_id FROM conversations WHERE id = $1', [m.conversationId])).rows[0]!;

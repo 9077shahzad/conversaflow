@@ -137,7 +137,9 @@ Retrying a message happens only in its conversation, through the normal retry an
   rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier).
 - **What counts toward the limits** (migration 0034, `campaign-limits.ts`): campaign messages only, from the moment the
   sender hands them to WhatsApp, timed from then. They keep counting whatever happens next (sent, delivered, read,
-  uncertain, reported undelivered), except messages WhatsApp definitely refused ("rejected", "exhausted"). Ordinary
+  uncertain, reported undelivered, and while a temporary refusal is retried: a message is counted once), except
+  messages that never reached anyone: refused ("rejected"), declined on every attempt ("exhausted") or stopped by a
+  later check ("blocked"; 0035). Ordinary
   replies and individually sent templates do not count. When queueing, messages already queued count too, as if sent
   now; at send time each message is counted when it goes.
 - **Checked twice.** When queueing (planning: how many to queue, who to skip) and again immediately before sending. The
