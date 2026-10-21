@@ -36,3 +36,12 @@ to `w1s4-tested` = `ffdc5c7`.
   requirement.
 - GitHub is not linked to this workspace.
 - **First CI run: pending** its own approval and the spending-control check.
+
+## Domain (recorded 21 Oct 2026, 17:09 Dubai time)
+
+- The owner bought **`conversaflow.io`** from GoDaddy for one year: registration $59.99, Full Domain Protection $12.99,
+  **total $72.98**.
+- The full record and the open points (registrant to match the contracting entity, auto-renew, DNS and email records,
+  hosting) are in `docs/external-dependencies-and-costs.md`, section 6.
+- The domain is not connected to anything yet. Hosting, DNS changes, deployment and other spending remain subject to
+  their own approvals.

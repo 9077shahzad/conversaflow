@@ -69,11 +69,37 @@ reconciliation.
 | Item | Needed for | Cost (planning) | Approval |
 | --- | --- | --- | --- |
 | GitHub Team (2 seats) | Protected `main`, code-owner review | $4/user/month for the first 12 months (later price to confirm) | Pending (A16) |
+| **Domain `conversaflow.io`** | Product web address, sign-in and customer links, notification email sender, Meta business verification (website) | **Paid by the owner on 21 Oct 2026** (GoDaddy order, one year): registration $59.99 + Full Domain Protection $12.99, taxes $0.00, **total $72.98**. Renewal due about 21 Oct 2027; renewal price to confirm with GoDaddy | **Purchased by the owner.** Not yet connected (DNS, TLS, email records, hosting all pending their approvals). Registrant to confirm (see below) |
 | Hosting (pilot) | Engine, database, files, worker, ClamAV | ≈ $340–440/month (provisional, `readiness/hosting-comparison.md`) | Pending |
 | AI provider | AI agent and agent assistance (Wave 2) | Usage-based; Meta's own Business Agent is $2 per million tokens | Pending choice |
 | Apple / Google developer accounts | Native apps (Wave 4) | Annual fees | Pending |
 | Gulf-dialect native reviewers | CF-EXT-010 quality claims | Per hour | Pending |
 | External security review | Before pilot | Quotes pending | Pending |
+
+### Domain `conversaflow.io` (owner purchase, 21 Oct 2026)
+
+Recorded from the owner's GoDaddy order confirmation (screenshot shared 21 Oct 2026, 17:09 Dubai time; receipt emailed
+to the owner).
+
+| Item | Detail |
+| --- | --- |
+| Domain | `conversaflow.io` |
+| Registrar | GoDaddy |
+| Term | 1 year (renewal due about 21 Oct 2027) |
+| Paid | .IO registration $59.99; Full Domain Protection $12.99; taxes and fees $0.00; **total $72.98** |
+| Bought by | The owner, directly. Not a purchase made by Claude, and not an approval of any other spending |
+
+**Still to confirm or do** (nothing here is approved by this record):
+- **Registrant.** The order does not show whose name the domain is registered in. If the contracting entity is to be
+  MERONATIC SOLUTIONS GROUP, LLC (Delaware, confirmation pending), the registrant should match it. Meta's business
+  verification checks that the business website's domain belongs to the business.
+- **Renewal.** Turn on auto-renew, and record the renewal price; .io renewals can differ from the first-year price.
+- **DNS and email.** No records are set yet. Before the product sends email from this domain, publish SPF, DKIM and
+  DMARC for the chosen email provider.
+- **Hosting and TLS.** Point the domain only after hosting is approved. The earlier Netlify screens preview was never
+  published and is not linked to this domain.
+- **In the product.** Use the domain in the configuration (application address, allowed origins, email sender) when the
+  first hosted environment is set up. No code was changed for this record.
 
 ## Sources
 
