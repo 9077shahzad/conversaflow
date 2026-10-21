@@ -1,4 +1,65 @@
-# Release manifest — Phase 1, candidates 1 to 3 (20 Oct 2026)
+# Release manifest — Phase 1 candidates 1 to 3 (20 Oct 2026) and BRD v1.2 Wave 1 slices 1 to 4 (21 Oct 2026)
+
+## Wave 1, slices 1 to 4 (current handover)
+
+**Status:** local verification only, with simulated WhatsApp (sandbox provider) and ClamAV's test signature. GitHub
+CI, hosted verification, live provider checks and pilot approval are pending. G4 and the sign-in risk are open, with
+owner acceptance pending. Nothing has been pushed, deployed or connected, and no spending was made.
+
+Branch `feature/brd-v1.2-wave1`, built on `main` (`1eac98c`). Candidate 3 (`rc3-tested` = `f1bc095`,
+`rc3-packaged` = `c3b6d3d`) is unchanged.
+
+| Role | Commit | What was done at exactly this commit | Evidence |
+| --- | --- | --- | --- |
+| Slice 2 baseline | `4eda821` | Slice 2 reviewed, rechecked and tested | `wave1-slice2-report.md`; `clean-checkout-4eda821.txt` |
+| Slice 3 | `0de62ee`, `dcece7b` | Slice 3 reviewed, rechecked and tested | `wave1-slice3-report.md`; clean-checkout files for both |
+| Slice 4 reviewed | `264379b` | Independent review: 1 High, 3 Medium, 2 Low | `wave1-slice4-report.md`; `clean-checkout-264379b.txt` |
+| Rechecked | `294a79d`, `074644f` | S4-1 to S4-7 verified; N1 found and fixed; N1 verified fixed at `074644f` | Clean-checkout files for both |
+| Closure point 1 | `a061494` | Send-time campaign limits; recheck found P2-1 (High) | `clean-checkout-a061494.txt` |
+| P2-1 fix | `b1a03bb` | Recheck verified P2-1; found B-1 (Medium) | `clean-checkout-b1a03bb.txt` |
+| **Tested and rechecked (final code)** | `ffdc5c7` | B-1 fix. Clean-checkout run and final independent recheck of this exact commit (results below) | `clean-checkout-ffdc5c7.txt`; report section 8 |
+| **Packaged** | The commit containing this file (hash in the handover message) | Documents and evidence only. Its code is identical to `ffdc5c7` | Command below |
+
+Tags: `w1s4-tested` = `ffdc5c7`; `w1s4-packaged` = the packaged commit.
+
+```bash
+git diff --stat w1s4-tested w1s4-packaged -- apps packages scripts .github package.json pnpm-lock.yaml turbo.json pnpm-workspace.yaml
+# expected: no output
+```
+
+### Results at `ffdc5c7` (clean checkout)
+
+See `docs/reports/evidence/clean-checkout-ffdc5c7.txt`.
+
+| Check | Result |
+| --- | --- |
+| Install | Frozen lockfile, installed exactly as locked (Node 22.22.0, pnpm 10.28.0) |
+| Secret scan, lint, type check, build | Passed (248 files scanned) |
+| Dependency audit (strict, all packages) | **No advisories** |
+| Audit-rule unit tests | 14/14 |
+| Migrations | 0001–0036 on a fresh database |
+| Isolation check (CI guard) | Passed |
+| Database roles used by the tests | cf_app, cf_identity, cf_notify, cf_platform: none superuser, none bypasses row security |
+| API tests | **449/449 in 29 files** (including the upgrade tests, which use a disposable superuser locally) |
+| Browser checks (English and Arabic, three sizes, security policy) | **15/15** in Chromium. Firefox and WebKit not yet run |
+
+**Final independent recheck of `ffdc5c7`:** B-1, P2-1 and N1 verified fixed; nothing at Medium or above; the
+reviewer's 156 tests (its probes included) pass. Open: B-2 (Low, not probed; upgrade test required before upgrading any
+persistent database with campaign traffic), P2-2 (Low), P2-3 (Info, owner decision), N2 (Info).
+G4 and the sign-in risk are open, with owner acceptance pending.
+
+### Archives
+
+Kept outside the repository (they contain it), in the handover folder with `SHA256SUMS.txt`:
+
+| File | Contents |
+| --- | --- |
+| `conversaflow-<packaged>.zip` | Source tree at `w1s4-packaged` (`git archive`) |
+| `conversaflow-<packaged>.bundle` | Full git history: `main`, `feature/brd-v1.2-wave1` and all tags (candidates 1–3, `w1s4-tested`, `w1s4-packaged`); `git bundle verify` reports it okay |
+
+---
+
+# Phase 1, candidates 1 to 3 (20 Oct 2026)
 
 **Status:** development complete; local checks reported passed; GitHub CI, hosted verification and live pilot
 approval pending.

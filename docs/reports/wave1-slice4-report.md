@@ -15,8 +15,12 @@ sandbox labels), the 16 MB limit kept and shown, then campaigns.
 | --- | --- | --- |
 | `264379b` | Slice 4: migrations 0031–0033, SR-1 upgrade, late answers and exact matching, attempt evidence, retry eligibility by message type, sandbox and scanner labels, 16 MB limit shown, campaigns and suppression list, screens in English and Arabic | Clean checkout **passed** (`clean-checkout-264379b.txt`). Independently **reviewed**: 1 High, 3 Medium, 2 Low, Info |
 | `294a79d` | Review fixes S4-1 to S4-7 | Clean checkout **passed** (`clean-checkout-294a79d.txt`). Targeted recheck: all findings **verified fixed**; one new Medium (N1) |
-| `074644f` | Recheck N1 fix | Clean checkout **passed** (`clean-checkout-074644f.txt`) |
-| (this report) | Report, acceptance matrix and evidence files only (no code) | — |
+| `074644f` | Recheck N1 fix | Clean checkout **passed** (`clean-checkout-074644f.txt`). Kept unchanged, with its evidence. N1 verified fixed here by the reviewer |
+| `97b0406` | First version of this report and evidence (no code) | — |
+| `a061494` | Closure point 1: campaign limits rechecked atomically at send time (migration 0034); cost estimate states | Clean checkout **passed** (`clean-checkout-a061494.txt`). Final recheck: N1 still fixed; one new High (P2-1) |
+| `b1a03bb` | P2-1 fix: a temporarily declined campaign message is retried (migration 0035) | Clean checkout **passed** (`clean-checkout-b1a03bb.txt`). Recheck: P2-1 and N1 verified fixed; one new Medium (B-1) |
+| `ffdc5c7` | B-1 fix: one count per hand-over; a declined attempt stops counting; every retry checked in full (migration 0036) | Clean checkout **passed** (`clean-checkout-ffdc5c7.txt`). Recheck: B-1, P2-1 and N1 **verified fixed at `ffdc5c7`**; nothing at Medium or above; one Low (B-2) recorded |
+| (packaged commit) | This report, acceptance matrix, release manifest and evidence only (no code) | Code identical to `ffdc5c7` |
 
 ## 1. SR-1: permissions for companies that already exist
 
@@ -154,9 +158,10 @@ before it leaves:
 | Template still approved (and for this number's account) | Yes | Yes |
 | Campaign still running; its creator still holds `campaigns.manage` | Yes | Yes |
 | Replies not paused for the conversation | — | Yes |
-| Frequency limits and the number's daily limit | Yes | No (counted when queued) |
+| Frequency limits and the number's daily limit | Yes (planning) | **Yes, atomically** (section 8) |
 
-A paused or scheduled campaign holds the message without counting an attempt. A cancelled campaign blocks it. A
+A paused or scheduled campaign holds the message without counting an attempt. A number without room under its daily
+limit also holds it; a contact over its frequency limits is not sent it. A cancelled campaign blocks it. A
 campaign message cannot be retried from the inbox, because a retry would be an ordinary message and would skip these
 checks.
 
@@ -196,6 +201,87 @@ and does not show the form. The demo data includes one completed campaign and on
 (`campaign_claim`) is owned by `cf_dispatch`, which can see only the scheduling columns of running and scheduled
 campaigns; its definition is pinned in the guard. `system_role_grants` is on the reviewed list of shared tables.
 
+## 8. Closure points (owner instructions of 21 Oct 2026, 11:01)
+
+### Campaign limits rechecked immediately before sending
+
+Queue-time checks alone were not enough: a message queued earlier can wait (a pause, a backlog, a temporary refusal by
+WhatsApp, a lowered limit) while other campaigns go out.
+
+**What counts toward each limit** (migration 0034, corrected by 0035 and 0036; one definition used at queue time and at
+send time):
+
+| | Per contact: at most N in 7 days, and a minimum gap | Per number: at most the daily limit in a rolling 24 hours |
+| --- | --- | --- |
+| Counts | Campaign messages to this contact | Campaign messages from this number |
+| From when | Each hand-over to WhatsApp counts from its own time (a retry is a new hand-over) | Same |
+| Keeps counting | Whatever happens next: in flight, sent, delivered, read, uncertain or interrupted (it may have arrived), reported undelivered | Same |
+| Stops counting | When that hand-over never reached anyone: the attempt was declined ("not accepted") or refused ("rejected"), or the message ended as "rejected", "exhausted" (declined on all 5 attempts) or "blocked" (stopped by a later check) | Same |
+| Does not count | Ordinary replies; templates sent one by one from the inbox | Same |
+| When queueing only | Messages already queued count too, as if sent now | Same |
+
+**How the send-time check works.** Just before a campaign message is handed to WhatsApp, the sender takes a lock for
+the company, checks the contact's 7-day count and minimum gap and the number's 24-hour count, and records the message as
+counted, all in the same transaction that marks it "submitting". Two senders, or two campaigns, cannot both take the
+last place. Then:
+- a contact over its limits is not sent the message (recorded as stopped, reason "frequency_limit");
+- a number with no room left holds the message, with no attempt counted, until the oldest counted message turns
+  24 hours old; the campaign stays "running" and can still be paused or cancelled;
+- a retry after WhatsApp declined an earlier attempt is checked in full at its own time: the declined attempt no longer
+  counts, so the message is never checked against itself, and a retry made long afterwards (for example after a
+  pause) cannot skip the limits.
+
+**Tests** (`campaign-limits.test.ts`, 13 tests, plus the campaign tests):
+
+| Area | Tests |
+| --- | --- |
+| What counts | Uncertain and reported-undelivered count; refused and declined-on-every-attempt do not; queued messages count when queueing only; ordinary replies do not |
+| Atomic check | Two checks forced to overlap (the first pauses after its check, before recording): the second waits and is refused. With the lock removed, this test fails (checked by us and independently by the reviewer) |
+| Concurrent campaigns | Several senders running together after the daily limit was lowered: one message goes, the others wait with no attempt. Two campaigns queued for one contact, limit tightened, several senders: one reaches the contact. Minimum gap at send time. These two end-to-end tests pass without the lock too; the forced-overlap test is the proof of atomicity (review note P2-2) |
+| Pause and resume | A message held by a pause is checked again on resume: another campaign used the room meanwhile, so it waits; it goes once room frees; the campaign then completes |
+| Window edges | Daily: a send 23 hours ago still counts (the next waits about an hour); 25 hours ago no longer does. 7 days: 6 days 23 hours still counts at send time; 7 days 1 hour does not |
+| Temporary refusals (P2-1) | Declined once, then accepted: retried and sent once; only the accepted hand-over counts. Declined 5 times: "exhausted", no longer counts. Declined, then campaign cancelled: "blocked", no longer counts. All three fail on `a061494` |
+| Retry after a pause (B-1) | Declined, paused; another campaign used the number's room meanwhile: on resume the retry waits and is not sent. Declined, paused; another campaign reached the same contact: on resume the retry is not sent ("frequency_limit"). Both fail on `b1a03bb` |
+
+**Decision for the owner (P2-3, not changed).** A contact found over its frequency limits at send time is dropped
+from that campaign, not held for later. A number over its daily limit is held. Holding contacts instead would deliver
+offers late, possibly days later; dropping keeps campaigns timely. Tell us if you want contacts held instead.
+
+### Cost estimate: unavailable is not zero
+
+| State | When | What the screen shows |
+| --- | --- | --- |
+| Estimated | Every market in the audience has a verified Meta rate | "About {total} USD, using verified Meta rates." |
+| Unavailable | Any market lacks a verified rate (today: Saudi Arabia and UAE marketing) | "Estimate unavailable: no verified Meta rate is on file for Saudi Arabia. This is not a cost of zero; no figure is shown rather than a guess." No number is returned |
+| No cost | Nobody would receive the campaign now | "No cost: nobody would receive this campaign now." Total 0 |
+
+The verified-rate test now always runs; before, it was skipped silently if the test rate could not be added.
+
+### Final independent recheck
+
+The same independent reviewer, working only on its own clone, rechecked each commit after the closure work. The
+reviewer never saw the work being produced. Every result names the exact commit it was obtained on.
+
+| Commit | What the reviewer checked | Outcome |
+| --- | --- | --- |
+| `074644f` | N1 (a waiting campaign picked up again on every call) | **Verified fixed** at `074644f`: probe H1 returned `[1,1,0,0,0]` (before the fix, at `294a79d`: `[4,1,1,1,1]`) |
+| `a061494` | N1 again, and the send-time limits change | N1 still fixed. New finding **P2-1 (High, proved)**: a campaign message WhatsApp temporarily declined was blocked by its own count and never retried, and still used up the limits. P2-2 (Low): the two end-to-end concurrency tests do not force the race; the forced-overlap test does. P2-3 (Info): contacts over the limits are dropped, not held (owner decision) |
+| `b1a03bb` | P2-1 fix | P2-1 **verified fixed** (probe N2: retried and sent once). N1 still fixed. New finding **B-1 (Medium, proved)**: a message counted at an earlier, declined hand-over skipped every limit check when retried, for example after a long pause, and could go over the daily limit and inside the minimum gap |
+| **`ffdc5c7`** (packaged code) | B-1 fix, plus everything earlier | **B-1 verified fixed** (probe N3: the retry was checked in full and not sent; N3b: held for daily room, not sent). **P2-1 and N1 still fixed**; P1–P4, L1 and H2 unchanged (H2: 8 messages, 8 unique, 8 sent, no errors, no deadlock). Attempt numbering, in-flight counting, queue-time counting, row security and the 0036 key change checked and fine. **Nothing at Medium or above.** The reviewer's 10 suite files (its probes included) pass: 156/156 |
+
+Failure evidence was kept at each step. Each finding was proved on the commit named above. Each fix was a new commit,
+verified by its own clean checkout and recheck. The tests for P2-1 fail on `a061494`, and the tests for B-1 fail on
+`b1a03bb`. `074644f`, `a061494` and `b1a03bb` and their evidence files are unchanged.
+
+**Open after the final recheck:**
+
+| # | Finding | Severity | Status |
+| --- | --- | --- | --- |
+| B-2 | **Upgrade scenario, not probed.** A database that already ran migrations 0032–0033 with campaign traffic before 0034 could undercount after upgrading to 0036. **Assumptions:** (1) a campaign message was declined ("not accepted") at attempt 1 and delivered at attempt 2 before 0034 was applied; (2) the 0034 backfill writes one count row for that message; (3) 0036 labels that row attempt 1; (4) attempt 1's recorded "not accepted" outcome then excludes the row, so the delivered message stops counting for up to 24 hours (daily limit) or 7 days (per-contact limit). Reasoned from the code by the reviewer; not reproduced | Low | **Open, not fixed in this package.** No such database exists today: no persistent environment has applied any slice 4 migration (`migration-edit-check.txt`; nothing hosted or pushed). **Requirement:** before upgrading any persistent database that has campaign traffic from a version between 0032 and 0035, reproduce this scenario in an upgrade test. Then either correct the backfilled rows (attempt set to the last attempt WhatsApp did not decline) in a new migration, or recreate the database. Fresh installations and upgrades from 0030 or earlier are not affected |
+| P2-2 | The two end-to-end "several senders" tests pass without the lock; atomicity is proved by the forced-overlap test | Low | Recorded; the tests are named accordingly |
+| P2-3 | A contact over its frequency limits at send time is dropped from that campaign, not held | Info | Owner decision |
+| N2 | The sender's internal return value says "uncertain" in one late-answer case, although the stored message is "sent" | Info | Recorded; affects nothing stored or shown |
+
 ## Results
 
 ### Local
@@ -203,22 +289,22 @@ campaigns; its definition is pinned in the guard. `system_role_grants` is on the
 Fresh clone, frozen lockfile, fresh PostgreSQL 16 / Redis 7 / ClamAV (test signature), restricted roles. Evidence files
 are in `docs/reports/evidence/`, one per commit.
 
-| Check | `264379b` | `294a79d` | `074644f` |
-| --- | --- | --- | --- |
-| Secret scan, lint, type check, build | Passed | Passed | Passed |
-| Dependency audit (strict, all packages) | No advisories | No advisories | No advisories |
-| Migrations | 0001–0033 | 0001–0033 | 0001–0033 |
-| Isolation check (CI guard) | Passed | Passed | Passed |
-| API tests | 429/429 in 28 files | 435/435 in 28 files | 436/436 in 28 files |
-| Browser checks (Chromium; English and Arabic, three sizes) | 15/15 | 15/15 | 15/15 |
+| Check | `264379b` | `294a79d` | `074644f` | `a061494` | `b1a03bb` | **`ffdc5c7` (packaged code)** |
+| --- | --- | --- | --- | --- | --- | --- |
+| Secret scan, lint, type check, build | Passed | Passed | Passed | Passed | Passed | **Passed** |
+| Dependency audit (strict, all packages) | No advisories | No advisories | No advisories | No advisories | No advisories | **No advisories** |
+| Migrations | 0001–0033 | 0001–0033 | 0001–0033 | 0001–0034 | 0001–0035 | **0001–0036** |
+| Isolation check (CI guard) | Passed | Passed | Passed | Passed | Passed | **Passed** |
+| API tests | 429/429 in 28 files | 435/435 in 28 files | 436/436 in 28 files | 444/444 in 29 files | 447/447 in 29 files | **449/449 in 29 files** |
+| Browser checks (Chromium; English and Arabic, three sizes) | 15/15 | 15/15 | 15/15 | 15/15 | 15/15 | **15/15** |
 
 The six regression tests for S4-1 to S4-5 were also run against the unfixed `264379b`, and all six failed there as
-expected.
+expected. The P2-1 tests failed on `a061494` and the B-1 tests on `b1a03bb`, as expected.
 
 These results come from the sandbox provider and ClamAV's test signature only. None of them is a check against live
 WhatsApp, Meta's template review or current virus definitions.
 
-The upgrade tests (from 0021 for SR-1, and the populated-database test from slice 3, now through 0033) need a
+The upgrade tests (from 0021 for SR-1, and the populated-database test from slice 3, now through the latest migration) need a
 disposable superuser. They run in the local harness, and will be skipped in GitHub CI unless one is provided there.
 
 `clean-checkout-294a79d.txt` was committed part-written with `074644f`, because that run was still writing it. The
@@ -281,6 +367,9 @@ lookup pinned by the guard.
 | **Messaging tier** | The daily limit default (250) is Meta's starting tier. The real tier of each number is not read from Meta yet | Open, for the live adapter |
 | **Storage limit** | 16 MB kept; larger documents are a later enhancement (W1.13) | Open (planned) |
 | **Send idempotency** | A request-level idempotency key on WhatsApp's send endpoint was not verified in the sources checked | Open. Re-check before live sending |
+| **Message-ID correlation** | Exact matching of late answers and status updates assumes WhatsApp returns our reference (`biz_opaque_callback_data`) in status updates, and one WhatsApp message id per accepted send. Tested only against the simulated provider | Open. Confirm against the real provider (Meta test number) before live access |
+| **Frequency at send time (P2-3)** | A contact over its limits at send time is dropped from the campaign, not held | Owner decision (section 8) |
+| **B-2** | Upgrade from a database that ran 0032–0035 with campaign traffic could undercount (Low; not probed) | Open. Must be reproduced in an upgrade test, and corrected or the database recreated, before any such persistent database is upgraded (section 8) |
 
 **Live WhatsApp remains blocked** until the legal entity is confirmed, Meta Tech Provider onboarding is approved, and
 number ownership is verified for each customer.
@@ -291,16 +380,25 @@ and cost ledger, Click-to-WhatsApp ad reports.
 ## Approvals still pending
 
 - **G4 and the sign-in risk:** open. Neither is recorded as accepted.
-- **GitHub:** before any push, confirm the exact company-owned private repository and the existing spending-control
-  requirements. The GitHub Team purchase is kept separate from the import and the first CI run. The previously agreed
-  spending-control options stand. No paid upgrade has been approved, and none was made.
+- **GitHub push: pending.** Nothing has been pushed; the workspace has no GitHub connection (the connection attempt on
+  21 Oct 2026 returned "link your GitHub account to let Claude access repositories").
+  - Destination: the standing requirement is a company-owned private repository. In a multiple-choice question on
+    21 Oct 2026 (12:05 Dubai time) the owner selected "9077shahzad/conversaflow" (https://github.com/9077shahzad/conversaflow,
+    a personal account). The owner then asked (12:06) that the personal repository not be recorded as the chosen
+    destination without an explicit approval changing the company-owned requirement. **The destination is therefore
+    pending**, not approved.
+  - Before any import: link GitHub; check what the connection permits (reading repositories, pushing branches and
+    tags, managing Actions settings) and report anything missing; confirm the repository is private and empty;
+    disable Actions and verify that it is disabled before pushing.
+  - The first CI run stays pending its own approval and the spending-control check. The GitHub Team purchase is kept
+    separate from the import and the first CI run. No paid upgrade has been approved, and none was made.
 - **GitHub CI, hosted verification and pilot access:** pending their approvals.
 
 ## Evidence kept separate
 
 | Level | State |
 | --- | --- |
-| Local | Passed at `264379b`, `294a79d` and `074644f` (latest: 436/436 API, 15/15 browser, guard passed). Earlier evidence unchanged at `4eda821`, `0de62ee` and `dcece7b` |
+| Local | Passed at `264379b`, `294a79d`, `074644f`, `a061494`, `b1a03bb` and **`ffdc5c7` (final code: 449/449 API, 15/15 browser, guard passed)**. Earlier evidence unchanged at `4eda821`, `0de62ee` and `dcece7b` |
 | GitHub CI | Pending |
 | Hosted | Pending |
 | Pilot | Pending |

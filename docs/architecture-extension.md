@@ -135,11 +135,11 @@ Retrying a message happens only in its conversation, through the normal retry an
 - **Frequency limits.** Per company: at most N campaign messages per contact in 7 days (default 2) and a minimum gap
   between campaign messages (default 24 hours). Per number: at most the company's daily limit of campaign messages in a
   rolling 24 hours (default 250, Meta's starting messaging limit; never above the number's tier).
-- **What counts toward the limits** (migration 0034, `campaign-limits.ts`): campaign messages only, from the moment the
-  sender hands them to WhatsApp, timed from then. They keep counting whatever happens next (sent, delivered, read,
-  uncertain, reported undelivered, and while a temporary refusal is retried: a message is counted once), except
-  messages that never reached anyone: refused ("rejected"), declined on every attempt ("exhausted") or stopped by a
-  later check ("blocked"; 0035). Ordinary
+- **What counts toward the limits** (migrations 0034–0036, `campaign-limits.ts`): campaign messages only, one count per
+  hand-over to WhatsApp, timed from that hand-over. A hand-over keeps counting whatever happens next (in flight, sent,
+  delivered, read, uncertain, interrupted, reported undelivered), except when it never reached anyone: that attempt
+  was declined ("not accepted") or refused ("rejected"), or the message ended as "rejected", "exhausted" or
+  "blocked". A retry is a new hand-over, checked in full at its own time. Ordinary
   replies and individually sent templates do not count. When queueing, messages already queued count too, as if sent
   now; at send time each message is counted when it goes.
 - **Checked twice.** When queueing (planning: how many to queue, who to skip) and again immediately before sending. The
