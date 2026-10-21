@@ -82,7 +82,9 @@ describe('inbound media', () => {
     await deliver(mediaIn(conv.wa, 'image', { id: mediaId, mime_type: 'image/png', caption: 'The leak under the sink' }, id)).expect(200); // repeat
     let m = await lastMedia(conv.id);
     expect(m).toMatchObject({ kind: 'media', mediaType: 'image', mediaStatus: 'pending', fileId: null, body: 'The leak under the sink' });
-    expect(await fetcher().dispatchDue()).toBe(1); // one job, not two
+    // One job for the repeated delivery, not two (the worker also serves other companies' jobs, so count this message's).
+    expect((await app((tx) => tx.query('SELECT count(*)::int AS n FROM media_jobs WHERE message_id = $1', [m.id]))).rows[0].n).toBe(1);
+    await fetcher().dispatchDue();
     m = await lastMedia(conv.id);
     expect(m).toMatchObject({ mediaStatus: 'available' });
     const file = (await agent.get(`/v1/files/${m.fileId}`).expect(200)).body;
@@ -144,7 +146,8 @@ describe('inbound media', () => {
     let m = await lastMedia(conv.id);
     expect(m.mediaStatus).toBe('pending');
     expect(await mediaJob(m.id)).toMatchObject({ state: 'pending', attempts: 1, last_error: 'busy' });
-    expect(await fetcher().dispatchDue()).toBe(0); // not due yet
+    await fetcher().dispatchDue(); // not due yet: nothing happens to this one
+    expect(await mediaJob(m.id)).toMatchObject({ state: 'pending', attempts: 1 });
     await dueNow();
     await fetcher().dispatchDue();
     expect((await lastMedia(conv.id)).mediaStatus).toBe('available');
