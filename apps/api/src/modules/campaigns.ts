@@ -193,12 +193,20 @@ export class CampaignsService {
        FROM campaigns c JOIN message_templates t ON t.id = c.template_id JOIN channel_connections ch ON ch.id = c.connection_id
        WHERE c.id = $1`, [id])).rows[0];
     if (!c) throw Errors.notFound('Campaign');
-    // Progress from the recipients and their messages' honest delivery states.
+    // Progress from the recipients and their messages' honest delivery states. A recipient stopped by our own checks
+    // just before sending (for example over the frequency limits, owner decision P2-3) is reported as skipped at send
+    // time with its reason, separately from messages WhatsApp refused or failed to deliver (W1.14). Skipped recipients
+    // are never sent this campaign's message later; a later campaign checks them afresh.
     const counts = (await tx.query<{ k: string; n: number }>(
       `SELECT CASE WHEN r.state <> 'queued' THEN r.state || coalesce(':' || r.skip_reason, '')
+                   WHEN m.status = 'failed' AND m.failure_kind = 'blocked' THEN 'skipped_at_send:' ||
+                     CASE m.error_code WHEN 'contact_opted_out' THEN 'opted_out' WHEN 'marketing_consent_required' THEN 'no_consent'
+                                       WHEN 'no_whatsapp_identifier' THEN 'no_whatsapp' ELSE coalesce(m.error_code, 'other') END
                    WHEN m.status = 'failed' THEN 'failed:' || m.failure_kind ELSE m.status END AS k, count(*)::int AS n
        FROM campaign_recipients r LEFT JOIN messages m ON m.id = r.message_id WHERE r.campaign_id = $1 GROUP BY 1`, [id])).rows;
-    return { ...c, progress: Object.fromEntries(counts.map((x) => [x.k, x.n])) };
+    const progress = Object.fromEntries(counts.map((x) => [x.k, x.n]));
+    const sum = (prefix: string) => counts.filter((x) => x.k.startsWith(prefix)).reduce((t, x) => t + x.n, 0);
+    return { ...c, progress, skipped: { whenQueueing: sum('skipped:'), whenSending: sum('skipped_at_send:') } };
   }
 
   /** Schedules a draft campaign (null = now). The template must be approved now; it is checked again at send. */

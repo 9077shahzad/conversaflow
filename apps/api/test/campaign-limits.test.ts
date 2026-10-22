@@ -360,6 +360,37 @@ describe('temporary refusals by WhatsApp (final recheck, findings P2-1 and B-1)'
   });
 });
 
+describe('campaign report: recipients skipped at send time (W1.14, owner decision P2-3)', () => {
+  it('shows the count and reason of recipients skipped when sending, apart from failures, and never sends to them later', async () => {
+    await resetAudience();
+    const n = await newNumber();
+    const freq = await customer('Report Rania');
+    const stop = await customer('Report Sami');
+    await customer('Report Lina');
+    await setLimits({ daily: 100000, per7d: 14, gapHours: 0 });
+    const camp = await startCampaign('Skip report', n.id);
+    expect(await messagesOf(camp.id)).toHaveLength(3);
+    // After queueing: Rania received another campaign message an hour ago, Sami opted out.
+    await sentEarlier({ contactId: freq.contactId, connectionId: n.id, campaignId: camp.id, hoursAgo: 1 });
+    await setLimits({ gapHours: 24 });
+    await post(JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: MAIN },
+      contacts: [{ wa_id: stop.wa, profile: { name: 'Report Sami' } }],
+      messages: [{ from: stop.wa, id: `wamid.in.${randomUUID()}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'STOP' } }] } }] }] })).expect(200);
+    await sender().dispatchDue(100);
+    await new CampaignRunner(t.deps.db).runBatch(tenant, camp.id);
+    const view = (await owner.get(`/v1/campaigns/${camp.id}`).expect(200)).body;
+    expect(view.progress).toMatchObject({ sent: 1, 'skipped_at_send:frequency_limit': 1, 'skipped_at_send:opted_out': 1 });
+    expect(Object.keys(view.progress).some((k: string) => k.startsWith('failed'))).toBe(false);
+    expect(view.skipped).toEqual({ whenQueueing: 0, whenSending: 2 });
+    expect(view.status).toBe('completed');
+    // Never sent to them later by this campaign, however often it runs.
+    await due(); await sender().dispatchDue(100);
+    await new CampaignRunner(t.deps.db).runBatch(tenant, camp.id);
+    expect(sentTo(n.number)).toBe(1);
+    await setLimits({ per7d: 2, gapHours: 24 });
+  });
+});
+
 describe('pause and resume', () => {
   it('a message held by a pause is checked again on resume: if another campaign used the room meanwhile, it waits; it goes once room frees', async () => {
     await resetAudience();

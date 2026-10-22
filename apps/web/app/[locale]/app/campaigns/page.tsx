@@ -18,7 +18,7 @@ interface Preview {
 }
 interface Campaign {
   id: string; name: string; status: string; scheduledAt: string | null; templateName: string; templateLanguage: string;
-  templateCategory: string; provider: string; progress: Record<string, number>; createdAt: string;
+  templateCategory: string; provider: string; progress: Record<string, number>; skipped?: { whenQueueing: number; whenSending: number }; createdAt: string;
 }
 interface Suppression { id: string; waNumber: string; reason: string; note: string | null }
 
@@ -65,7 +65,7 @@ export default function Campaigns() {
   const progressLabel = (k: string) => {
     const [state, reason] = k.split(':');
     const base = d.progress[state!] ?? state;
-    return reason ? `${base} (${d.reasons[reason] ?? t(locale).inbox.failedTitles[reason] ?? reason})` : base;
+    return reason ? `${base} (${d.reasons[reason] ?? t(locale).inbox.reasons[reason] ?? t(locale).inbox.failedTitles[reason] ?? reason})` : base;
   };
 
   return (
@@ -195,7 +195,15 @@ function CampaignRow({ c, locale, busy, when, label, act }: {
         {c.scheduledAt && <span className="text-sm text-slate-700">· {when(c.scheduledAt)}</span>}
       </div>
       {Object.keys(c.progress).length > 0 && (
-        <p className="mt-1 text-sm text-slate-800">{Object.entries(c.progress).map(([k, n]) => `${label(k)}: ${n}`).join(' · ')}</p>
+        <>
+          <p className="mt-1 text-sm text-slate-800">{Object.entries(c.progress).filter(([k]) => !k.startsWith('skipped')).map(([k, n]) => `${label(k)}: ${n}`).join(' · ')}</p>
+          {c.skipped && c.skipped.whenQueueing + c.skipped.whenSending > 0 && (
+            <p className="mt-1 text-sm text-slate-800">
+              <span className="font-semibold">{fill(d.skippedTotal, { n: String(c.skipped.whenQueueing + c.skipped.whenSending) })}</span>{' '}
+              {Object.entries(c.progress).filter(([k]) => k.startsWith('skipped')).map(([k, n]) => `${label(k)}: ${n}`).join(' · ')}
+            </p>
+          )}
+        </>
       )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {c.status === 'draft' && (
