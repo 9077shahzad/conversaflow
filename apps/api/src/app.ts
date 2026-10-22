@@ -15,7 +15,7 @@ import {
   AuditController, AuthController, BillingController, ChannelsController, FilesController, HealthController, InboxController,
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
   TemplatesController, ContactsController, CampaignsController, SuppressionsController,
-  TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController,
+  TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -35,6 +35,8 @@ import { ContactImportService } from './modules/contacts-import';
 import { AssignmentService } from './modules/auto-assign';
 import { ReportsService } from './modules/reports';
 import { AutomationsService } from './modules/automations';
+import { AnthropicProvider, SimulatedAiProvider } from './modules/ai-provider';
+import { AiService } from './modules/ai';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
 import { SettingsService } from './modules/settings.service';
@@ -70,6 +72,7 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
       sandboxVerifyToken: config.SANDBOX_VERIFY_TOKEN ?? randomBytes(24).toString('hex'),
     },
     channels: overrides.channels ?? (config.CHANNEL_SANDBOX_ENABLED ? { sandbox: new SandboxAdapter() } : {}),
+    ai: overrides.ai ?? (config.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(config.AI_API_KEY!, config.AI_MODEL) : new SimulatedAiProvider()),
   };
 }
 
@@ -83,13 +86,13 @@ export class AppModule {
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
         InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
-        TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController,
+        TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
-        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService),
+        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

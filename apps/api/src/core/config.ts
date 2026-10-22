@@ -43,6 +43,16 @@ const Schema = z.object({
    * request elsewhere.
    */
   INBOUND_APPLY: z.enum(['worker', 'request']).optional(),
+  /**
+   * AI provider (Wave 2). `simulated` (the default): a deterministic, clearly labelled stand-in that quotes the
+   * company's knowledge only. `anthropic`: the Anthropic API with AI_API_KEY; not used until the owner approves an AI
+   * account. Prices are per million tokens, for the budget; the simulated provider costs nothing.
+   */
+  AI_PROVIDER: z.enum(['simulated', 'anthropic']).default('simulated'),
+  AI_API_KEY: z.string().min(20).optional(),
+  AI_MODEL: z.string().min(3).max(100).default('claude-sonnet-5-5'),
+  AI_PRICE_INPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
+  AI_PRICE_OUTPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),
   /** Token echoed during webhook verification (hub.verify_token). Generated per process when not set. */
@@ -69,6 +79,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     : parsed.data.CHANNEL_SANDBOX_ENABLED === 'true';
   if (parsed.data.NODE_ENV === 'production' && sandbox) {
     throw new Error('Invalid configuration: production requires CHANNEL_SANDBOX_ENABLED=false (the sandbox channel is a test double).');
+  }
+  if (parsed.data.AI_PROVIDER === 'anthropic' && (!parsed.data.AI_API_KEY || parsed.data.AI_PRICE_INPUT_PER_MTOK_USD === undefined || parsed.data.AI_PRICE_OUTPUT_PER_MTOK_USD === undefined)) {
+    throw new Error('Invalid configuration: AI_PROVIDER=anthropic needs AI_API_KEY and both AI prices (so budgets are enforced).');
   }
   const inbound = parsed.data.INBOUND_APPLY ?? (parsed.data.NODE_ENV === 'production' ? 'worker' : 'request');
   if (parsed.data.NODE_ENV === 'production' && inbound !== 'worker') {

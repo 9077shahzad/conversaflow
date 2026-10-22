@@ -8,6 +8,7 @@ import { loadConfig } from '../src/core/config';
 import type { Deps } from '../src/core/context';
 import { MemoryMailer } from '../src/core/mailer';
 import { Notifier } from '../src/worker/notifier';
+import { AiService } from '../src/modules/ai';
 
 export const PASSWORD = 'Correct-Horse-Battery-9';
 
@@ -19,6 +20,8 @@ export interface TestApp {
   ownerDb: Db;
   /** The notifier worker's connection (role cf_notify). */
   notifyDb: Db;
+  /** The AI service, as the API uses it (simulated provider unless configured otherwise). */
+  ai: AiService;
   /** Runs the notifier once, as the worker would, so queued account emails are sent. */
   deliver(): Promise<number>;
   close(): Promise<void>;
@@ -33,7 +36,7 @@ export async function startApp(env: Record<string, string> = {}): Promise<TestAp
   const notifyDb = createPool(process.env.DATABASE_NOTIFY_URL!, 2);
   const notifier = new Notifier(notifyDb, mailer, deps.config.APP_ORIGIN);
   return {
-    app, deps, mailer, ownerDb, notifyDb,
+    app, deps, mailer, ownerDb, notifyDb, ai: new AiService(deps, deps.ai),
     deliver: () => notifier.processPending(),
     async close() {
       await app.close();

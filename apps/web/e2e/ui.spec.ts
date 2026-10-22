@@ -149,6 +149,11 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText(locale === 'ar' ? /فعّل التحقق بخطوتين لإدارة الأتمتة/ : /Set up two-step sign-in to manage automations/)).toBeVisible();
       await checkPage(page, locale, 'automations', view);
 
+      await page.goto(`/${locale}/app/ai`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'مساعد الذكاء الاصطناعي' : 'AI assistant');
+      await expect(page.getByText(locale === 'ar' ? /فعّل التحقق بخطوتين لتغيير إعدادات الذكاء الاصطناعي/ : /Set up two-step sign-in to change AI settings/)).toBeVisible();
+      await checkPage(page, locale, 'ai', view);
+
       await page.goto(`/${locale}/app/reports`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'التقارير' : 'Reports');
       await expect(page.getByText('Summer AC service (demo ad)')).toBeVisible();

@@ -16,6 +16,9 @@ import { MediaFetcher } from './modules/media';
 import { CampaignRunner } from './modules/campaigns';
 import { InboundProcessor } from './modules/inbound';
 import { AutomationRunner } from './modules/automations';
+import { AiService } from './modules/ai';
+import { AnthropicProvider, SimulatedAiProvider } from './modules/ai-provider';
+import type { Deps } from './core/context';
 import { AutomationMetering } from './modules/entitlements.service';
 import { ContactImportService } from './modules/contacts-import';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
@@ -41,9 +44,17 @@ const env = z
     SCANNER_MAX_SIGNATURE_AGE_HOURS: z.coerce.number().int().min(1).max(168).default(48),
     MEDIA_POLL_MS: z.coerce.number().int().min(250).default(2000),
     INBOUND_POLL_MS: z.coerce.number().int().min(100).default(500),
+    AI_PROVIDER: z.enum(['simulated', 'anthropic']).default('simulated'),
+    AI_API_KEY: z.string().min(20).optional(),
+    AI_MODEL: z.string().min(3).max(100).default('claude-sonnet-5-5'),
+    AI_PRICE_INPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
+    AI_PRICE_OUTPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
   })
   .parse(process.env);
 
+if (env.AI_PROVIDER === 'anthropic' && (!env.AI_API_KEY || env.AI_PRICE_INPUT_PER_MTOK_USD === undefined || env.AI_PRICE_OUTPUT_PER_MTOK_USD === undefined)) {
+  throw new Error('AI_PROVIDER=anthropic needs AI_API_KEY and both AI prices.');
+}
 if (env.NODE_ENV === 'production' && !env.SMTP_URL) throw new Error('SMTP_URL is required in production.');
 if (env.NODE_ENV === 'production' && (env.SCANNER !== 'clamd' || !env.SCANNER_REQUIRE_OFFICIAL_SIGNATURES)) {
   throw new Error('Production requires SCANNER=clamd with official signatures.');
@@ -70,7 +81,10 @@ const sender = new Sender(appDb, channels, {}, undefined, storage);
 const media = new MediaFetcher(appDb, channels, storage, scanner, env.MAX_UPLOAD_BYTES);
 const campaigns = new CampaignRunner(appDb);
 const inbound = new InboundProcessor(appDb);
-const automations = new AutomationRunner(appDb, new AutomationMetering({ db: appDb }));
+// AI for the "AI reply" automation step: the same configuration as the API (simulated unless an AI account is set up).
+const aiService = new AiService({ db: appDb, config: { AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
+  env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
+const automations = new AutomationRunner(appDb, new AutomationMetering({ db: appDb }), aiService);
 
 let stopping = false;
 process.on('SIGTERM', () => (stopping = true));

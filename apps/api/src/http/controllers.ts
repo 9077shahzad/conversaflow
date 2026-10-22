@@ -28,6 +28,7 @@ import { ContactImportService, listContacts } from '../modules/contacts-import';
 import { AssignmentService } from '../modules/auto-assign';
 import { ReportsService } from '../modules/reports';
 import { AutomationsService } from '../modules/automations';
+import { AiService } from '../modules/ai';
 import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
@@ -125,16 +126,17 @@ export class AuthController {
 @Controller('v1/me')
 export class MeController {
   constructor(@Inject(AuthService) private readonly auth: AuthService, @Inject(TenantsService) private readonly tenants: TenantsService,
-    @Inject(DEPS) private readonly deps: Deps) {}
+    @Inject(DEPS) private readonly deps: Deps, @Inject(AiService) private readonly ai: AiService) {}
 
   /**
    * What this installation can actually verify, so screens never present simulated or test results as real ones:
    * whether WhatsApp is the sandbox simulation, what malware scans are based on, and the file size limit.
    */
   @RequirePermission('tenant.read') @Get('environment')
-  async environment() {
+  async environment(@CurrentActor() actor: TenantActor) {
     const scan = this.deps.scanner.basis ? await this.deps.scanner.basis().catch(() => null) : null;
     return {
+      ai: await this.ai.status(actor),
       whatsapp: { sandbox: !!this.deps.channels.sandbox, live: !!this.deps.channels.whatsapp_cloud },
       scanner: { basis: scan?.basis ?? 'unverified_signatures', signatureVersion: scan?.signatureVersion ?? null },
       maxFileBytes: this.deps.config.MAX_UPLOAD_BYTES,
@@ -444,6 +446,34 @@ export class PlatformController {
   }
 }
 
+@Controller('v1/ai')
+export class AiController {
+  constructor(@Inject(AiService) private readonly ai: AiService) {}
+
+  @RequirePermission('ai.manage') @Get('settings')
+  settings(@CurrentActor() actor: TenantActor) { return this.ai.settings(actor); }
+
+  @RequirePermission('ai.manage') @Put('settings')
+  save(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.ai.saveSettings(actor, body); }
+}
+
+@Controller('v1/knowledge')
+export class KnowledgeController {
+  constructor(@Inject(AiService) private readonly ai: AiService) {}
+
+  @RequirePermission('knowledge.manage') @Get()
+  list(@CurrentActor() actor: TenantActor) { return this.ai.listArticles(actor); }
+
+  @RequirePermission('knowledge.manage') @Post() @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.ai.saveArticle(actor, null, body); }
+
+  @RequirePermission('knowledge.manage') @Put(':id')
+  update(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.ai.saveArticle(actor, id, body); }
+
+  @RequirePermission('knowledge.manage') @Delete(':id')
+  remove(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.ai.deleteArticle(actor, id); }
+}
+
 @Controller('v1/automations')
 export class AutomationsController {
   constructor(@Inject(AutomationsService) private readonly svc: AutomationsService) {}
@@ -570,7 +600,18 @@ export class WebhooksController {
 
 @Controller('v1/conversations')
 export class InboxController {
-  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+  constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(AiService) private readonly ai: AiService) {}
+
+  /** AI assistance (W2.3): a summary and a suggested reply for the agent. Nothing is sent. */
+  @RequirePermission('inbox.reply') @Post(':id/assist/summary') @HttpCode(200)
+  assistSummary(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.ai.summarise(actor, id); }
+
+  @RequirePermission('inbox.reply') @Post(':id/assist/suggest') @HttpCode(200)
+  assistSuggest(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.ai.suggestReply(actor, id); }
+
+  /** Explanations of AI results in this conversation (CF-EXT-021). */
+  @RequirePermission('inbox.reply') @Get(':id/ai')
+  aiExplanations(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.ai.interactions(actor, id); }
 
   @RequirePermission('inbox.reply') @Get()
   list(@CurrentActor() actor: TenantActor, @Query() q: unknown) {
@@ -621,7 +662,11 @@ export class InboxController {
 
 @Controller('v1/messages')
 export class MessagesController {
-  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+  constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(AiService) private readonly ai: AiService) {}
+
+  /** AI translation of a message; the original is kept unchanged (CF-EXT-009). */
+  @RequirePermission('inbox.reply') @Post(':id/translate') @HttpCode(200)
+  translate(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.ai.translate(actor, id, body); }
 
   @RequirePermission('inbox.reply') @Post(':id/retry') @HttpCode(201)
   retry(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {

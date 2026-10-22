@@ -9,6 +9,7 @@ import { isUuid } from './members.service';
 import { companyHours, isWithinBusinessHours } from './sla';
 import { checkParamValue, renderTemplate } from './templates.service';
 import { AutomationMetering } from './entitlements.service';
+import { AiService } from './ai';
 
 /**
  * Automations (Wave 2, W2.1: CF-EXT-007 visual flow builder, CF-EXT-019 rehearsal; FR-404–406, FR-206).
@@ -51,6 +52,8 @@ const Step = z.discriminatedUnion('kind', [
   z.object({ id: StepId, kind: z.literal('wait'), minutes: z.number().int().min(1).max(AUTOMATION_LIMITS.maxWaitMinutes), next: Next }),
   z.object({ id: StepId, kind: z.literal('condition'), if: Condition, then: Next, else: Next }),
   z.object({ id: StepId, kind: z.literal('handoff'), note: z.string().trim().min(1).max(500), next: Next }),
+  /** The company AI agent answers from the company's knowledge (W2.2); when it cannot, `ifHuman` is taken. */
+  z.object({ id: StepId, kind: z.literal('ai_reply'), next: Next, ifHuman: Next }),
 ]);
 export type StepDef = z.infer<typeof Step>;
 const Trigger = z.object({
@@ -84,7 +87,7 @@ export function validateDefinition(d: DefinitionT): Array<{ code: string; step?:
   }
   if (d.steps.length === 0) problems.push({ code: 'no_steps' });
   if (d.start === null || !ids.has(d.start)) problems.push({ code: 'missing_start' });
-  const nexts = (s: StepDef): Array<string | null> => (s.kind === 'condition' ? [s.then, s.else] : [s.next]);
+  const nexts = (s: StepDef): Array<string | null> => (s.kind === 'condition' ? [s.then, s.else] : s.kind === 'ai_reply' ? [s.next, s.ifHuman] : [s.next]);
   for (const s of d.steps) for (const n of nexts(s)) if (n !== null && !ids.has(n)) problems.push({ code: 'unknown_next', step: s.id });
   if (problems.length) return problems;
   // No cycles: a workflow always moves forward and ends (loop protection, FR-406).
@@ -267,7 +270,7 @@ export class AutomationsService {
           `rehearsal:${crypto.randomUUID()}`, JSON.stringify(body)])).rows[0];
       return r!.id;
     });
-    await new AutomationRunner(this.deps.db).runToEnd(actor.tenantId, runId);
+    await new AutomationRunner(this.deps.db, undefined, new AiService(this.deps, this.deps.ai)).runToEnd(actor.tenantId, runId);
     return this.run(actor, runId);
   }
 
@@ -349,7 +352,7 @@ type Ctx = { tenantId: string; run: RunRow; def: DefinitionT; tx: Tx };
 type StepResult = { next: string | null; outcome: 'done' | 'would_do' | 'skipped' | 'blocked' | 'waiting'; detail: Record<string, unknown>; waitMinutes?: number };
 
 export class AutomationRunner {
-  constructor(private readonly db: Db, private readonly entitlements?: AutomationMetering) {}
+  constructor(private readonly db: Db, private readonly entitlements?: AutomationMetering, private readonly ai?: AiService) {}
 
   /** Worker: leases due runs across companies and advances each until it waits, ends or fails. */
   async dispatchDue(limit = 50): Promise<number> {
@@ -514,6 +517,24 @@ export class AutomationRunner {
         await ctx.tx.query('UPDATE conversations SET assigned_membership_id = $2, version = version + 1 WHERE id = $1', [ctx.run.conversation_id, s.membershipId]);
         await this.event(ctx, 'auto_assigned', { to: s.membershipId, automation: ctx.run.workflow_id });
         return { next, outcome: 'done', detail: { membershipId: s.membershipId } };
+      }
+      case 'ai_reply': {
+        if (!this.ai) return { next: s.ifHuman, outcome: live ? 'blocked' : 'would_do', detail: { decision: 'human_needed', reason: 'ai_unavailable' } };
+        const sample = ctx.run.sample as { text?: string; language?: 'en' | 'ar' } | null;
+        const r = await this.ai.agentDecision(ctx.tx, ctx.tenantId, live
+          ? { conversationId: ctx.run.conversation_id, runId: ctx.run.id }
+          : { conversationId: null, runId: ctx.run.id, sample: { text: sample?.text ?? '', language: sample?.language ?? 'en' } });
+        const detail = { decision: r.decision, text: r.text, reason: r.reason, citations: r.citations.map((c) => c.title), simulated: r.simulated, interactionId: r.interactionId };
+        if (!live) return { next: r.decision === 'answer' ? s.next : s.ifHuman, outcome: 'would_do', detail };
+        if (r.decision === 'answer' && r.text) {
+          const blocked = await this.sendBlocked(ctx, false);
+          if (blocked) return { next: s.ifHuman, outcome: 'blocked', detail: { ...detail, reason: blocked } };
+          await this.enqueue(ctx, s.id, { kind: 'text', body: r.text });
+          return { next: s.next, outcome: 'done', detail };
+        }
+        // A suggestion or "a person is needed": nothing is sent; the team sees why in the conversation.
+        await this.event(ctx, 'ai_handoff', { reason: r.reason, decision: r.decision, interactionId: r.interactionId, automation: ctx.run.workflow_id });
+        return { next: s.ifHuman, outcome: 'done', detail };
       }
       case 'handoff': {
         if (!live) return { next, outcome: 'would_do', detail: { note: s.note } };

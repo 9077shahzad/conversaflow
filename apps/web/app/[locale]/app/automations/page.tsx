@@ -20,7 +20,8 @@ type Step =
   | { id: string; kind: 'assign'; membershipId: string; next: string | null }
   | { id: string; kind: 'wait'; minutes: number; next: string | null }
   | { id: string; kind: 'condition'; if: Cond; then: string | null; else: string | null }
-  | { id: string; kind: 'handoff'; note: string; next: string | null };
+  | { id: string; kind: 'handoff'; note: string; next: string | null }
+  | { id: string; kind: 'ai_reply'; next: string | null; ifHuman: string | null };
 type Def = { trigger: { kind: 'message_received' | 'conversation_started'; keywords: string[] }; start: string | null; steps: Step[] };
 interface Summary { id: string; name: string; status: string; publishedVersion: number | null; runs7d: number; failed7d: number }
 interface RunStep { seq: number; stepId: string; kind: string; outcome: string; detail: Record<string, unknown> }
@@ -28,7 +29,7 @@ interface Run { id: string; mode: string; status: string; reason: string | null;
 interface Full extends Summary { draft: Def; version: number; problems: Array<{ code: string; step?: string }>; versions: Array<{ number: number; publishedAt: string; rolledBackFrom: number | null }>; runs: Run[] }
 interface Access { permissions: string[] }
 interface Option { id: string; label: string }
-const KINDS: Step['kind'][] = ['send_reply', 'send_template', 'add_tag', 'remove_tag', 'assign', 'wait', 'condition', 'handoff'];
+const KINDS: Step['kind'][] = ['send_reply', 'ai_reply', 'send_template', 'add_tag', 'remove_tag', 'assign', 'wait', 'condition', 'handoff'];
 
 function blank(kind: Step['kind'], id: string): Step {
   switch (kind) {
@@ -39,6 +40,7 @@ function blank(kind: Step['kind'], id: string): Step {
     case 'wait': return { id, kind, minutes: 60, next: null };
     case 'condition': return { id, kind, if: { kind: 'within_business_hours' }, then: null, else: null };
     case 'handoff': return { id, kind, note: '', next: null };
+    case 'ai_reply': return { id, kind, next: null, ifHuman: null };
   }
 }
 
@@ -155,13 +157,14 @@ function Editor({ id, locale }: { id: string; locale: Locale }) {
     let n = def.steps.length + 1; while (ids.includes(`step-${n}`)) n++;
     const id = `step-${n}`;
     // A new step follows the last one by default.
-    const steps = def.steps.map((s, j) => (j === def.steps.length - 1 && s.kind !== 'condition' && s.next === null ? { ...s, next: id } : s));
+    const steps = def.steps.map((s, j) => (j === def.steps.length - 1 && s.kind !== 'condition' && s.next === null ? { ...s, next: id } as Step : s));
     setDef({ ...def, start: def.start ?? id, steps: [...steps, blank(kind, id)] });
   };
   const remove = (i: number) => {
     const gone = def.steps[i]!.id;
     const fix = (n: string | null) => (n === gone ? null : n);
-    setDef({ ...def, start: def.start === gone ? null : def.start, steps: def.steps.filter((_, j) => j !== i).map((s) => (s.kind === 'condition' ? { ...s, then: fix(s.then), else: fix(s.else) } : { ...s, next: fix(s.next) })) });
+    setDef({ ...def, start: def.start === gone ? null : def.start, steps: def.steps.filter((_, j) => j !== i).map((s) => (s.kind === 'condition' ? { ...s, then: fix(s.then), else: fix(s.else) }
+      : s.kind === 'ai_reply' ? { ...s, next: fix(s.next), ifHuman: fix(s.ifHuman) } : { ...s, next: fix(s.next) })) });
   };
   const move = (i: number, by: number) => {
     const j = i + by; if (j < 0 || j >= def.steps.length) return;
@@ -370,6 +373,7 @@ function StepEditor({ s, ids, tags, members, templates, locale, onChange }: { s:
           </>
         )}
         {s.kind !== 'condition' && <NextSelect id={f('next')} label={d.next} value={s.next} ids={ids} self={s.id} onChange={(v) => onChange({ ...s, next: v } as Step)} />}
+        {s.kind === 'ai_reply' && <NextSelect id={f('human')} label={d.ifHuman} value={s.ifHuman} ids={ids} self={s.id} onChange={(v) => onChange({ ...s, ifHuman: v })} />}
       </div>
     </div>
   );
@@ -386,7 +390,7 @@ function FlowDiagram({ def, locale }: { def: Def; locale: Locale }) {
     while (queue.length) {
       const id = queue.shift()!;
       const s = byId.get(id)!;
-      for (const n of s.kind === 'condition' ? [s.then, s.else] : [s.next]) {
+      for (const n of s.kind === 'condition' ? [s.then, s.else] : s.kind === 'ai_reply' ? [s.next, s.ifHuman] : [s.next]) {
         if (n && byId.has(n) && !depth.has(n) && depth.size < 60) { depth.set(n, depth.get(id)! + 1); queue.push(n); }
       }
     }
@@ -403,6 +407,7 @@ function FlowDiagram({ def, locale }: { def: Def; locale: Locale }) {
   for (const s of def.steps) {
     if (!layout.pos.has(s.id)) continue;
     if (s.kind === 'condition') { if (s.then) edges.push({ from: s.id, to: s.then, label: d.yes }); if (s.else) edges.push({ from: s.id, to: s.else, label: d.no }); }
+    else if (s.kind === 'ai_reply') { if (s.next) edges.push({ from: s.id, to: s.next }); if (s.ifHuman) edges.push({ from: s.id, to: s.ifHuman, label: d.ifHumanShort }); }
     else if (s.next) edges.push({ from: s.id, to: s.next });
   }
   return (

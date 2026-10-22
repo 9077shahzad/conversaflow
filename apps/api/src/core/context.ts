@@ -1,3 +1,4 @@
+import type { AiProvider } from '../modules/ai-provider';
 import type Redis from 'ioredis';
 import type { Db } from '@conversaflow/database';
 import type { Config } from './config';
@@ -23,6 +24,8 @@ export interface Deps {
   keys: { fileLinks: Buffer; sandboxWebhook: string; sandboxVerifyToken: string };
   /** Messaging adapters by provider. Only those configured here can send. */
   channels: Partial<Record<Provider, ChannelAdapter>>;
+  /** The AI provider (simulated unless an AI account is configured). */
+  ai: AiProvider;
 }
 
 /** The signed-in session, resolved from the cookie on every request. */

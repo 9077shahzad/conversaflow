@@ -3,6 +3,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { fill, isLocale, t, type Locale } from '@/lib/i18n';
+import { AiAssist, TranslateButton } from '@/components/AiAssist';
 import { TagChip, type Tag } from '@/components/TagChip';
 
 /**
@@ -28,7 +29,7 @@ interface Message {
   retryBlock: string | null;
   attemptLog: Array<{ attempt: number; outcome: string; code: string | null; at: string }> | null;
 }
-interface Environment { whatsapp: { sandbox: boolean }; scanner: { basis: string }; maxFileBytes: number }
+interface Environment { whatsapp: { sandbox: boolean }; scanner: { basis: string }; maxFileBytes: number; ai?: { enabled: boolean; simulated: boolean } }
 interface Template { id: string; name: string; language: string; category: string; status: string; paramCount: number;
   headerText: string | null; bodyText: string; footerText: string | null }
 interface Note { id: string; body: string; authorMembershipId: string; createdAt: string }
@@ -270,6 +271,7 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
                 {m.kind === 'template' && <p className="mb-1 text-xs font-semibold text-teal">{fill(d.templateBadge, { category: d.categories[m.pricingCategory ?? ''] ?? '' })}</p>}
                 {m.kind === 'media' && <MediaItem m={m} locale={locale} canOpen={can('files.read')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} />}
                 {(m.body || m.kind !== 'media') && <p className="whitespace-pre-wrap break-words" dir="auto">{m.body ?? `[${m.providerType ?? m.kind}]`}</p>}
+                {!out && m.body && env?.ai?.enabled && <TranslateButton messageId={m.id} locale={locale} />}
                 <p className="mt-1 text-xs text-slate-600">
                   <time dateTime={m.occurredAt}>{time(m.occurredAt, locale)}</time>
                   {out && <> · {name(m.sentByMembershipId)} · <span className={m.status === 'failed' || m.status === 'uncertain' ? 'font-semibold text-red-700' : ''}>{d.statuses[m.status] ?? m.status}</span>
@@ -289,7 +291,7 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
       </ol>
 
       {error && <p role="alert" className="mx-4 mb-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p>}
-      <Composer conv={conv} locale={locale} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} blockedReason={
+      <Composer conv={conv} locale={locale} aiEnabled={!!env?.ai?.enabled} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} blockedReason={
         pausedForMe ? d.badges.paused : conv.contact.optedOut ? d.badges.optedOut : !conv.windowOpen ? d.badges.windowClosed : null
       } templateBlocked={pausedForMe || conv.contact.optedOut} assignedOther={assignedOther} onDone={onChanged} />
     </div>
@@ -329,9 +331,9 @@ function DeliveryProblem({ m, conv, locale, busy, onRetry }: {
   );
 }
 
-function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedReason, templateBlocked, assignedOther, onDone }: {
+function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedReason, templateBlocked, assignedOther, aiEnabled, onDone }: {
   conv: Conversation; locale: Locale; canTakeOver: boolean; canAttach: boolean; maxFileBytes: number; blockedReason: string | null; templateBlocked: boolean;
-  assignedOther: boolean; onDone: () => Promise<void>;
+  assignedOther: boolean; aiEnabled: boolean; onDone: () => Promise<void>;
 }) {
   const d = t(locale).inbox;
   const [mode, setMode] = useState<'reply' | 'note' | 'template'>(conv.windowOpen ? 'reply' : 'template');
@@ -442,6 +444,7 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
         </div>
       ) : (
         <>
+          {mode === 'reply' && !replyBlocked && aiEnabled && <AiAssist conversationId={conv.id} locale={locale} onUse={(body) => setText(body)} />}
           {mode === 'reply' && !replyBlocked && <SavedReplyPicker conv={conv} locale={locale} onPick={(body) => setText((cur) => (cur ? `${cur}\n${body}` : body))} />}
           <label htmlFor={`compose-${conv.id}`} className="sr-only">{mode === 'reply' ? d.replyLabel : d.noteLabel}</label>
           <textarea id={`compose-${conv.id}`} value={text} onChange={(e) => setText(e.target.value)} rows={3} dir="auto" maxLength={4000}

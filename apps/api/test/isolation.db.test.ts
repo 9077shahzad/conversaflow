@@ -86,6 +86,14 @@ async function populate(owner: Client, label: string, tenantId: string) {
   const draft = (await owner.get(`/v1/automations/${auto.id}`).expect(200)).body;
   await owner.post(`/v1/automations/${auto.id}/publish`, { expectedVersion: draft.version }).expect(200);
   await owner.post(`/v1/automations/${auto.id}/rehearse`, { text: 'Hello' }).expect(201);
+  // Wave 2 (W2.2, W2.3): AI settings, a knowledge article, an AI suggestion (usage and explanation) and a translation.
+  const ai0 = (await owner.get('/v1/ai/settings').expect(200)).body;
+  await owner.put('/v1/ai/settings', { enabled: true, mode: 'suggest', instructions: '', monthlyBudgetUsd: 20, expectedVersion: ai0.version }).expect(200);
+  await owner.post('/v1/knowledge', { title: `Opening hours ${label}`, language: 'en', body: `Company ${label} is open every day from nine to five.` }).expect(201);
+  await owner.post(`/v1/conversations/${conv.id}/assist/suggest`).expect(200);
+  const inbound = await withContext(t.deps.db, { tenantId, userId: owner.userId! }, async (tx) =>
+    (await tx.query<{ id: string }>(`SELECT id FROM messages WHERE direction = 'in' AND body IS NOT NULL LIMIT 1`)).rows[0]!.id);
+  await owner.post(`/v1/messages/${inbound}/translate`, { to: 'ar' }).expect(200);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;
