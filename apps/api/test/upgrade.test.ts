@@ -123,4 +123,44 @@ describe.skipIf(!superUrl)('upgrading a database that already has data', () => {
       await admin.end();
     }
   }, 120_000);
+
+  it('0042 → latest backfills ad attribution, the latest STOP/START time and the first incoming time for existing conversations (recheck N1)', async () => {
+    const name = `cf_upgrade_${randomUUID().slice(0, 8)}`;
+    const admin = new pg.Client({ connectionString: superUrl });
+    await admin.connect();
+    const ownerRole = new URL(process.env.DATABASE_URL!).username;
+    await admin.query(`CREATE DATABASE ${name} OWNER ${ownerRole}`);
+    const ownerUrl = (() => { const u = new URL(process.env.DATABASE_URL!); u.pathname = `/${name}`; return u.toString(); })();
+    const suUrl = (() => { const u = new URL(superUrl!); u.pathname = `/${name}`; return u.toString(); })();
+    try {
+      await migrate(ownerUrl, passwords, () => undefined, { upTo: '0042' });
+      const su = new pg.Client({ connectionString: suUrl });
+      await su.connect();
+      const tenant = randomUUID();
+      await su.query(`INSERT INTO tenants (id, slug, legal_name, country, timezone, currency) VALUES ($1, $2, 'Upgrade Ads Co', 'SA', 'Asia/Riyadh', 'SAR')`, [tenant, `upads-${tenant.slice(0, 8)}`]);
+      const acct = (await su.query<{ id: string }>(`INSERT INTO provider_accounts (tenant_id, provider, account_id) VALUES ($1, 'sandbox', $2) RETURNING id`, [tenant, `waup${tenant.slice(0, 6)}`])).rows[0]!.id;
+      const conn = (await su.query<{ id: string }>(`INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, account_ref)
+                      VALUES ($1, 'sandbox', $2, '+966500000000', 'Old', $3) RETURNING id`, [tenant, `pnup${tenant.slice(0, 6)}`, acct])).rows[0]!.id;
+      const contact = (await su.query<{ id: string }>('INSERT INTO contacts (tenant_id, opted_out_at) VALUES ($1, now()) RETURNING id', [tenant])).rows[0]!.id;
+      const conv = (await su.query<{ id: string }>('INSERT INTO conversations (tenant_id, contact_id, connection_id) VALUES ($1, $2, $3) RETURNING id', [tenant, contact, conn])).rows[0]!.id;
+      await su.query(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, provider_message_id, occurred_at, status, referral) VALUES
+           ($1, $2, 'in', 'text', 'Saw your ad', 'wamid.up.1', '2026-10-01T10:00:00Z', 'received', '{"source_type":"ad","source_id":"ad-old","headline":"Old ad"}'),
+           ($1, $2, 'in', 'text', 'STOP', 'wamid.up.2', '2026-10-01T11:00:00Z', 'received', NULL)`, [tenant, conv]);
+      await su.query(`INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence) VALUES ($1, $2, 'opt_out', 'whatsapp', 'inbound_keyword', 'wamid.up.2')`, [tenant, contact]);
+
+      await migrate(ownerUrl, passwords, () => undefined);
+
+      const a = (await su.query<{ source_id: string; new_contact: boolean }>('SELECT source_id, new_contact FROM conversation_attributions WHERE conversation_id = $1', [conv])).rows;
+      expect(a).toEqual([{ source_id: 'ad-old', new_contact: true }]);
+      const ct = (await su.query<{ at: Date }>('SELECT opt_keyword_at AS at FROM contacts WHERE id = $1', [contact])).rows[0]!;
+      expect(ct.at.toISOString()).toBe('2026-10-01T11:00:00.000Z');
+      const c = (await su.query<{ at: Date }>('SELECT first_inbound_at AS at FROM conversations WHERE id = $1', [conv])).rows[0]!;
+      expect(c.at.toISOString()).toBe('2026-10-01T10:00:00.000Z');
+      await su.end();
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.end();
+    }
+  });
 });

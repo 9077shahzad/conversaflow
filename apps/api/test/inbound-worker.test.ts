@@ -107,6 +107,8 @@ describe('the webhook request records and answers; the worker applies', () => {
       await deliver(payload(people.map((wa) => ({ from: wa, text: `Message ${i}`, ts: now - 50 + i })))).expect(200);
     }
     await Promise.all([drain(new InboundProcessor(t.deps.db)), drain(new InboundProcessor(t.deps.db)), drain(new InboundProcessor(t.deps.db))]);
+    // Workers that met a customer another worker was applying put those events back for a few seconds.
+    await makeDue(); await drain();
     for (const wa of people) {
       expect(await messagesFrom(wa)).toBe(5);
       const last = (await app((tx) => tx.query<{ body: string }>(
@@ -233,6 +235,31 @@ describe('review of AX-3', () => {
     expect(h.webhooks.retrying).toBeGreaterThanOrEqual(1);
     expect(h.webhooks.overdue).toBe(0);
     await makeDue(); await drain();
+  });
+});
+
+describe('recheck of the AX-3 fixes', () => {
+  it('N2: a customer whose lock is held elsewhere defers only their own events, at once and without using an attempt', async () => {
+    const busy = fresh(); const other = fresh();
+    await deliver(payload([{ from: busy, text: 'one' }, { from: busy, text: 'two' }, { from: busy, text: 'three' }])).expect(200);
+    await deliver(payload([{ from: other, text: 'not blocked' }])).expect(200);
+    // Something else (for example a contact import) holds the busy customer's lock.
+    const holder = await t.ownerDb.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenant}:wa:${busy}`]);
+      const started = Date.now();
+      await new InboundProcessor(t.deps.db).dispatchDue(200);
+      expect(Date.now() - started).toBeLessThan(4000);               // no waiting on the held lock
+      expect(await messagesFrom(other)).toBe(1);
+      expect(await messagesFrom(busy)).toBe(0);
+      for (const e of await eventsFor(busy)) {
+        expect(e.attempts).toBe(0);                                  // not counted as a failure
+        expect(e.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
+      }
+    } finally { await holder.query('ROLLBACK'); holder.release(); }
+    await makeDue(); await drain();
+    expect(await messagesFrom(busy)).toBe(3);
   });
 });
 

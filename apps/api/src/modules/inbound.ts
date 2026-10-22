@@ -121,9 +121,13 @@ export class InboundProcessor {
       try {
         add(counts, await this.applyGroup(tenant, list.map((e) => e.event_id)));
       } catch {
+        // A customer may be busy elsewhere (for example a contact import holds their lock), or one event may fail.
+        // Each event is then tried on its own (customer locks are tried, not waited for, so this is quick): other
+        // customers' events apply, and only the busy customer's events are put back without using an attempt.
         // One bad event must not hold up the others: apply them one by one, and retry only the one that fails.
         for (const e of list) {
           try { add(counts, await this.applyGroup(tenant, [e.event_id])); } catch (err) {
+            if (isBusy(err)) { await this.defer(tenant, [e.event_id]); counts.retrying++; continue; }
             const gaveUp = await this.later(tenant, e.event_id, err);
             if (gaveUp) counts.failed++; else counts.retrying++;
           }
@@ -138,7 +142,7 @@ export class InboundProcessor {
       const counts = zero();
       // A lock held elsewhere (for example a large contact import) is not waited for indefinitely: after a few seconds
       // this attempt fails and is retried later, and other companies' events carry on (review of AX-3, L1).
-      await tx.query(`SET LOCAL lock_timeout = '5s'`);
+      await tx.query(`SET LOCAL lock_timeout = '2s'`);
       // Locked and checked here: whoever gets the rows first applies them; anyone else finds them processed.
       const rows = (await tx.query<{ id: string; connection_id: string | null; account_ref: string | null; parsed: Record<string, unknown> | null }>(
         `SELECT id, connection_id, account_ref, parsed FROM webhook_events
@@ -168,8 +172,10 @@ export class InboundProcessor {
         // customer's lock in ascending number order, as contact imports do (slice 5 review M1, L3).
         const messages = items.map((i) => i.e).filter((e): e is Extract<ParsedEvent, { kind: 'message' }> => e.kind === 'message');
         const assignmentLocked = messages.length ? await lockAssignmentIfOn(tx, tenantId) : false;
+        // Customer locks are tried, not waited for: a busy customer defers the group straight away (recheck N2).
         for (const from of [...new Set(messages.map((e) => e.from))].sort()) {
-          await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:wa:${from}`]);
+          const got = (await tx.query<{ ok: boolean }>('SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS ok', [`${tenantId}:wa:${from}`])).rows[0]!.ok;
+          if (!got) throw Object.assign(new Error('customer busy'), { code: 'customer_busy' });
         }
         for (const { row, e } of items) {
           const outcome = e.kind === 'message'
@@ -188,6 +194,12 @@ export class InboundProcessor {
       }
       return counts;
     });
+  }
+
+  /** Puts events back for a few seconds without counting an attempt (their customer or the company was busy). */
+  private async defer(tenantId: string, ids: string[]) {
+    await withContext(this.db, { tenantId, userId: null }, (tx) => tx.query(
+      `UPDATE webhook_events SET lease_until = NULL, next_attempt_at = now() + interval '5 seconds' WHERE id = ANY($1::uuid[]) AND processed_at IS NULL`, [ids]));
   }
 
   /** Records a failed attempt. Returns true when the event has now been given up on. */
@@ -215,6 +227,12 @@ export class InboundProcessor {
       return { requeued: n };
     });
   }
+}
+
+/** A lock held elsewhere: not the event's fault, so it is retried shortly and never counted as a failed attempt. */
+function isBusy(err: unknown): boolean {
+  const code = (err as { code?: string })?.code;
+  return code === 'customer_busy' || code === '55P03';
 }
 
 function add(into: InboundCounts, from: InboundCounts) {

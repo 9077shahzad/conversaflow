@@ -59,16 +59,16 @@ export class ReportsService {
                 count(*) FILTER (WHERE opted_out)::int AS "optedOut",
                 round((percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM first_reply_at - first_message_at)) / 60)::numeric, 1)::float AS "medianFirstReplyMinutes"
          FROM s GROUP BY source_type, source_id ORDER BY conversations DESC, source_id NULLS LAST LIMIT 200`, params)).rows;
-      // Conversations whose customer first wrote in the period, with or without an ad.
-      const started = (await tx.query<{ n: number }>(
-        `SELECT count(*)::int AS n FROM conversations c
-         WHERE (SELECT min(m.occurred_at) FROM messages m WHERE m.conversation_id = c.id AND m.direction = 'in') >= $1
-           AND (SELECT min(m.occurred_at) FROM messages m WHERE m.conversation_id = c.id AND m.direction = 'in') < $2`, [range.start, range.end])).rows[0]!.n;
-      const attributed = ads.reduce((n, a) => n + a.conversations, 0);
+      // Totals use one rule (recheck W2): conversations whose customer first wrote in the period, and how many of
+      // those were credited to an ad or post.
+      const totals = (await tx.query<{ started: number; from_ads: number }>(
+        `SELECT count(*)::int AS started, count(a.conversation_id)::int AS from_ads
+         FROM conversations c LEFT JOIN conversation_attributions a ON a.conversation_id = c.id
+         WHERE c.first_inbound_at >= $1 AND c.first_inbound_at < $2`, [range.start, range.end])).rows[0]!;
       return {
         period: { from: range.from, to: range.to, timeZone: tz },
         model: { rule: 'first_ad_tap_in_conversation', windowDays: ATTRIBUTION_WINDOW_DAYS },
-        totals: { conversationsStarted: started, fromAds: attributed, notFromAds: Math.max(0, started - attributed) },
+        totals: { conversationsStarted: totals.started, fromAds: totals.from_ads, notFromAds: totals.started - totals.from_ads },
         ads,
       };
     });

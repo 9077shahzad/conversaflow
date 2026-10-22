@@ -672,7 +672,6 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
   await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:wa:${e.from}`]);
   let contactId = (await tx.query<{ contact_id: string }>(
     `SELECT contact_id FROM contact_identifiers WHERE kind = 'whatsapp' AND value = $1`, [e.from])).rows[0]?.contact_id;
-  const newContact = !contactId;
   if (!contactId) {
     contactId = (await tx.query<{ id: string }>(
       'INSERT INTO contacts (tenant_id, display_name) VALUES ($1, $2) RETURNING id', [tenantId, e.profileName])).rows[0]!.id;
@@ -705,7 +704,15 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
   if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
   // Click-to-WhatsApp: the conversation is credited to the first ad (or post) tapped within it (W1.9). Later taps in
   // the same conversation do not change it.
-  if (e.referral) await recordAttribution(tx, tenantId, conv.id, contactId, messageId, e.referral, e.occurredAt, newContact);
+  if (e.referral) {
+    // "New customer": no earlier conversation with the company and no earlier message in this one (the same rule as
+    // the backfill; an imported contact who never wrote counts as new). Recheck W1.
+    const isNew = (await tx.query<{ n: boolean }>(
+      `SELECT NOT EXISTS (SELECT 1 FROM conversations p WHERE p.contact_id = $1 AND p.id <> $2 AND p.created_at <= (SELECT created_at FROM conversations WHERE id = $2))
+              AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = $2 AND m.id <> $3 AND m.occurred_at < $4) AS n`,
+      [contactId, conv.id, messageId, e.occurredAt])).rows[0]!.n;
+    await recordAttribution(tx, tenantId, conv.id, contactId, messageId, e.referral, e.occurredAt, isNew);
+  }
   // A customer's first message in a conversation nobody has: give it to the next team member if automatic assignment is on.
   // Only if the assignment lock was taken at the start: switching assignment on in the middle of a delivery must not
   // take that lock after a customer lock (review L3). The next first message is assigned as usual.
@@ -716,6 +723,7 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
   await tx.query(
     `UPDATE conversations SET
        last_inbound_at = greatest(coalesce(last_inbound_at, $2), $2),
+       first_inbound_at = least(coalesce(first_inbound_at, $2), $2),
        last_message_id = CASE WHEN last_message_at IS NULL OR $2 >= last_message_at THEN $3 ELSE last_message_id END,
        last_message_at = greatest(coalesce(last_message_at, $2), $2),
        status = CASE WHEN status = 'pending' THEN 'open' ELSE status END,
