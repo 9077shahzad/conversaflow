@@ -22,3 +22,17 @@ Recorded separately from the slice 5 report. The code is unchanged by this recor
   conversations. They do not get the full contact list.
 - This is how `0390c13` behaves. No permission change is to be made.
 - A contact with no conversation (for example one just imported) is visible only to people with `inbox.read_all`.
+
+## Later local work (22 Oct 2026, after this decision)
+
+| Commit | What | Evidence |
+| --- | --- | --- |
+| `44b8292` | Arabic layout in the import preview and import history (numbers and file names ran into Arabic text); suppression number field on narrow screens; a preview's expiry decided by the database clock (second recheck, Info) | Clean checkout **passed** (`clean-checkout-44b8292.txt`: 495/495 API, 15/15 browser, migrations 0001–0041). Independent review: sound; one Info left documented (below) |
+
+Info, left documented: a preview cleared by the worker in the few milliseconds after an import transaction has
+started could still be marked imported with no rows. Nothing is created or lost. It can only happen exactly at
+the 24-hour boundary.
+
+The preview page (private) now shows the slice 5 screens captured from `44b8292` on 22 Oct 2026, 17:29–17:31 UTC.
+
+Slice 5 remains recorded as locally verified at `0390c13`. `44b8292` is later local work, verified separately.
