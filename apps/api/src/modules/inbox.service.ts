@@ -175,7 +175,12 @@ export class InboxService {
       // Oldest first, so a delivery that bundles several events applies them in the provider's order.
       list.sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
       await withContext(this.deps.db, { tenantId: route.tenant_id, userId: null }, async (tx) => {
-        if (list.some((e) => e.kind === 'message')) await lockAssignmentIfOn(tx, route.tenant_id);
+        // Lock order, the same in every transaction: the company's assignment lock (when assignment is on), then each
+        // customer's lock in ascending number order, as contact imports do. Taken up front so two deliveries, or a
+        // delivery and an import, never wait for each other in a circle (slice 5 review M1, L3).
+        const assignmentLocked = list.some((e) => e.kind === 'message') ? await lockAssignmentIfOn(tx, route.tenant_id) : false;
+        const senders = [...new Set(list.filter((e): e is Extract<ParsedEvent, { kind: 'message' }> => e.kind === 'message').map((e) => e.from))].sort();
+        for (const from of senders) await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${route.tenant_id}:wa:${from}`]);
         for (const e of list) {
           const ins = await tx.query<{ id: string }>(
             `INSERT INTO webhook_events (tenant_id, connection_id, event_key, kind, payload) VALUES ($1, $2, $3, $4, $5)
@@ -183,7 +188,7 @@ export class InboxService {
             [route.tenant_id, route.connection_id, e.key, e.kind, JSON.stringify(e.raw)]);
           if (!ins.rows[0]) { counts.duplicate++; continue; }
           const outcome = e.kind === 'message'
-            ? await this.applyInbound(tx, route.tenant_id, route.connection_id, e)
+            ? await this.applyInbound(tx, route.tenant_id, route.connection_id, e, assignmentLocked)
             : await applyStatus(tx, e.providerMessageId, e.status, e.errorCode, e.callbackData);
           await tx.query('UPDATE webhook_events SET processed_at = now(), outcome = $2 WHERE id = $1', [ins.rows[0].id, outcome]);
           if (outcome === 'applied') counts.applied++;
@@ -195,7 +200,7 @@ export class InboxService {
     return counts;
   }
 
-  private async applyInbound(tx: Tx, tenantId: string, connectionId: string, e: Extract<ParsedEvent, { kind: 'message' }>) {
+  private async applyInbound(tx: Tx, tenantId: string, connectionId: string, e: Extract<ParsedEvent, { kind: 'message' }>, assignmentLocked = false) {
     // Serialise work for one customer, so two deliveries for a new number cannot create two contacts.
     await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:wa:${e.from}`]);
     let contactId = (await tx.query<{ contact_id: string }>(
@@ -231,7 +236,9 @@ export class InboxService {
     const messageId = msg.rows[0]?.id;
     if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
     // A customer's first message in a conversation nobody has: give it to the next team member if automatic assignment is on.
-    if (firstInbound) await autoAssignNewConversation(tx, tenantId, conv.id, new Date());
+    // Only if the assignment lock was taken at the start: switching assignment on in the middle of a delivery must not
+    // take that lock after a customer lock (review L3). The next first message is assigned as usual.
+    if (firstInbound && assignmentLocked) await autoAssignNewConversation(tx, tenantId, conv.id, new Date());
     if (mediaStatus === 'pending') await tx.query('INSERT INTO media_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenantId, messageId]);
     await startTimerOnInbound(tx, conv.id, e.occurredAt);
     // A delayed message updates the thread position only if it is the newest; the service window uses the latest.

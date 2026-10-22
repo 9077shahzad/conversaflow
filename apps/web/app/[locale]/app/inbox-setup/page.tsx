@@ -9,7 +9,7 @@ import { TagChip, type Tag, type TagColor } from '@/components/TagChip';
 interface Access { permissions: string[] }
 interface TagRow extends Tag { uses: number }
 interface Reply { id: string; title: string; body: string; language: string | null }
-interface Assignment { mode: 'off' | 'round_robin' | 'least_busy'; hoursOnly: boolean; members: Array<{ id: string; name: string; onList: boolean; canReply: boolean }> }
+interface Assignment { mode: 'off' | 'round_robin' | 'least_busy'; hoursOnly: boolean; hasBusinessHours: boolean; members: Array<{ id: string; name: string; onList: boolean; canReply: boolean }> }
 const COLORS: TagColor[] = ['slate', 'teal', 'green', 'amber', 'red', 'violet', 'blue'];
 
 export default function InboxSetup() {
@@ -180,6 +180,7 @@ function AssignmentSettings({ locale }: { locale: Locale }) {
         <input type="checkbox" id="assign-hours" checked={s.hoursOnly} onChange={(e) => { setS({ ...s, hoursOnly: e.target.checked }); setSaved(false); }} />
         {d.hoursOnly}
       </label>
+      {s.hoursOnly && !s.hasBusinessHours && <p role="status" className="mt-1 text-sm text-amber-900">{d.noHoursSet}</p>}
       <fieldset className="mt-3">
         <legend className="text-sm font-medium text-slate-900">{d.members}</legend>
         <div className="mt-1 grid gap-1">

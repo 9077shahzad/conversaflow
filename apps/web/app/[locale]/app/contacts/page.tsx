@@ -12,7 +12,7 @@ interface Contact { id: string; name: string | null; language: string | null; wh
 interface Preview {
   id: string;
   summary: { rows: number; new: number; existing: number; problemCount: number; problems: Record<string, number>; consentToRecord: number;
-    consentAlready: number; consentRefusedOptedOut: number; ignoredColumns: string[]; needsEvidence: boolean };
+    consentAlready: number; consentRefusedOptedOut: number; consentRefusedWithdrawn: number; ignoredColumns: string[]; needsEvidence: boolean };
   problemRows: Array<{ line: number; problem: string }>;
   sample: Array<{ line: number; phone: string; name: string | null; language: string | null; consent: boolean | null; outcome: string }>;
 }
@@ -162,8 +162,8 @@ function Importer({ locale, onDone }: { locale: Locale; onDone: () => void }) {
       {s && preview && (
         <div className="mt-4 grid gap-2 rounded-lg bg-slate-50 p-3 text-sm text-slate-800">
           <p className="font-semibold">{fill(d.summary, { rows: String(s.rows), new: String(s.new), existing: String(s.existing), problems: String(s.problemCount) })} <span className="font-normal text-slate-700">{d.previewNote}</span></p>
-          {(s.consentToRecord + s.consentAlready + s.consentRefusedOptedOut) > 0 && (
-            <p>{fill(d.consentSummary, { grant: String(s.consentToRecord), already: String(s.consentAlready), refused: String(s.consentRefusedOptedOut) })}</p>
+          {(s.consentToRecord + s.consentAlready + s.consentRefusedOptedOut + s.consentRefusedWithdrawn) > 0 && (
+            <p>{fill(d.consentSummary, { grant: String(s.consentToRecord), already: String(s.consentAlready), refused: String(s.consentRefusedOptedOut), withdrawn: String(s.consentRefusedWithdrawn) })}</p>
           )}
           {s.ignoredColumns.length > 0 && <p>{fill(d.ignored, { cols: s.ignoredColumns.join(', ') })}</p>}
           {s.needsEvidence && <p role="alert" className="font-semibold text-amber-900">{d.needsEvidence}</p>}

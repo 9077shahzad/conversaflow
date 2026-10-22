@@ -69,8 +69,13 @@ export class TagsService {
   async remove(actor: TenantActor, id: string) {
     if (!isUuid(id)) throw Errors.notFound('Tag');
     await withContext(this.deps.db, actor, async (tx) => {
-      const row = (await tx.query<{ name: string }>('DELETE FROM tags WHERE id = $1 RETURNING name', [id])).rows[0];
-      if (!row) throw Errors.notFound('Tag');
+      const tag = (await tx.query<{ name: string }>('SELECT name FROM tags WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      if (!tag) throw Errors.notFound('Tag');
+      // Each conversation's history says the tag was removed, as when a person removes it.
+      await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data)
+                      SELECT $1, conversation_id, 'untagged', $2, $3 FROM conversation_tags WHERE tag_id = $4`,
+        [actor.tenantId, actor.membershipId, JSON.stringify({ tagId: id, name: tag.name, tagDeleted: true }), id]);
+      const row = (await tx.query<{ name: string }>('DELETE FROM tags WHERE id = $1 RETURNING name', [id])).rows[0]!;
       await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'tag.deleted', ip: actor.ip,
         targetType: 'tag', targetId: id, metadata: { name: row.name } });
     });

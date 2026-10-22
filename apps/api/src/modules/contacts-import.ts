@@ -5,6 +5,7 @@ import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
+import { parsePhoneNumberFromString } from 'libphonenumber-js';
 
 /**
  * Contact import from CSV (BRD v1.2 Wave 1, CF-EXT-003 / FR-302, migration 0038).
@@ -55,24 +56,33 @@ export function readCsv(text: string): string[][] {
       row = [];
     } else field += ch;
   }
+  if (quoted) {
+    // A quote that is never closed would silently swallow the rest of the file into one field (review L5).
+    throw new AppError(400, 'unclosed_quote', `A quotation mark opened on line ${out.length + 1} is never closed. Check the file and try again.`);
+  }
   row.push(field);
   if (row.some((f) => f.trim() !== '')) out.push(row);
   return out;
 }
 
 /**
- * A WhatsApp number in international form, digits only. Accepts "+966 50 123 4567", "00966501234567" and similar.
- * A number starting with 0 after cleaning is a local number without its country code and is refused rather than
- * guessed, because a wrong guess would message a stranger.
+ * A WhatsApp number in international form, digits only, checked against the numbering plan of its country
+ * (libphonenumber: country code, length and number ranges). Accepts "+966 50 123 4567", "00966501234567",
+ * "+966 (0)50 123 4567" (the trunk 0 is dropped) and international digits without "+" when they form a valid number.
+ * A number starting with 0, or digits that only make sense with a missing country code (such as 501234567, a Saudi
+ * mobile whose leading 0 a spreadsheet dropped), are refused rather than guessed, because a wrong guess would message
+ * a stranger (review M5).
  */
 export function normalisePhone(raw: string): { phone: string } | { problem: 'local_number' | 'invalid_phone' } {
-  let v = raw.replace(/[\s\-().‎‏‪-‮]/g, '');
-  v = v.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-  if (v.startsWith('+')) v = v.slice(1);
-  else if (v.startsWith('00')) v = v.slice(2);
-  else if (v.startsWith('0')) return { problem: 'local_number' };
-  if (!/^[1-9][0-9]{7,14}$/.test(v)) return { problem: 'invalid_phone' };
-  return { phone: v };
+  let v = raw.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+  v = v.replace(/[\s\-.\u200e\u200f\u202a-\u202e]/g, '').replace(/\(0\)/g, '').replace(/[()]/g, '');
+  let explicit = false;
+  if (v.startsWith('+')) { v = v.slice(1); explicit = true; } else if (v.startsWith('00')) { v = v.slice(2); explicit = true; }
+  if (!/^[0-9]{6,20}$/.test(v)) return { problem: 'invalid_phone' };
+  if (!explicit && v.startsWith('0')) return { problem: 'local_number' };
+  const parsed = parsePhoneNumberFromString(`+${v}`);
+  if (!parsed || !parsed.isValid()) return { problem: explicit ? 'invalid_phone' : 'local_number' };
+  return { phone: parsed.number.slice(1) };
 }
 
 export function parseContactsCsv(text: string): { rows: ParsedRow[]; ignoredColumns: string[] } {
@@ -85,6 +95,11 @@ export function parseContactsCsv(text: string): { rows: ParsedRow[]; ignoredColu
   }
   if (table.length - 1 > IMPORT_LIMITS.maxRows) {
     throw new AppError(400, 'too_many_rows', `A file can have up to ${IMPORT_LIMITS.maxRows} contacts. Split it into smaller files.`);
+  }
+  const twice = (['phone', 'name', 'language', 'consent'] as Field[]).filter((f) => map.filter((m) => m === f).length > 1);
+  if (twice.length) {
+    // Two number columns (say "mobile" and "phone") would otherwise use one and silently ignore the other (review L5).
+    throw new AppError(400, 'duplicate_columns', `More than one column means the same thing (${twice.join(', ')}). Keep one of each and try again.`);
   }
   const ignoredColumns = table[0]!.filter((_, i) => map[i] === null).map((h) => h.trim()).filter(Boolean);
   const seen = new Set<string>();
@@ -124,16 +139,29 @@ const PreviewInput = z.object({
   consentEvidence: z.string().trim().min(10).max(500).nullable().optional(),
 });
 
-type Classified = ParsedRow & { outcome: 'new' | 'existing' | 'problem'; contactId?: string; consentAction?: 'grant' | 'already' | 'refused_opted_out' | null };
+type ConsentAction = 'grant' | 'already' | 'refused_opted_out' | 'refused_withdrawn' | null;
+type Classified = ParsedRow & { outcome: 'new' | 'existing' | 'problem'; contactId?: string; consentAction?: ConsentAction };
+
+/**
+ * What an import "yes" does for one contact. Refused when the customer opted out of all messages, or when their latest
+ * marketing decision is a withdrawal: the company's evidence may well predate it (review M2).
+ */
+function consentFor(wantsYes: boolean, e: { opted_out: boolean; consent: boolean; latest: string | null } | undefined): ConsentAction {
+  if (!wantsYes) return null;
+  if (e?.opted_out) return 'refused_opted_out';
+  if (e?.latest === 'marketing_opt_out') return 'refused_withdrawn';
+  return e?.consent ? 'already' : 'grant';
+}
 
 /** What would happen to each row right now. */
 async function classify(tx: Tx, rows: ParsedRow[]): Promise<Classified[]> {
   const phones = rows.filter((r) => r.phone && !r.problem).map((r) => r.phone!);
-  const existing = new Map<string, { contact_id: string; opted_out: boolean; consent: boolean }>();
+  const existing = new Map<string, { contact_id: string; opted_out: boolean; consent: boolean; latest: string | null }>();
   for (let i = 0; i < phones.length; i += 1000) {
     const chunk = phones.slice(i, i + 1000);
-    for (const e of (await tx.query<{ value: string; contact_id: string; opted_out: boolean; consent: boolean }>(
-      `SELECT ci.value, ci.contact_id, (ct.opted_out_at IS NOT NULL) AS opted_out, (ct.marketing_consent_at IS NOT NULL) AS consent
+    for (const e of (await tx.query<{ value: string; contact_id: string; opted_out: boolean; consent: boolean; latest: string | null }>(
+      `SELECT ci.value, ci.contact_id, (ct.opted_out_at IS NOT NULL) AS opted_out, (ct.marketing_consent_at IS NOT NULL) AS consent,
+              (SELECT e.kind FROM consent_events e WHERE e.contact_id = ct.id AND e.kind IN ('marketing_opt_in', 'marketing_opt_out') ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS latest
        FROM contact_identifiers ci JOIN contacts ct ON ct.id = ci.contact_id WHERE ci.kind = 'whatsapp' AND ci.value = ANY($1)`, [chunk])).rows) {
       existing.set(e.value, e);
     }
@@ -141,9 +169,7 @@ async function classify(tx: Tx, rows: ParsedRow[]): Promise<Classified[]> {
   return rows.map((r) => {
     if (r.problem || !r.phone) return { ...r, outcome: 'problem' as const };
     const e = existing.get(r.phone);
-    const consentAction = r.consent !== true ? null
-      : e?.opted_out ? 'refused_opted_out' as const
-      : e?.consent ? 'already' as const : 'grant' as const;
+    const consentAction = consentFor(r.consent === true, e);
     return e ? { ...r, outcome: 'existing' as const, contactId: e.contact_id, consentAction } : { ...r, outcome: 'new' as const, consentAction };
   });
 }
@@ -156,7 +182,8 @@ function summarise(rows: Classified[], ignoredColumns: string[] = []) {
     rows: rows.length, new: count((r) => r.outcome === 'new'), existing: count((r) => r.outcome === 'existing'),
     problems, problemCount: count((r) => r.outcome === 'problem'),
     consentToRecord: count((r) => r.consentAction === 'grant'), consentAlready: count((r) => r.consentAction === 'already'),
-    consentRefusedOptedOut: count((r) => r.consentAction === 'refused_opted_out'), ignoredColumns,
+    consentRefusedOptedOut: count((r) => r.consentAction === 'refused_opted_out'),
+    consentRefusedWithdrawn: count((r) => r.consentAction === 'refused_withdrawn'), ignoredColumns,
   };
 }
 
@@ -170,6 +197,8 @@ export class ContactImportService {
     const body = parse(PreviewInput, input);
     const { rows, ignoredColumns } = parseContactsCsv(body.csv);
     return withContext(this.deps.db, actor, async (tx) => {
+      // Previews that were never imported expire after a day: their names and numbers are not kept (review L5).
+      await tx.query(`UPDATE import_batches SET rows = '[]'::jsonb WHERE status = 'previewed' AND created_at < now() - interval '24 hours' AND rows <> '[]'::jsonb`);
       const classified = await classify(tx, rows);
       const summary = summarise(classified, ignoredColumns);
       const needsEvidence = summary.consentToRecord > 0 && !body.consentEvidence;
@@ -199,18 +228,18 @@ export class ContactImportService {
       if (b.status !== 'previewed') throw Errors.conflict('import_done', 'This import has already been applied or undone.');
       if (Date.now() - b.created_at.getTime() > 24 * 3600_000) throw Errors.conflict('preview_expired', 'This preview is more than a day old. Preview the file again.');
       const outcomes: Array<{ contactId: string; created: boolean; consentGranted: boolean }> = [];
-      let created = 0; let updated = 0; let consentGranted = 0; let consentRefused = 0; let skipped = 0;
-      const wantsConsent = b.rows.some((r) => !r.problem && r.consent === true);
-      if (wantsConsent && !b.consent_evidence) {
-        throw new AppError(409, 'consent_evidence_required', 'Some rows say the customer agreed to marketing messages. Describe how they agreed, then preview again.');
-      }
-      for (const r of b.rows) {
+      let created = 0; let updated = 0; let consentGranted = 0; let consentRefused = 0; let consentWithdrawnBefore = 0; let skipped = 0;
+      // Numbers in ascending order: the webhook takes its per-number locks in the same order, so the two never deadlock
+      // (review M1).
+      const ordered = [...b.rows].sort((x, y) => (x.phone ?? '').localeCompare(y.phone ?? ''));
+      for (const r of ordered) {
         if (r.problem || !r.phone) { skipped++; continue; }
         // The same lock as an incoming message from this number, so an import and a first message cannot create two contacts.
         await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${actor.tenantId}:wa:${r.phone}`]);
-        const e = (await tx.query<{ contact_id: string; opted_out: boolean; consent: boolean; name: string | null; locale: string | null }>(
-          `SELECT ci.contact_id, (ct.opted_out_at IS NOT NULL) AS opted_out, (ct.marketing_consent_at IS NOT NULL) AS consent, ct.display_name AS name, ct.locale
-           FROM contact_identifiers ci JOIN contacts ct ON ct.id = ci.contact_id WHERE ci.kind = 'whatsapp' AND ci.value = $1`, [r.phone])).rows[0];
+        const e = (await tx.query<{ contact_id: string; opted_out: boolean; consent: boolean; latest: string | null }>(
+          `SELECT ci.contact_id, (ct.opted_out_at IS NOT NULL) AS opted_out, (ct.marketing_consent_at IS NOT NULL) AS consent,
+                  (SELECT e.kind FROM consent_events e WHERE e.contact_id = ct.id AND e.kind IN ('marketing_opt_in', 'marketing_opt_out') ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS latest
+           FROM contact_identifiers ci JOIN contacts ct ON ct.id = ci.contact_id WHERE ci.kind = 'whatsapp' AND ci.value = $1 FOR UPDATE OF ct`, [r.phone])).rows[0];
         let contactId: string; let isNew = false;
         if (e) {
           contactId = e.contact_id;
@@ -226,19 +255,26 @@ export class ContactImportService {
           created++; isNew = true;
         }
         let granted = false;
-        if (r.consent === true) {
-          if (e?.opted_out) consentRefused++;
-          else if (!e?.consent) {
-            await tx.query('UPDATE contacts SET marketing_consent_at = now(), updated_at = now() WHERE id = $1', [contactId]);
+        const action = consentFor(r.consent === true, e);
+        if (action === 'refused_opted_out') consentRefused++;
+        else if (action === 'refused_withdrawn') consentWithdrawnBefore++;
+        else if (action === 'grant') {
+          // Evidence is needed only when a consent is actually about to be recorded (review L2).
+          if (!b.consent_evidence) {
+            throw new AppError(409, 'consent_evidence_required', 'Some rows say the customer agreed to marketing messages. Describe how they agreed, then preview again.');
+          }
+          // Guarded again in the statement itself, in case an opt-out arrived by another route (review L4).
+          const upd = await tx.query('UPDATE contacts SET marketing_consent_at = now(), updated_at = now() WHERE id = $1 AND opted_out_at IS NULL', [contactId]);
+          if (upd.rowCount) {
             await tx.query(`INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence, recorded_by)
                             VALUES ($1, $2, 'marketing_opt_in', 'whatsapp', 'import', $3, $4)`,
               [actor.tenantId, contactId, `Import ${id}: ${b.consent_evidence}`.slice(0, 300), actor.userId]);
             consentGranted++; granted = true;
-          }
+          } else consentRefused++;
         }
         outcomes.push({ contactId, created: isNew, consentGranted: granted });
       }
-      const result = { created, updated, consentGranted, consentRefusedOptedOut: consentRefused, skipped };
+      const result = { created, updated, consentGranted, consentRefusedOptedOut: consentRefused, consentRefusedWithdrawn: consentWithdrawnBefore, skipped };
       await tx.query(`UPDATE import_batches SET status = 'imported', imported_by = $2, imported_at = now(), rows = $3, summary = summary || $4 WHERE id = $1`,
         [id, actor.membershipId, JSON.stringify(outcomes), JSON.stringify({ result })]);
       await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'contacts.imported', ip: actor.ip,
@@ -262,8 +298,13 @@ export class ContactImportService {
       let removed = 0; let kept = 0; let consentWithdrawn = 0;
       for (const o of b.rows) {
         if (o.created) {
+          // Kept if anything else has happened to the contact: a conversation, a consent decision not made by this
+          // import (for example the customer withdrawing), or a campaign recipient record. Deleting would erase that
+          // history with the contact (review M3); the database trigger enforces the same rule.
           const del = await tx.query(`DELETE FROM contacts c WHERE c.id = $1 AND c.created_by_import = $2
-                                        AND NOT EXISTS (SELECT 1 FROM conversations v WHERE v.contact_id = c.id)`, [o.contactId, id]);
+                                        AND NOT EXISTS (SELECT 1 FROM conversations v WHERE v.contact_id = c.id)
+                                        AND NOT EXISTS (SELECT 1 FROM consent_events e WHERE e.contact_id = c.id AND coalesce(e.evidence, '') NOT LIKE 'Import ' || $2 || ':%')
+                                        AND NOT EXISTS (SELECT 1 FROM campaign_recipients cr WHERE cr.contact_id = c.id)`, [o.contactId, id]);
           if (del.rowCount) { removed++; continue; }
           kept++;
         }
@@ -293,16 +334,24 @@ export class ContactImportService {
 
 const ContactsQuery = z.object({ q: z.string().trim().max(100).optional(), limit: z.coerce.number().int().min(1).max(200).default(50) });
 
-/** The company's contacts, newest first, with an optional search by name or number. */
+/**
+ * The company's contacts, newest first, with an optional search by name or number. Someone who can see every
+ * conversation (`inbox.read_all`) sees every contact; anyone else sees only customers whose conversation they could
+ * open in the inbox (unassigned, or assigned to them), the same rule as the inbox itself (slice 5 review M4).
+ */
 export async function listContacts(deps: Deps, actor: TenantActor, query: unknown) {
   const q = parse(ContactsQuery, query);
   const term = q.q ? q.q.replace(/[%_\\]/g, (c) => `\\${c}`) : null;
+  const digits = q.q ? q.q.replace(/[^0-9]/g, '') : '';
   return withContext(deps.db, actor, async (tx) => (await tx.query(
     `SELECT ct.id, ct.display_name AS name, ct.locale AS language, wa.value AS whatsapp,
             (ct.opted_out_at IS NOT NULL) AS "optedOut", ct.marketing_consent_at AS "marketingConsentAt",
             ct.created_by_import AS "importId", ct.created_at AS "createdAt"
      FROM contacts ct
      LEFT JOIN LATERAL (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) wa ON true
-     WHERE $1::text IS NULL OR ct.display_name ILIKE '%' || $1 || '%' OR wa.value LIKE '%' || regexp_replace($1, '[^0-9]', '', 'g') || '%'
-     ORDER BY ct.created_at DESC LIMIT $2`, [term, q.limit])).rows);
+     WHERE ($1::text IS NULL OR ct.display_name ILIKE '%' || $1 || '%' OR ($3 <> '' AND wa.value LIKE '%' || $3 || '%'))
+       AND ($4::boolean OR EXISTS (SELECT 1 FROM conversations v WHERE v.contact_id = ct.id
+                                    AND (v.assigned_membership_id IS NULL OR v.assigned_membership_id = $5::uuid)))
+     ORDER BY ct.created_at DESC LIMIT $2`,
+    [term, q.limit, digits, actor.permissions.has('inbox.read_all'), actor.membershipId])).rows);
 }

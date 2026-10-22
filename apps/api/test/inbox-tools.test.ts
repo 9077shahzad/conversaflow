@@ -134,3 +134,14 @@ describe('saved replies', () => {
     expect(audit.map((a) => a.action)).toEqual(expect.arrayContaining(['saved_reply.created', 'saved_reply.updated', 'saved_reply.deleted']));
   });
 });
+
+describe('review of slice 5', () => {
+  it('deleting a tag records its removal in each conversation\'s history', async () => {
+    const tag = (await supervisor.post('/v1/tags', { name: 'Short-lived' }).expect(201)).body;
+    const conv = await newConversation();
+    await agentA.put(`/v1/conversations/${conv}/tags/${tag.id}`).expect(200);
+    await supervisor.delete(`/v1/tags/${tag.id}`).expect(204);
+    const kinds = (await agentA.get(`/v1/conversations/${conv}`).expect(200)).body.events.map((e: { kind: string }) => e.kind);
+    expect(kinds.filter((k: string) => k === 'tagged' || k === 'untagged')).toEqual(['tagged', 'untagged']);
+  });
+});

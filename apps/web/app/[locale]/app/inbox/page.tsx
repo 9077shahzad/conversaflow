@@ -596,7 +596,8 @@ function SavedReplyPicker({ conv, locale, onPick }: { conv: Conversation; locale
       <label htmlFor={`saved-${conv.id}`} className="sr-only">{d.savedReply}</label>
       <select id={`saved-${conv.id}`} value="" onChange={(e) => {
         const r = replies.find((x) => x.id === e.target.value);
-        if (r) onPick(r.body.replaceAll('{name}', conv.contact.displayName ?? ''));
+        // With no name known, "{name}" is dropped together with the space before it ("Hi {name}," becomes "Hi,").
+        if (r) onPick(conv.contact.displayName ? r.body.replaceAll('{name}', conv.contact.displayName) : r.body.replace(/\s*\{name\}/g, ''));
       }} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-800">
         <option value="">{d.chooseSavedReply}</option>
         {replies.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}

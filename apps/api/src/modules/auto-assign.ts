@@ -39,9 +39,11 @@ async function eligible(tx: Tx): Promise<Array<{ id: string; open: number }>> {
  * webhook delivery can carry messages from several customers in one transaction; taking this lock first keeps the
  * lock order the same in every transaction (assignment, then customers), so two deliveries cannot deadlock.
  */
-export async function lockAssignmentIfOn(tx: Tx, tenantId: string): Promise<void> {
+export async function lockAssignmentIfOn(tx: Tx, tenantId: string): Promise<boolean> {
   const mode = (await tx.query<{ mode: AssignmentMode }>('SELECT assignment_mode AS mode FROM tenant_settings')).rows[0]?.mode;
-  if (mode && mode !== 'off') await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:auto-assign`]);
+  if (!mode || mode === 'off') return false;
+  await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:auto-assign`]);
+  return true;
 }
 
 /**
@@ -91,7 +93,9 @@ export class AssignmentService {
                 EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id AND rp.permission_key = 'inbox.reply'
                         WHERE mr.membership_id = m.id) AS "canReply"
          FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.status = 'active' ORDER BY m.created_at, m.id`)).rows;
-      return { mode: s?.mode ?? 'off', hoursOnly: s?.hours_only ?? false, members };
+      const h = await companyHours(tx);
+      const hasBusinessHours = Object.values(h.hours).some((list) => (list ?? []).length > 0);
+      return { mode: s?.mode ?? 'off', hoursOnly: s?.hours_only ?? false, hasBusinessHours, members };
     });
   }
 

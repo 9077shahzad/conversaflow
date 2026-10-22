@@ -109,6 +109,9 @@ export async function createApp(deps: Deps, opts: { logSink?: LogSink } = {}): P
     verify: (req: unknown, _res: unknown, buf: Buffer) => { (req as { rawBody?: Buffer }).rawBody = buf; },
   });
   app.use('/v1/webhooks', function webhookBodyParser(req: never, res: never, next: never) { webhookJson(req, res, next); });
+  // Contact import previews carry the CSV itself: up to 2 MB of text, which grows when JSON-escaped (review H1).
+  const importJson = json({ limit: '5mb' });
+  app.use('/v1/contacts/imports', function importBodyParser(req: never, res: never, next: never) { importJson(req, res, next); });
   // API responses are data, never pages: nothing in them may run, be framed or be sniffed (ADR-028, review F3).
   app.use((_req: unknown, res: { setHeader(k: string, v: string): void }, next: () => void) => {
     res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");

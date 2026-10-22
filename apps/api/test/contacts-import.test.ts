@@ -18,8 +18,9 @@ let otherOwner: Client;
 let tenant: string;
 const NUMBER = `pn${randomUUID().slice(0, 8)}`;
 let seq = 0;
-/** A fresh UAE number for each use (country code 971). */
-const fresh = () => `97150${String(Date.now()).slice(-5)}${String(++seq).padStart(2, '0')}`;
+/** A fresh, valid UAE mobile number for each use (971 50 and seven digits). */
+const base = Math.floor(Math.random() * 5_000_000);
+const fresh = () => `97150${String(base + ++seq).padStart(7, '0')}`;
 const app = <T>(fn: Parameters<typeof withContext<T>>[2]) => withContext<T>(t.deps.db, { tenantId: tenant, userId: null }, fn);
 const contactByNumber = async (wa: string) => (await app((tx) => tx.query<{ id: string; name: string | null; locale: string | null; consent: Date | null; opted_out: Date | null; created_by_import: string | null }>(
   `SELECT c.id, c.display_name AS name, c.locale, c.marketing_consent_at AS consent, c.opted_out_at AS opted_out, c.created_by_import
@@ -206,5 +207,107 @@ describe('undo', () => {
     await inbound(wa, 'Hello').expect(200);
     const id = (await contactByNumber(wa))!.id;
     await expect(app((tx) => tx.query('DELETE FROM contacts WHERE id = $1', [id]))).rejects.toThrow(/only a contact created by an import/);
+  });
+});
+
+describe('review of slice 5', () => {
+  it('H1: a full 5,000-row file with names (well over 100 KB) can be previewed', async () => {
+    const lines = ['phone,name,language'];
+    for (let i = 0; i < 5000; i++) lines.push(`+97150${String(1000000 + i)},Customer number ${i} with a longer name,en`);
+    const csv = lines.join('\n');
+    expect(csv.length).toBeGreaterThan(200_000);
+    const p = (await preview(owner, csv).expect(201)).body;
+    expect(p.summary.rows).toBe(5000);
+  });
+
+  it('M1: an import and an incoming delivery touching the same numbers in opposite orders both complete', async () => {
+    // Large enough that the import is still taking its per-number locks when the delivery arrives: the delivery holds
+    // the last number first and then wants the first one, which the import already holds.
+    const nums = Array.from({ length: 3000 }, () => fresh()).sort();
+    const p = (await preview(owner, ['phone', ...nums.map((n) => `+${n}`)].join('\n')).expect(201)).body;
+    const raw = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: NUMBER },
+      contacts: [nums[2999]!, nums[0]!].map((wa) => ({ wa_id: wa, profile: { name: 'Writer' } })),
+      messages: [nums[2999]!, nums[0]!].map((wa, i) => ({ from: wa, id: `wamid.in.${randomUUID()}`, timestamp: String(Math.floor(Date.now() / 1000) + i), type: 'text', text: { body: 'Hi' } })) } }] }] });
+    const hook = () => request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
+      .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, raw)).send(raw);
+    const committing = owner.post(`/v1/contacts/imports/${p.id}/commit`).then((r) => r);
+    await new Promise((r) => setTimeout(r, 500));
+    const [commit, delivery] = await Promise.all([committing, hook()]);
+    expect([commit.status, delivery.status]).toEqual([200, 200]);
+    for (const n of [nums[0]!, nums[2999]!]) {
+      const count = (await app((tx) => tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM contact_identifiers WHERE value = $1`, [n]))).rows[0]!.n;
+      expect(count).toBe(1);                                              // one contact, whichever came first
+    }
+  });
+
+  it('M2: an import "yes" does not override a customer\'s earlier marketing withdrawal', async () => {
+    const wa = fresh();
+    await inbound(wa, 'Hello').expect(200);
+    const id = (await contactByNumber(wa))!.id;
+    await owner.post(`/v1/contacts/${id}/marketing-consent`, { granted: true, evidence: 'Asked for offers in chat' }).expect(200);
+    await owner.post(`/v1/contacts/${id}/marketing-consent`, { granted: false, evidence: 'Customer phoned: no more offers please' }).expect(200);
+    const p = (await preview(owner, `phone,marketing_consent\n+${wa},yes\n`, 'Old paper form from 2023').expect(201)).body;
+    expect(p.summary).toMatchObject({ consentToRecord: 0, consentRefusedWithdrawn: 1, needsEvidence: false });
+    const done = (await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200)).body;
+    expect(done.summary.result).toMatchObject({ consentGranted: 0, consentRefusedWithdrawn: 1 });
+    expect((await contactByNumber(wa))!.consent).toBeNull();
+  });
+
+  it('M3: undo keeps a contact with its own consent history, so a withdrawal survives and a re-import cannot override it', async () => {
+    const wa = fresh();
+    const p = (await preview(owner, `phone,marketing_consent\n+${wa},yes\n`, 'Opted in on the paper form at the branch').expect(201)).body;
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200);
+    const id = (await contactByNumber(wa))!.id;
+    await owner.post(`/v1/contacts/${id}/marketing-consent`, { granted: false, evidence: 'Customer asked us to stop offers' }).expect(200);
+    const undone = (await owner.post(`/v1/contacts/imports/${p.id}/undo`).expect(200)).body;
+    expect(undone.summary.undo).toMatchObject({ removed: 0, kept: 1, consentWithdrawn: 0 });
+    const events = (await app((tx) => tx.query<{ kind: string }>('SELECT kind FROM consent_events WHERE contact_id = $1 ORDER BY created_at', [id]))).rows.map((r) => r.kind);
+    expect(events).toEqual(['marketing_opt_in', 'marketing_opt_out']);
+    const again = (await preview(owner, `phone,marketing_consent\n+${wa},yes\n`, 'Opted in on the paper form at the branch').expect(201)).body;
+    expect(again.summary).toMatchObject({ consentToRecord: 0, consentRefusedWithdrawn: 1 });
+    // The database refuses too, even if the application asked.
+    await expect(app((tx) => tx.query('DELETE FROM contacts WHERE id = $1', [id]))).rejects.toThrow(/no other consent decision/);
+  });
+
+  it('M4: someone who cannot see every conversation only sees contacts whose conversation they could open', async () => {
+    const hidden = fresh(); const open = fresh();
+    await inbound(hidden, 'Hello').expect(200);
+    await inbound(open, 'Hello').expect(200);
+    const conv = (await app((tx) => tx.query<{ id: string; version: number }>(
+      'SELECT c.id, c.version FROM conversations c JOIN contact_identifiers ci ON ci.contact_id = c.contact_id WHERE ci.value = $1', [hidden]))).rows[0]!;
+    const adminId = (await admin.get('/v1/me/access').expect(200)).body.membershipId;
+    await owner.post(`/v1/conversations/${conv.id}/assign`, { membershipId: adminId, expectedVersion: conv.version }).expect(200);
+    expect((await agent.get(`/v1/contacts?q=${hidden}`).expect(200)).body).toEqual([]);
+    expect((await agent.get(`/v1/contacts?q=${open}`).expect(200)).body).toHaveLength(1);
+    expect((await owner.get(`/v1/contacts?q=${hidden}`).expect(200)).body).toHaveLength(1);
+  });
+
+  it('M5: numbers are checked against their country\'s numbering plan; a dropped leading 0 is refused, a "(0)" trunk digit is removed', () => {
+    expect(normalisePhone('501234567')).toEqual({ problem: 'local_number' });
+    expect(normalisePhone('+966 (0)50 123 4567')).toEqual({ phone: '966501234567' });
+    expect(normalisePhone('+44 (0)20 7946 0958')).toEqual({ phone: '442079460958' });
+    expect(normalisePhone('966501234567')).toEqual({ phone: '966501234567' });
+    expect(normalisePhone('+999123456789')).toEqual({ problem: 'invalid_phone' });
+  });
+
+  it('L1: searching by name finds only matching contacts', async () => {
+    const wa = fresh();
+    const p = (await preview(owner, `phone,name\n+${wa},Zzunique Person\n`).expect(201)).body;
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200);
+    const found = (await owner.get('/v1/contacts?q=Zzunique').expect(200)).body as Array<{ name: string }>;
+    expect(found.map((x) => x.name)).toEqual(['Zzunique Person']);
+  });
+
+  it('L2: no evidence is demanded when no consent would actually be recorded', async () => {
+    const stopped = fresh();
+    await inbound(stopped, 'STOP').expect(200);
+    const p = (await preview(owner, `phone,marketing_consent\n+${stopped},yes\n`).expect(201)).body;
+    expect(p.summary.needsEvidence).toBe(false);
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200);
+  });
+
+  it('L5: an unclosed quotation mark or two columns meaning the same thing are refused with a clear reason', async () => {
+    expect((await preview(owner, 'phone,name\n+971501234567,"Never closed\n+971501234568,Next\n').expect(400)).body.error.code).toBe('unclosed_quote');
+    expect((await preview(owner, 'mobile,phone\n,+971501234567\n').expect(400)).body.error.code).toBe('duplicate_columns');
   });
 });
