@@ -44,7 +44,8 @@ export class HealthService {
                 min(received_at) FILTER (WHERE outcome = 'orphan_status') AS "oldestWaitingStatusAt",
                 count(*) FILTER (WHERE outcome = 'unknown_template' AND received_at > now() - interval '7 days')::int AS "unknownTemplateEvents7d",
                 count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL)::int AS "unprocessed",
-                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL AND received_at < now() - interval '2 minutes')::int AS "overdue",
+                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL AND next_attempt_at < now() - interval '2 minutes')::int AS "overdue",
+                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL AND attempts > 0)::int AS "retrying",
                 min(received_at) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL) AS "oldestWaitingAt",
                 count(*) FILTER (WHERE failed_at IS NOT NULL)::int AS "failed"
          FROM webhook_events`)).rows[0]!;

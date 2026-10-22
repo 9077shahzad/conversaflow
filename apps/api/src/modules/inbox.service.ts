@@ -720,8 +720,15 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
 
   const consent = consentKeyword(e.body);
   if (consent) {
-    const optedOut = (await tx.query<{ opted_out_at: Date | null }>('SELECT opted_out_at FROM contacts WHERE id = $1', [contactId])).rows[0]!.opted_out_at;
-    if ((consent === 'opt_out') !== (optedOut !== null)) {
+    const cur = (await tx.query<{ opted_out_at: Date | null; opt_keyword_at: Date | null }>(
+      'SELECT opted_out_at, opt_keyword_at FROM contacts WHERE id = $1', [contactId])).rows[0]!;
+    const optedOut = cur.opted_out_at;
+    // Applied in the order the customer sent them: an older STOP or START (a retried or delayed event) changes nothing
+    // once a newer keyword has been applied (review of AX-3, M1).
+    // WhatsApp timestamps are in whole seconds: keywords sent within the same second apply in the order received.
+    const newer = cur.opt_keyword_at === null || e.occurredAt.getTime() >= cur.opt_keyword_at.getTime();
+    if (newer) await tx.query('UPDATE contacts SET opt_keyword_at = $2 WHERE id = $1', [contactId, e.occurredAt]);
+    if (newer && (consent === 'opt_out') !== (optedOut !== null)) {
       // An opt-out also withdraws any marketing consent; opting back in does not restore it.
       await tx.query(
         `UPDATE contacts SET opted_out_at = CASE WHEN $2 THEN now() END,

@@ -94,8 +94,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'campaign_claim(integer,integer)': '67d00d321cc9f4d3ad02f8ec88136888',
   // cf_dispatch: clears contact import previews older than a day, for every company (migration 0041)
   'import_previews_expire(integer)': '7555cd7701daf9603bf2345c4d5a1a5f',
-  // cf_dispatch: leases incoming webhook events for the worker (migration 0042, AX-3)
-  'inbound_claim(integer,integer)': 'ab4e3d177240992dbc4bb0ec8039c6f2',
+  // cf_dispatch: leases incoming webhook events for the worker, at most 50 per company per lease (0042, 0044)
+  'inbound_claim(integer,integer)': 'd65995320f9e0f80b6332048e562586a',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];

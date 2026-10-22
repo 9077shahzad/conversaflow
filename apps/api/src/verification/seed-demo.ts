@@ -23,7 +23,8 @@ import { Notifier } from '../worker/notifier';
 const PASSWORD = 'Demo-Only-Password-2026';
 
 async function main() {
-  const config = loadConfig();
+  // Demo data is applied as it is recorded, so the seed can build on it straight away (review of AX-3, L5).
+  const config = loadConfig({ ...process.env, INBOUND_APPLY: 'request' });
   if (config.NODE_ENV === 'production') throw new Error('Refusing to seed demo data in production.');
   const mailer = new MemoryMailer();
   const deps = buildDeps(config, { mailer });

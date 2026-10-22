@@ -114,7 +114,9 @@ export class InboundProcessor {
       const k = `${e.tenant_id}|${e.connection_id ?? `a:${e.account_ref}`}`;
       groups.set(k, [...(groups.get(k) ?? []), e]);
     }
-    for (const list of groups.values()) {
+    for (const unsorted of groups.values()) {
+      // Event ids are time-ordered (v7): the order the events were recorded in (review of AX-3, L4).
+      const list = [...unsorted].sort((a, b) => a.event_id.localeCompare(b.event_id));
       const tenant = list[0]!.tenant_id;
       try {
         add(counts, await this.applyGroup(tenant, list.map((e) => e.event_id)));
@@ -134,12 +136,23 @@ export class InboundProcessor {
   private async applyGroup(tenantId: string, ids: string[]): Promise<InboundCounts> {
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
       const counts = zero();
+      // A lock held elsewhere (for example a large contact import) is not waited for indefinitely: after a few seconds
+      // this attempt fails and is retried later, and other companies' events carry on (review of AX-3, L1).
+      await tx.query(`SET LOCAL lock_timeout = '5s'`);
       // Locked and checked here: whoever gets the rows first applies them; anyone else finds them processed.
       const rows = (await tx.query<{ id: string; connection_id: string | null; account_ref: string | null; parsed: Record<string, unknown> | null }>(
         `SELECT id, connection_id, account_ref, parsed FROM webhook_events
          WHERE id = ANY($1::uuid[]) AND processed_at IS NULL AND failed_at IS NULL ORDER BY id FOR UPDATE`, [ids])).rows;
       if (rows.length === 0) return counts;
+      // An event recorded without its parsed form (none should exist) cannot be applied: it is marked failed at once
+      // rather than leased again forever (review of AX-3, L2).
+      const unparsed = rows.filter((r) => !r.parsed).map((r) => r.id);
+      if (unparsed.length) {
+        await tx.query(`UPDATE webhook_events SET failed_at = now(), last_error = 'unparsed', lease_until = NULL WHERE id = ANY($1::uuid[])`, [unparsed]);
+        counts.failed += unparsed.length;
+      }
       const items = rows.filter((r) => r.parsed).map((r) => ({ row: r, e: fromStored(r.parsed!) }));
+      if (items.length === 0) return counts;
       // Oldest first, so a delivery that bundles several events applies them in the provider's order.
       items.sort((a, b) => a.e.occurredAt.getTime() - b.e.occurredAt.getTime() || a.row.id.localeCompare(b.row.id));
       const results: Array<{ id: string; outcome: string }> = [];

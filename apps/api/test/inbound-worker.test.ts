@@ -162,6 +162,80 @@ describe('the webhook request records and answers; the worker applies', () => {
   });
 });
 
+describe('review of AX-3', () => {
+  const optedOut = async (wa: string) => (await app((tx) => tx.query<{ o: boolean }>(
+    `SELECT ct.opted_out_at IS NOT NULL AS o FROM contacts ct JOIN contact_identifiers ci ON ci.contact_id = ct.id WHERE ci.value = $1`, [wa]))).rows[0]!.o;
+
+  it('M1: STOP and START take effect in the order the customer sent them, even when an older one is retried later', async () => {
+    const wa = fresh(); const now = Math.floor(Date.now() / 1000);
+    await deliver(payload([{ from: wa, text: 'STOP', ts: now - 300 }])).expect(200);
+    await drain();
+    expect(await optedOut(wa)).toBe(true);
+    const startId = `wamid.in.${randomUUID()}`;
+    await deliver(payload([{ from: wa, text: 'START', ts: now - 200, id: startId }])).expect(200);
+    const startEvents = new Set((await app((tx) => tx.query<{ id: string }>(`SELECT id FROM webhook_events WHERE parsed->>'providerMessageId' = $1`, [startId]))).rows.map((r) => r.id));
+    const failing = new InboundProcessor(t.deps.db, { beforeMark: (ids) => { if (ids.some((id) => startEvents.has(id))) throw Object.assign(new Error('x'), { code: 'flaky' }); } });
+    await drain(failing);                                           // START keeps failing for now
+    await deliver(payload([{ from: wa, text: 'STOP', ts: now - 100 }])).expect(200);
+    await drain(failing);
+    expect(await optedOut(wa)).toBe(true);
+    await makeDue(); await drain();                                 // the old START finally applies
+    expect(await optedOut(wa)).toBe(true);                          // the newer STOP still stands
+    expect(await messagesFrom(wa)).toBe(3);                         // every message is still in the thread
+  });
+
+  it('L1: a company with a large backlog does not hold up another company\'s messages', async () => {
+    const otherOwner = await newUser(t, 'inw-other');
+    const other = await newCompany(otherOwner, 'inwother', 'business');
+    await activateSubscription(t, other);
+    await enableMfa(otherOwner);
+    const OTHER = `pn${randomUUID().slice(0, 8)}`;
+    await otherOwner.post('/v1/channels', { provider: 'sandbox', providerNumberId: OTHER, displayPhone: '+966500000078', label: 'Other' }).expect(201);
+    await drain();
+    const busy = Array.from({ length: 120 }, () => fresh());
+    for (let i = 0; i < busy.length; i += 40) await deliver(payload(busy.slice(i, i + 40).map((wa) => ({ from: wa, text: 'Backlog' })))).expect(200);
+    const waOther = fresh();
+    const p = { object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: OTHER },
+      contacts: [{ wa_id: waOther, profile: { name: 'Other company customer' } }],
+      messages: [{ from: waOther, id: `wamid.in.${randomUUID()}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'Hello' } }] } }] }] };
+    await deliver(p).expect(200);
+    // One lease of 60: at most 50 come from the busy company, so the other company's message is included.
+    const claimed = await withContext(t.deps.db, { tenantId: null, userId: null }, async (tx) =>
+      (await tx.query<{ event_id: string; tenant_id: string; connection_id: string | null; account_ref: string | null }>('SELECT * FROM inbound_claim(60, 120)')).rows);
+    expect(claimed.filter((c) => c.tenant_id === tenant).length).toBeLessThanOrEqual(50);
+    expect(claimed.filter((c) => c.tenant_id === other).length).toBe(1);
+    await new InboundProcessor(t.deps.db).process(claimed);
+    const seen = (await withContext(t.deps.db, { tenantId: other, userId: null }, (tx) => tx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN contact_identifiers ci ON ci.contact_id = c.contact_id WHERE ci.value = $1`, [waOther]))).rows[0]!.n;
+    expect(seen).toBe(1);
+    await drain();
+  });
+
+  it('L2: an event without its parsed form is marked failed instead of being leased again forever', async () => {
+    const conn = (await app((tx) => tx.query<{ id: string }>('SELECT id FROM channel_connections LIMIT 1'))).rows[0]!.id;
+    const id = (await app((tx) => tx.query<{ id: string }>(
+      `INSERT INTO webhook_events (tenant_id, connection_id, event_key, kind, payload) VALUES ($1, $2, $3, 'message', '{}') RETURNING id`,
+      [tenant, conn, `legacy-${randomUUID()}`]))).rows[0]!.id;
+    await drain();
+    const row = (await app((tx) => tx.query<{ failed_at: Date | null; last_error: string | null }>('SELECT failed_at, last_error FROM webhook_events WHERE id = $1', [id]))).rows[0]!;
+    expect(row.failed_at).not.toBeNull();
+    expect(row.last_error).toBe('unparsed');
+    await owner.post('/v1/channels/recovery/incoming').expect(200);  // tidy up for the other tests
+    await drain();
+  });
+
+  it('L3: an event waiting out its back-off is shown as retrying, not as the background service being stopped', async () => {
+    const wa = fresh();
+    await deliver(payload([{ from: wa, text: 'Retry me' }])).expect(200);
+    const ids = new Set((await eventsFor(wa)).map((e) => e.id));
+    await drain(new InboundProcessor(t.deps.db, { beforeMark: (x) => { if (x.some((i) => ids.has(i))) throw Object.assign(new Error('x'), { code: 'flaky' }); } }));
+    const h = (await owner.get('/v1/channels/health').expect(200)).body;
+    expect(h.webhooks.retrying).toBeGreaterThanOrEqual(1);
+    expect(h.webhooks.overdue).toBe(0);
+    await makeDue(); await drain();
+  });
+});
+
 describe('configuration', () => {
   it('production refuses to apply incoming events inside the request', () => {
     const prod = { ...process.env, NODE_ENV: 'production', SCANNER: 'clamd', SCANNER_REQUIRE_OFFICIAL_SIGNATURES: 'true', CHANNEL_SANDBOX_ENABLED: 'false', SMTP_URL: 'smtp://example.test' };
