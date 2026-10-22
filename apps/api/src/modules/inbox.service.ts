@@ -9,6 +9,8 @@ import { applyStatus, Sender } from './sender';
 import { applyTemplateEvent, checkParamValue, renderTemplate } from './templates.service';
 import { acceptsInbound, outboundTypeFor } from './media';
 import { startTimerOnInbound } from './sla';
+import { autoAssignNewConversation, lockAssignmentIfOn } from './auto-assign';
+import { conversationTags } from './inbox-tools';
 import { isUuid } from './members.service';
 
 /** Free-form replies are allowed only within this long of the customer's last message (Meta customer service window). */
@@ -39,6 +41,7 @@ const MarketingConsentRequest = z.object({
 const ListQuery = z.object({
   status: z.enum(['open', 'pending', 'resolved', 'active']).default('active'),
   assigned: z.enum(['me', 'unassigned', 'any']).default('any'),
+  tag: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   before: z.string().datetime({ offset: true }).optional(),
 });
@@ -172,6 +175,7 @@ export class InboxService {
       // Oldest first, so a delivery that bundles several events applies them in the provider's order.
       list.sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
       await withContext(this.deps.db, { tenantId: route.tenant_id, userId: null }, async (tx) => {
+        if (list.some((e) => e.kind === 'message')) await lockAssignmentIfOn(tx, route.tenant_id);
         for (const e of list) {
           const ins = await tx.query<{ id: string }>(
             `INSERT INTO webhook_events (tenant_id, connection_id, event_key, kind, payload) VALUES ($1, $2, $3, $4, $5)
@@ -210,6 +214,8 @@ export class InboxService {
         'INSERT INTO conversations (tenant_id, contact_id, connection_id) VALUES ($1, $2, $3) RETURNING *',
         [tenantId, contactId, connectionId])).rows[0]!;
     }
+    // The customer's first message in this conversation (new, or started by a campaign): read before it is updated.
+    const firstInbound = conv.last_inbound_at === null && conv.assigned_membership_id === null;
     // Media is recorded now and downloaded, checked for malware and stored by a background job.
     const media = e.media;
     const mediaStatus = media ? (acceptsInbound(media.type, media.mime) ? 'pending' : 'unsupported') : null;
@@ -224,6 +230,8 @@ export class InboxService {
         media?.type ?? null, mediaStatus, media?.id ?? null, media?.mime?.slice(0, 120) ?? null, media?.filename?.slice(0, 255) ?? null]);
     const messageId = msg.rows[0]?.id;
     if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
+    // A customer's first message in a conversation nobody has: give it to the next team member if automatic assignment is on.
+    if (firstInbound) await autoAssignNewConversation(tx, tenantId, conv.id, new Date());
     if (mediaStatus === 'pending') await tx.query('INSERT INTO media_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenantId, messageId]);
     await startTimerOnInbound(tx, conv.id, e.occurredAt);
     // A delayed message updates the thread position only if it is the newest; the service window uses the latest.
@@ -284,7 +292,9 @@ export class InboxService {
                 c.sla_kind AS "slaKind", c.sla_due_at AS "slaDueAt",
                 EXISTS (SELECT 1 FROM messages f WHERE f.conversation_id = c.id AND f.direction = 'out'
                           AND f.status IN ('failed', 'uncertain')
-                          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.retry_of = f.id)) AS "needsAttention"
+                          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.retry_of = f.id)) AS "needsAttention",
+                coalesce((SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color) ORDER BY lower(t.name))
+                          FROM conversation_tags ctg JOIN tags t ON t.id = ctg.tag_id WHERE ctg.conversation_id = c.id), '[]'::json) AS "tags"
          FROM conversations c
          JOIN contacts ct ON ct.id = c.contact_id
          LEFT JOIN messages m ON m.id = c.last_message_id
@@ -292,9 +302,10 @@ export class InboxService {
            AND ($1 = 'active' AND c.status IN ('open', 'pending') OR c.status = $1)
            AND ($2 = 'any' OR ($2 = 'me' AND c.assigned_membership_id = $3::uuid) OR ($2 = 'unassigned' AND c.assigned_membership_id IS NULL))
            AND ($4::timestamptz IS NULL OR c.last_message_at < $4)
+           AND ($9::uuid IS NULL OR EXISTS (SELECT 1 FROM conversation_tags ctg WHERE ctg.conversation_id = c.id AND ctg.tag_id = $9::uuid))
          ORDER BY c.last_message_at DESC NULLS LAST, c.id DESC
          LIMIT $6`,
-        [q.status, q.assigned, actor.membershipId, q.before ?? null, SERVICE_WINDOW_HOURS, q.limit, ...this.visibility(actor)]);
+        [q.status, q.assigned, actor.membershipId, q.before ?? null, SERVICE_WINDOW_HOURS, q.limit, ...this.visibility(actor), q.tag ?? null]);
       return { items: rows, nextBefore: rows.length === q.limit ? rows[rows.length - 1].lastMessageAt : null };
     });
   }
@@ -366,7 +377,9 @@ export class InboxService {
         // 'sandbox' means every send, acceptance and status here is simulated; nothing reached WhatsApp.
         provider: (await tx.query<{ provider: string }>('SELECT provider FROM channel_connections WHERE id = $1', [c.connection_id])).rows[0]?.provider,
         firstResponseAt: c.first_response_at,
+        tags: await conversationTags(tx, c.id),
         people: await this.names(tx, [c.assigned_membership_id, c.paused_by_membership_id,
+          ...events.map((e) => (e.data as { membershipId?: string } | null)?.membershipId ?? null),
           ...messages.map((m) => m.sentByMembershipId), ...messages.map((m) => m.originalAuthorMembershipId), ...notes.map((n) => n.authorMembershipId), ...events.map((e) => e.actorMembershipId)]),
         pause: pauseActive(c)
           ? { active: true, reason: c.paused_reason, pausedByMembershipId: c.paused_by_membership_id, pausedAt: c.paused_at, until: c.paused_until }

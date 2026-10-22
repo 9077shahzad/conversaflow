@@ -70,6 +70,14 @@ async function populate(owner: Client, label: string, tenantId: string) {
   });
   // Settings, holidays, branches, teams and team members.
   await owner.post('/v1/settings/holidays', { day: '2026-12-25', name: `Holiday ${label}` }).expect(201);
+  // Slice 5: a tag on a conversation, a saved reply, an applied import and the automatic-assignment list.
+  const tag = (await owner.post('/v1/tags', { name: `Tag ${label}`, color: 'teal' }).expect(201)).body;
+  await owner.put(`/v1/conversations/${conv.id}/tags/${tag.id}`).expect(200);
+  await owner.post('/v1/saved-replies', { title: `Reply ${label}`, body: 'Thanks for writing to us.' }).expect(201);
+  const imp = (await owner.post('/v1/contacts/imports', { fileName: `${label}.csv`, csv: `phone,name\n+97150${Date.now().toString().slice(-7)},Imported ${label}\n` }).expect(201)).body;
+  await owner.post(`/v1/contacts/imports/${imp.id}/commit`).expect(200);
+  const me = (await owner.get('/v1/me/access').expect(200)).body.membershipId;
+  await owner.put('/v1/inbox/assignment', { mode: 'off', hoursOnly: false, memberIds: [me] }).expect(200);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;

@@ -3,6 +3,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { fill, isLocale, t, type Locale } from '@/lib/i18n';
+import { TagChip, type Tag } from '@/components/TagChip';
 
 /**
  * Shared inbox (BRD v1.2 CF-EXT-002, slice 2). Every action here is also enforced by the server; the screen only hides
@@ -12,7 +13,7 @@ interface ListItem {
   id: string; status: string; version: number; assignedMembershipId: string | null; lastMessageAt: string | null;
   windowOpen: boolean; contactName: string | null; optedOut: boolean; lastMessagePreview: string | null;
   lastMessageDirection: 'in' | 'out' | null; paused: boolean; needsAttention: boolean;
-  slaKind: string | null; slaDueAt: string | null;
+  slaKind: string | null; slaDueAt: string | null; tags: Tag[];
 }
 interface Message {
   id: string; direction: 'in' | 'out'; kind: string; body: string | null; providerType: string | null; status: string;
@@ -37,7 +38,7 @@ interface Conversation {
   contact: { id: string; displayName: string | null; optedOut: boolean; whatsapp: string | null; marketingConsentAt: string | null };
   sla: { kind: string; startedAt: string; dueAt: string } | null;
   provider?: string;
-  messages: Message[]; notes: Note[]; events: Event[]; people: Record<string, string>;
+  messages: Message[]; notes: Note[]; events: Event[]; people: Record<string, string>; tags: Tag[];
   pause: { active: boolean; reason?: string; pausedByMembershipId?: string; until?: string | null };
 }
 interface Access { membershipId: string; permissions: string[] }
@@ -63,14 +64,16 @@ function Inbox() {
   const [conv, setConv] = useState<Conversation | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [env, setEnv] = useState<Environment | null>(null);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [tagFilter, setTagFilter] = useState('');
   const can = useCallback((p: string) => !!access?.permissions.includes(p), [access]);
 
   const loadList = useCallback(async () => {
     try {
-      const res = await api<{ items: ListItem[] }>(`/v1/conversations?status=active&assigned=${filter}&limit=50`);
+      const res = await api<{ items: ListItem[] }>(`/v1/conversations?status=active&assigned=${filter}&limit=50${tagFilter ? `&tag=${tagFilter}` : ''}`);
       setItems(res.items);
     } catch { setItems((x) => x ?? []); }
-  }, [filter]);
+  }, [filter, tagFilter]);
   const loadConv = useCallback(async () => {
     if (!selected) { setConv(null); return; }
     try { setConv(await api<Conversation>(`/v1/conversations/${selected}`)); } catch { setConv(null); }
@@ -78,6 +81,7 @@ function Inbox() {
 
   useEffect(() => { api<Access>('/v1/me/access').then(setAccess).catch(() => undefined); api<Environment>('/v1/me/environment').then(setEnv).catch(() => undefined); }, []);
   useEffect(() => { if (can('members.read')) api<Member[]>('/v1/members').then(setMembers).catch(() => undefined); }, [can]);
+  useEffect(() => { api<Tag[]>('/v1/tags').then(setTags).catch(() => undefined); }, []);
   useEffect(() => { void loadList(); const h = setInterval(loadList, 5000); return () => clearInterval(h); }, [loadList]);
   useEffect(() => { void loadConv(); const h = setInterval(loadConv, 5000); return () => clearInterval(h); }, [loadConv]);
 
@@ -97,6 +101,16 @@ function Inbox() {
                 {d.filters[f]}
               </button>
             ))}
+            {tags.length > 0 && (
+              <>
+                <label htmlFor="tag-filter" className="sr-only">{d.tagFilter}</label>
+                <select id="tag-filter" value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}
+                  className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800">
+                  <option value="">{d.allTags}</option>
+                  {tags.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                </select>
+              </>
+            )}
           </div>
           {!items ? <p className="mt-4 text-slate-600">{t(locale).common.loading}</p>
             : items.length === 0 ? <p className="mt-4 text-slate-600">{d.empty}</p>
@@ -120,6 +134,7 @@ function Inbox() {
                         {it.optedOut && <Badge tone="slate">{d.badges.optedOut}</Badge>}
                         {!it.windowOpen && <Badge tone="slate">{d.badges.windowClosed}</Badge>}
                         {!it.assignedMembershipId && <Badge tone="teal">{d.unassigned}</Badge>}
+                        {(it.tags ?? []).map((x) => <TagChip key={x.id} tag={x} />)}
                       </span>
                     </button>
                   </li>
@@ -131,7 +146,7 @@ function Inbox() {
         <section aria-label={conv?.contact.displayName ?? d.title} className={`${selected ? '' : 'hidden lg:block'} min-w-0`}>
           {!selected ? <p className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">{d.choose}</p>
             : !conv ? <p className="text-slate-600">{t(locale).common.loading}</p>
-            : <ConversationView key={conv.id} conv={conv} locale={locale} access={access} members={members} can={can} env={env}
+            : <ConversationView key={conv.id} conv={conv} locale={locale} access={access} members={members} can={can} env={env} tags={tags}
                 onBack={() => open(null)} onChanged={refresh} />}
         </section>
       </div>
@@ -139,9 +154,9 @@ function Inbox() {
   );
 }
 
-function ConversationView({ conv, locale, access, members, can, env, onBack, onChanged }: {
+function ConversationView({ conv, locale, access, members, can, env, tags, onBack, onChanged }: {
   conv: Conversation; locale: Locale; access: Access | null; members: Member[]; can: (p: string) => boolean; env: Environment | null;
-  onBack: () => void; onChanged: () => Promise<void>;
+  tags: Tag[]; onBack: () => void; onChanged: () => Promise<void>;
 }) {
   const d = t(locale).inbox;
   const me = access?.membershipId;
@@ -183,6 +198,7 @@ function ConversationView({ conv, locale, access, members, can, env, onBack, onC
             </p>
           )}
           <MarketingConsent conv={conv} locale={locale} canEdit={can('contacts.write')} onChanged={onChanged} />
+          <ConversationTags conv={conv} locale={locale} all={tags} canEdit={can('inbox.reply')} onChanged={onChanged} />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {!conv.assignedMembershipId && <button type="button" disabled={busy} onClick={() => me && assign(me)} className="btn-secondary">{d.claim}</button>}
@@ -230,7 +246,9 @@ function ConversationView({ conv, locale, access, members, can, env, onBack, onC
           );
           if (x.kind === 'event') return (
             <li key={x.e.id} className="text-center text-xs text-slate-600">
-              {fill(d.events[x.e.kind] ?? x.e.kind, { actor: x.e.actorMembershipId ? name(x.e.actorMembershipId) : d.system, to: name((x.e.data as { to?: string }).to) })}
+              {fill(d.events[x.e.kind] ?? x.e.kind, { actor: x.e.actorMembershipId ? name(x.e.actorMembershipId) : d.system,
+                to: name((x.e.data as { to?: string; membershipId?: string }).to ?? (x.e.data as { membershipId?: string }).membershipId),
+                tag: String((x.e.data as { name?: string }).name ?? '') })}
               {' · '}<time dateTime={x.e.createdAt}>{time(x.e.createdAt, locale)}</time>
             </li>
           );
@@ -415,6 +433,7 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
         </div>
       ) : (
         <>
+          {mode === 'reply' && !replyBlocked && <SavedReplyPicker conv={conv} locale={locale} onPick={(body) => setText((cur) => (cur ? `${cur}\n${body}` : body))} />}
           <label htmlFor={`compose-${conv.id}`} className="sr-only">{mode === 'reply' ? d.replyLabel : d.noteLabel}</label>
           <textarea id={`compose-${conv.id}`} value={text} onChange={(e) => setText(e.target.value)} rows={3} dir="auto" maxLength={4000}
             placeholder={mode === 'reply' ? d.replyLabel : d.noteLabel} disabled={replyBlocked}
@@ -534,6 +553,55 @@ function PauseForm({ locale, busy, onCancel, onSubmit }: { locale: Locale; busy:
         <button type="button" className="btn-secondary" onClick={onCancel}>{d.cancel}</button>
       </div>
     </form>
+  );
+}
+
+/** Tags on this conversation: shown to everyone; added and removed by anyone who can reply here. */
+function ConversationTags({ conv, locale, all, canEdit, onChanged }: { conv: Conversation; locale: Locale; all: Tag[]; canEdit: boolean; onChanged: () => Promise<void> }) {
+  const d = t(locale).inbox;
+  const [busy, setBusy] = useState(false);
+  const mine = conv.tags ?? [];
+  const available = all.filter((x) => !mine.some((m) => m.id === x.id));
+  async function change(tagId: string, on: boolean) {
+    setBusy(true);
+    try { await api(`/v1/conversations/${conv.id}/tags/${tagId}`, { method: on ? 'PUT' : 'DELETE' }); await onChanged(); } catch { /* refreshed on the next poll */ } finally { setBusy(false); }
+  }
+  if (!canEdit && mine.length === 0) return null;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1.5" aria-label={d.tags}>
+      {mine.map((x) => <TagChip key={x.id} tag={x} onRemove={canEdit && !busy ? () => change(x.id, false) : undefined} removeLabel={fill(d.removeTag, { name: x.name })} />)}
+      {canEdit && available.length > 0 && (
+        <>
+          <label htmlFor={`add-tag-${conv.id}`} className="sr-only">{d.addTag}</label>
+          <select id={`add-tag-${conv.id}`} value="" disabled={busy} onChange={(e) => e.target.value && change(e.target.value, true)}
+            className="rounded-full border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-800">
+            <option value="">+ {d.addTag}</option>
+            {available.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+          </select>
+        </>
+      )}
+      {canEdit && all.length === 0 && <span className="text-xs text-slate-600">{d.noTagsYet}</span>}
+    </div>
+  );
+}
+
+/** Inserts a saved reply into the reply box (with {name} filled in). Nothing is sent until the agent presses Send. */
+function SavedReplyPicker({ conv, locale, onPick }: { conv: Conversation; locale: Locale; onPick: (text: string) => void }) {
+  const d = t(locale).inbox;
+  const [replies, setReplies] = useState<Array<{ id: string; title: string; body: string; language: string | null }> | null>(null);
+  useEffect(() => { api<Array<{ id: string; title: string; body: string; language: string | null }>>('/v1/saved-replies').then(setReplies).catch(() => setReplies([])); }, []);
+  if (!replies || replies.length === 0) return null;
+  return (
+    <div className="mb-2">
+      <label htmlFor={`saved-${conv.id}`} className="sr-only">{d.savedReply}</label>
+      <select id={`saved-${conv.id}`} value="" onChange={(e) => {
+        const r = replies.find((x) => x.id === e.target.value);
+        if (r) onPick(r.body.replaceAll('{name}', conv.contact.displayName ?? ''));
+      }} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-800">
+        <option value="">{d.chooseSavedReply}</option>
+        {replies.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
+      </select>
+    </div>
   );
 }
 

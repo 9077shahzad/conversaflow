@@ -23,6 +23,9 @@ import { InboxService } from '../modules/inbox.service';
 import { TemplatesService } from '../modules/templates.service';
 import { HealthService } from '../modules/health.service';
 import { CampaignsService } from '../modules/campaigns';
+import { SavedRepliesService, TagsService } from '../modules/inbox-tools';
+import { ContactImportService, listContacts } from '../modules/contacts-import';
+import { AssignmentService } from '../modules/auto-assign';
 import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
@@ -580,7 +583,24 @@ export class TemplatesController {
 
 @Controller('v1/contacts')
 export class ContactsController {
-  constructor(@Inject(InboxService) private readonly inbox: InboxService) {}
+  constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(ContactImportService) private readonly imports: ContactImportService,
+    @Inject(DEPS) private readonly deps: Deps) {}
+
+  @RequirePermission('contacts.read') @Get()
+  list(@CurrentActor() actor: TenantActor, @Query() q: unknown) { return listContacts(this.deps, actor, q); }
+
+  /** Step 1 of an import: reads the file and shows what would happen to each row. Changes nothing. */
+  @RequirePermission('contacts.import') @Post('imports') @HttpCode(201)
+  previewImport(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.imports.preview(actor, body); }
+
+  @RequirePermission('contacts.import') @Get('imports')
+  listImports(@CurrentActor() actor: TenantActor) { return this.imports.list(actor); }
+
+  @RequirePermission('contacts.import') @Post('imports/:id/commit') @HttpCode(200)
+  commitImport(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.imports.commit(actor, id); }
+
+  @RequirePermission('contacts.import') @Post('imports/:id/undo') @HttpCode(200)
+  undoImport(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.imports.undo(actor, id); }
 
   @RequirePermission('contacts.write') @Post(':id/marketing-consent') @HttpCode(200)
   marketingConsent(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
@@ -630,4 +650,61 @@ export class SuppressionsController {
 
   @RequirePermission('campaigns.manage') @Delete(':id') @HttpCode(204)
   async remove(@CurrentActor() actor: TenantActor, @Param('id') id: string) { await this.campaigns.removeSuppression(actor, id); }
+}
+
+@Controller('v1/tags')
+export class TagsController {
+  constructor(@Inject(TagsService) private readonly tags: TagsService) {}
+
+  /** Everyone who can reply sees the company's tags (to put them on conversations). */
+  @RequirePermission('inbox.reply') @Get()
+  list(@CurrentActor() actor: TenantActor) { return this.tags.list(actor); }
+
+  @RequirePermission('tags.manage') @Post() @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.tags.create(actor, body); }
+
+  @RequirePermission('tags.manage') @Patch(':id')
+  update(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.tags.update(actor, id, body); }
+
+  @RequirePermission('tags.manage') @Delete(':id') @HttpCode(204)
+  async remove(@CurrentActor() actor: TenantActor, @Param('id') id: string) { await this.tags.remove(actor, id); }
+}
+
+@Controller('v1/conversations/:conversationId/tags')
+export class ConversationTagsController {
+  constructor(@Inject(TagsService) private readonly tags: TagsService) {}
+
+  @RequirePermission('inbox.reply') @Put(':tagId')
+  add(@CurrentActor() actor: TenantActor, @Param('conversationId') c: string, @Param('tagId') t: string) { return this.tags.tagConversation(actor, c, t, true); }
+
+  @RequirePermission('inbox.reply') @Delete(':tagId')
+  remove(@CurrentActor() actor: TenantActor, @Param('conversationId') c: string, @Param('tagId') t: string) { return this.tags.tagConversation(actor, c, t, false); }
+}
+
+@Controller('v1/saved-replies')
+export class SavedRepliesController {
+  constructor(@Inject(SavedRepliesService) private readonly replies: SavedRepliesService) {}
+
+  @RequirePermission('inbox.reply') @Get()
+  list(@CurrentActor() actor: TenantActor) { return this.replies.list(actor); }
+
+  @RequirePermission('saved_replies.manage') @Post() @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.replies.create(actor, body); }
+
+  @RequirePermission('saved_replies.manage') @Patch(':id')
+  update(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.replies.update(actor, id, body); }
+
+  @RequirePermission('saved_replies.manage') @Delete(':id') @HttpCode(204)
+  async remove(@CurrentActor() actor: TenantActor, @Param('id') id: string) { await this.replies.remove(actor, id); }
+}
+
+@Controller('v1/inbox/assignment')
+export class AssignmentController {
+  constructor(@Inject(AssignmentService) private readonly assignment: AssignmentService) {}
+
+  @RequirePermission('inbox.assign') @Get()
+  get(@CurrentActor() actor: TenantActor) { return this.assignment.get(actor); }
+
+  @RequirePermission('inbox.assign') @Put()
+  update(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.assignment.update(actor, body); }
 }

@@ -71,6 +71,23 @@ export function addBusinessMinutes(start: Date, minutes: number, hours: Business
   return null;
 }
 
+/** True when `at` falls inside the company's business hours (always true when no hours are set). Holidays are closed. */
+export function isWithinBusinessHours(at: Date, hours: BusinessHours, tz: string, holidays: Set<string>): boolean {
+  if (!DAY_KEYS.some((k) => (hours[k] ?? []).length > 0)) return true;
+  const { ymd, dow } = localDate(at, tz);
+  if (holidays.has(ymd)) return false;
+  return (hours[DAY_KEYS[dow]!] ?? []).some(([open, close]) =>
+    localToUtc(ymd, open, tz).getTime() <= at.getTime() && at.getTime() < localToUtc(ymd, close, tz).getTime());
+}
+
+/** The company's business hours, time zone (checked, UTC if invalid) and holidays. */
+export async function companyHours(tx: Tx): Promise<{ hours: BusinessHours; tz: string; holidays: Set<string> }> {
+  const s = await settings(tx);
+  let tz = s.tz;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); } catch { tz = 'UTC'; }
+  return { hours: s.hours, tz, holidays: s.holidays };
+}
+
 type SlaSettings = { first: number | null; next: number | null; hours: BusinessHours; tz: string; holidays: Set<string> };
 
 async function settings(tx: Tx): Promise<SlaSettings> {

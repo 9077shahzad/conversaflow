@@ -130,6 +130,19 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText(locale === 'ar' ? /تتطلب الحملات التحقق بخطوتين/ : /Campaigns need two-step sign-in/)).toBeVisible();
       await checkPage(page, locale, 'campaigns', view);
 
+      await page.goto(`/${locale}/app/contacts`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'جهات الاتصال' : 'Contacts');
+      await expect(page.getByText('Emma (Demo)').first()).toBeVisible();
+      // Importing needs two-step sign-in, which the demo owner has not set up: the page says so instead of a form.
+      await expect(page.getByText(locale === 'ar' ? /يتطلب استيراد جهات الاتصال التحقق بخطوتين/ : /Importing contacts needs two-step sign-in/)).toBeVisible();
+      await checkPage(page, locale, 'contacts', view);
+
+      await page.goto(`/${locale}/app/inbox-setup`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'إعداد صندوق الوارد' : 'Inbox setup');
+      await expect(page.getByText('VIP', { exact: true }).first()).toBeVisible();
+      await expect(page.getByText(locale === 'ar' ? 'مواعيد العمل' : 'Opening hours', { exact: true }).first()).toBeVisible();
+      await checkPage(page, locale, 'inbox-setup', view);
+
       await page.goto(`/${locale}/app/channel-health`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'حالة القناة' : 'Channel health');
       await expect(page.getByText(locale === 'ar' ? 'رسائل تحتاج إلى متابعة' : 'Messages needing a person')).toBeVisible();

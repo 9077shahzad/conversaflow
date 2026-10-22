@@ -15,6 +15,7 @@ import {
   AuditController, AuthController, BillingController, ChannelsController, FilesController, HealthController, InboxController,
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
   TemplatesController, ContactsController, CampaignsController, SuppressionsController,
+  TagsController, ConversationTagsController, SavedRepliesController, AssignmentController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -29,6 +30,9 @@ import { InboxService } from './modules/inbox.service';
 import { TemplatesService } from './modules/templates.service';
 import { HealthService } from './modules/health.service';
 import { CampaignsService } from './modules/campaigns';
+import { SavedRepliesService, TagsService } from './modules/inbox-tools';
+import { ContactImportService } from './modules/contacts-import';
+import { AssignmentService } from './modules/auto-assign';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
 import { SettingsService } from './modules/settings.service';
@@ -77,11 +81,13 @@ export class AppModule {
         HealthController, AuthController, MeController, TenantsController, MembersController, BillingController,
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
         InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
+        TagsController, ConversationTagsController, SavedRepliesController, AssignmentController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
+        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService),
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

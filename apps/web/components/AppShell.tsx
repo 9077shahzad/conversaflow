@@ -22,8 +22,9 @@ const ITEMS: Item[] = [
   { href: '/inbox', key: 'inbox', icon: 'M4 5h16v10h-5l-3 3-3-3H4z' },
   { href: '/templates', key: 'templates', icon: 'M6 3h9l3 3v15H6zm3 7h6m-6 4h6m-6 4h4' },
   { href: '/channel-health', key: 'health', icon: 'M3 12h4l3-7 4 14 3-7h4' },
-  { href: '/contacts', key: 'contacts', later: true, icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0' },
+  { href: '/contacts', key: 'contacts', icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0' },
   { href: '/campaigns', key: 'campaigns', icon: 'M4 10v4l12 5V5zM16 9h4v6h-4' },
+  { href: '/inbox-setup', key: 'inboxSetup', icon: 'M4 6h16M4 12h10M4 18h7m9-4l-3 3-2-2' },
   { href: '/automations', key: 'automations', later: true, icon: 'M5 4h5v5H5zm9 11h5v5h-5zM7.5 9v4.5h9V15' },
   { href: '/reports', key: 'reports', later: true, icon: 'M5 20V10m7 10V4m7 16v-7' },
   { href: '/settings/company', key: 'company', icon: 'M4 21V5l8-3 8 3v16M9 21v-5h6v5' },
@@ -59,7 +60,7 @@ export function AppShell({ locale, children }: { locale: Locale; children: React
     <nav aria-label={d.nav.main} className="flex flex-col gap-1 p-3">
       {ITEMS.map((it) => {
         const href = base + it.href;
-        const current = it.href === '' ? path === base : path.startsWith(href);
+        const current = it.href === '' ? path === base : path === href || path.startsWith(`${href}/`);
         const cls = `flex items-center gap-3 rounded-lg px-3 py-2.5 text-[15px] ${current ? 'bg-teal text-white' : 'text-slate-200 hover:bg-white/10'}`;
         const icon = (
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">

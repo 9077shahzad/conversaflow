@@ -15,6 +15,7 @@ import { InboxService } from '../modules/inbox.service';
 import type { SandboxAdapter } from '../modules/channels';
 import { TemplatesService } from '../modules/templates.service';
 import { MediaFetcher } from '../modules/media';
+import { SavedRepliesService, TagsService } from '../modules/inbox-tools';
 import { CampaignRunner, CampaignsService } from '../modules/campaigns';
 import { Sender } from '../modules/sender';
 import { Notifier } from '../worker/notifier';
@@ -147,6 +148,16 @@ async function main() {
     await new CampaignRunner(deps.db).runBatch(tenant.id, sent.id);
     await new Sender(deps.db, deps.channels).dispatchDue(50);
     await campaigns.create(ownerActor, { name: 'Ramadan reminder (Demo draft)', templateId: offer.id, params });
+
+    // Tags and saved replies; one conversation tagged. Automatic assignment stays off (the company's choice).
+    const tagsSvc = new TagsService(deps);
+    const vip = await tagsSvc.create(ownerActor, { name: 'VIP', color: 'amber' });
+    await tagsSvc.create(ownerActor, { name: 'شكوى / Complaint', color: 'red' });
+    await tagsSvc.create(ownerActor, { name: 'Riyadh', color: 'teal' });
+    await tagsSvc.tagConversation(ownerActor, (await convOf('966500000102')).id, vip.id, true);
+    const replies = new SavedRepliesService(deps);
+    await replies.create(ownerActor, { title: 'Opening hours', body: 'Hi {name}, we are open Sunday to Wednesday 8:00–17:00 and Thursday 8:00–13:00.', language: 'en' });
+    await replies.create(ownerActor, { title: 'مواعيد العمل', body: 'مرحبًا {name}، نعمل من الأحد إلى الأربعاء من 8:00 إلى 17:00، والخميس من 8:00 إلى 13:00.', language: 'ar' });
   }
 
   console.log(JSON.stringify({ ownerEmail, password: PASSWORD, tenantId: tenant.id }));

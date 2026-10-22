@@ -167,6 +167,35 @@ Retrying a message happens only in its conversation, through the normal retry an
   guard). A crash in the middle of a batch queues nothing; the next run queues everyone exactly once. Individual send
   failures are recorded per message and do not stop the others; nothing is resent on later runs.
 
+## Contacts, tags, saved replies and automatic assignment (slice 5)
+
+- **Contact import (migration 0038).** Two steps. The preview reads the CSV (quoted fields, Windows line endings,
+  byte-order mark; English or Arabic column names) and classifies every row: new, already a contact, repeated in the
+  file, or not usable with the reason (no number, a local number without its country code, an invalid number, a bad
+  language or consent value). Numbers are cleaned to international digits; a local number is refused rather than
+  guessed, because a wrong guess would message a stranger. The import applies the stored preview within 24 hours and
+  checks every row again at that moment, under the same per-number lock as an incoming message, so an import and a
+  first message cannot create two contacts. Existing contacts keep their name and language; only missing values are
+  filled. At most 5,000 rows and 2 MB per file. Nothing is ever sent.
+- **Marketing consent on import.** Recorded only together with the company's statement of how the customers agreed,
+  which is required for the whole file when any row says yes, and stored in each consent event. Never recorded for a
+  customer who has opted out of all messages. A "no" in a file never removes consent a customer gave.
+- **Undo.** Removes contacts the import created that have no conversation, keeps those who have written in, and
+  withdraws consent the import recorded if that is still the latest decision for the contact (with a consent event
+  saying so). The database itself refuses to delete any other contact (a trigger), so the application's new delete
+  right is limited to this case.
+- **Tags and saved replies (migration 0037).** Company-wide lists. Supervisors and above manage them; anyone who can
+  reply in a conversation puts tags on it (recorded in the conversation history) and can filter the inbox by tag.
+  Saved replies are inserted into the reply box with `{name}` filled in, and sent only when the agent presses Send,
+  with every usual check.
+- **Automatic assignment (migration 0039).** Off by default. When on, a customer's first message in a conversation
+  nobody has (a new one, or one a campaign started) gives it to the next member on the company's assignment list who
+  is active and allowed to reply: in turn (round robin) or to whoever has the fewest open conversations, ties in turn.
+  Optionally only during business hours. A conversation someone already has is never moved. One company's
+  assignments are made one at a time under a lock, taken at the start of the webhook transaction (before any customer
+  lock) so two deliveries cannot deadlock; at pilot scale this serialises a company's incoming messages only while
+  assignment is on. Rule changes are audited.
+
 ## Reliable processing (remaining)
 
 - **Outbox pattern.** A business change and the event announcing it are written in the same transaction
