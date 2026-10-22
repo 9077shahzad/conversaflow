@@ -143,6 +143,12 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText(locale === 'ar' ? 'مواعيد العمل' : 'Opening hours', { exact: true }).first()).toBeVisible();
       await checkPage(page, locale, 'inbox-setup', view);
 
+      await page.goto(`/${locale}/app/automations`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'الأتمتة' : 'Automations');
+      // The demo owner has not set up two-step sign-in, which automations require: the page says so plainly.
+      await expect(page.getByText(locale === 'ar' ? /فعّل التحقق بخطوتين لإدارة الأتمتة/ : /Set up two-step sign-in to manage automations/)).toBeVisible();
+      await checkPage(page, locale, 'automations', view);
+
       await page.goto(`/${locale}/app/reports`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'التقارير' : 'Reports');
       await expect(page.getByText('Summer AC service (demo ad)')).toBeVisible();

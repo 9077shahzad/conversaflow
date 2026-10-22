@@ -25,7 +25,7 @@ const ITEMS: Item[] = [
   { href: '/contacts', key: 'contacts', icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0' },
   { href: '/campaigns', key: 'campaigns', icon: 'M4 10v4l12 5V5zM16 9h4v6h-4' },
   { href: '/inbox-setup', key: 'inboxSetup', icon: 'M4 6h16M4 12h10M4 18h7m9-4l-3 3-2-2' },
-  { href: '/automations', key: 'automations', later: true, icon: 'M5 4h5v5H5zm9 11h5v5h-5zM7.5 9v4.5h9V15' },
+  { href: '/automations', key: 'automations', icon: 'M5 4h5v5H5zm9 11h5v5h-5zM7.5 9v4.5h9V15' },
   { href: '/reports', key: 'reports', icon: 'M5 20V10m7 10V4m7 16v-7' },
   { href: '/settings/company', key: 'company', icon: 'M4 21V5l8-3 8 3v16M9 21v-5h6v5' },
   { href: '/settings/team', key: 'team', icon: 'M8 11a3 3 0 100-6 3 3 0 000 6zm8 0a3 3 0 100-6 3 3 0 000 6zM2 20a6 6 0 0112 0m-2 0a6 6 0 0110 0' },

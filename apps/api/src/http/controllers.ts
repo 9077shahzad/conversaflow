@@ -27,6 +27,7 @@ import { SavedRepliesService, TagsService } from '../modules/inbox-tools';
 import { ContactImportService, listContacts } from '../modules/contacts-import';
 import { AssignmentService } from '../modules/auto-assign';
 import { ReportsService } from '../modules/reports';
+import { AutomationsService } from '../modules/automations';
 import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
@@ -441,6 +442,50 @@ export class PlatformController {
   async supportMembers(@CurrentSession() s: AuthSession, @Param('id') id: string) {
     return this.platform.supportView(await this.platform.requireStaff(s), id, 'members');
   }
+}
+
+@Controller('v1/automations')
+export class AutomationsController {
+  constructor(@Inject(AutomationsService) private readonly svc: AutomationsService) {}
+
+  @RequirePermission('automations.manage') @Get()
+  list(@CurrentActor() actor: TenantActor) { return this.svc.list(actor); }
+
+  @RequirePermission('automations.manage') @Post() @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.svc.create(actor, body); }
+
+  @RequirePermission('automations.manage') @Get(':id')
+  get(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.svc.get(actor, id); }
+
+  @RequirePermission('automations.manage') @Put(':id/draft')
+  saveDraft(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.saveDraft(actor, id, body); }
+
+  @RequirePermission('automations.manage') @Post(':id/publish') @HttpCode(200)
+  publish(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.publish(actor, id, body); }
+
+  @RequirePermission('automations.manage') @Post(':id/rollback') @HttpCode(200)
+  rollback(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.rollback(actor, id, body); }
+
+  @RequirePermission('automations.manage') @Post(':id/pause') @HttpCode(200)
+  pause(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.setStatus(actor, id, 'paused', body); }
+
+  @RequirePermission('automations.manage') @Post(':id/resume') @HttpCode(200)
+  resume(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.setStatus(actor, id, 'active', body); }
+
+  @RequirePermission('automations.manage') @Post(':id/archive') @HttpCode(200)
+  archive(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.setStatus(actor, id, 'archived', body); }
+
+  /** Rehearsal: runs the draft (or published version) against a sample message. Nothing is sent or changed. */
+  @RequirePermission('automations.manage') @Post(':id/rehearse') @HttpCode(201)
+  rehearse(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.svc.rehearse(actor, id, body); }
+}
+
+@Controller('v1/automation-runs')
+export class AutomationRunsController {
+  constructor(@Inject(AutomationsService) private readonly svc: AutomationsService) {}
+
+  @RequirePermission('automations.manage') @Get(':id')
+  get(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.svc.run(actor, id); }
 }
 
 @Controller('v1/reports')

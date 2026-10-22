@@ -11,6 +11,7 @@ import { checkParamValue, renderTemplate } from './templates.service';
 import { acceptsInbound, outboundTypeFor } from './media';
 import { startTimerOnInbound } from './sla';
 import { autoAssignNewConversation } from './auto-assign';
+import { startAutomationRuns, stopAutomationRuns } from './automations';
 import { conversationTags } from './inbox-tools';
 import { isUuid } from './members.service';
 
@@ -344,6 +345,7 @@ export class InboxService {
       await tx.query(
         `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'status_changed', $3, $4)`,
         [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: c.status, to })]);
+      if (to === 'resolved') await stopAutomationRuns(tx, c.id, 'conversation_resolved');
       return { id: c.id, status: to, version: upd.rows[0]!.version };
     });
   }
@@ -426,6 +428,8 @@ export class InboxService {
         media?.type ?? null, media ? 'available' : null, media?.fileId ?? null, media?.mime ?? null, media?.filename ?? null])).rows[0]!;
     const job = (await tx.query<{ id: string }>(
       'INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2) RETURNING id', [actor.tenantId, msg.id])).rows[0]!;
+    // A person on the team wrote: automations stop in this conversation (FR-206).
+    await stopAutomationRuns(tx, c.id, 'person_replied');
     await tx.query(
       `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4,
               activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,
@@ -623,6 +627,7 @@ export class InboxService {
       await tx.query(
         `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'paused', $3, $4)`,
         [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ reason: body.reason, until: upd.paused_until })]);
+      await stopAutomationRuns(tx, c.id, 'replies_paused');
       await AuditService.record(tx, {
         tenantId: actor.tenantId, actorUserId: actor.userId, action: 'conversation.replies_paused', ip: actor.ip,
         targetType: 'conversation', targetId: c.id, metadata: { reason: body.reason, minutes: body.minutes },
@@ -745,6 +750,10 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
         targetType: 'contact', targetId: contactId, metadata: { source: 'inbound_keyword', channel: 'whatsapp' },
       });
     }
+  }
+  // Automations: started in this transaction, so exactly once per message. STOP and START never start one.
+  if (!consent) {
+    await startAutomationRuns(tx, tenantId, { conversationId: conv.id, contactId, messageId, body: e.body, firstInbound: conv.last_inbound_at === null });
   }
   return 'applied' as const;
 }

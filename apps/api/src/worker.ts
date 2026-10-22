@@ -15,6 +15,8 @@ import { Sender } from './modules/sender';
 import { MediaFetcher } from './modules/media';
 import { CampaignRunner } from './modules/campaigns';
 import { InboundProcessor } from './modules/inbound';
+import { AutomationRunner } from './modules/automations';
+import { AutomationMetering } from './modules/entitlements.service';
 import { ContactImportService } from './modules/contacts-import';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 
@@ -68,13 +70,14 @@ const sender = new Sender(appDb, channels, {}, undefined, storage);
 const media = new MediaFetcher(appDb, channels, storage, scanner, env.MAX_UPLOAD_BYTES);
 const campaigns = new CampaignRunner(appDb);
 const inbound = new InboundProcessor(appDb);
+const automations = new AutomationRunner(appDb, new AutomationMetering({ db: appDb }));
 
 let stopping = false;
 process.on('SIGTERM', () => (stopping = true));
 process.on('SIGINT', () => (stopping = true));
 
 (async () => {
-  console.log('ConversaFlow worker started: account emails, incoming events, outbound messages, inbound media, campaigns, import preview expiry');
+  console.log('ConversaFlow worker started: account emails, incoming events, automations, outbound messages, inbound media, campaigns, import preview expiry');
   void (async () => {
     while (!stopping) {
       try {
@@ -92,6 +95,17 @@ process.on('SIGINT', () => (stopping = true));
         while ((await inbound.dispatchDue(200)) > 0 && !stopping) { /* drain */ }
       } catch (err) {
         console.error('inbound error', err instanceof Error ? err.message : err);
+      }
+      await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
+    }
+  })();
+  // Automation runs (W2.1): started by incoming messages, carried out step by step.
+  void (async () => {
+    while (!stopping) {
+      try {
+        while ((await automations.dispatchDue(50)) > 0 && !stopping) { /* drain */ }
+      } catch (err) {
+        console.error('automation error', err instanceof Error ? err.message : err);
       }
       await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
     }

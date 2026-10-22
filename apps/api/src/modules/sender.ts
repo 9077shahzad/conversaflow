@@ -69,10 +69,10 @@ export type FailureKind = 'blocked' | 'rejected' | 'exhausted' | 'provider_repor
 type JobRow = {
   job_id: string; job_state: string; job_attempts: number; message_id: string; status: string; body: string | null;
   sent_by_membership_id: string | null; conversation_id: string; kind: string; template_id: string | null; template_params: string[] | null;
-  file_id: string | null; campaign_id: string | null;
+  file_id: string | null; campaign_id: string | null; automation_run_id: string | null;
 };
 const JOB_SELECT = `SELECT j.id AS job_id, j.state AS job_state, j.attempts AS job_attempts, m.id AS message_id, m.status, m.body,
-                m.sent_by_membership_id, m.conversation_id, m.kind, m.template_id, m.template_params, m.file_id, m.campaign_id
+                m.sent_by_membership_id, m.conversation_id, m.kind, m.template_id, m.template_params, m.file_id, m.campaign_id, m.automation_run_id
          FROM send_jobs j JOIN messages m ON m.id = j.message_id WHERE j.id = $1 FOR UPDATE OF j, m`;
 
 export class Sender {
@@ -147,6 +147,13 @@ export class Sender {
         return { done: 'retry_later' as const };
       }
 
+      // Automation messages: sent only while their run has not been stopped (a person replied or paused replies, the
+      // automation was paused) and the automation is still active (W2.1, FR-206).
+      const auto = row.automation_run_id
+        ? (await tx.query<{ status: string; mode: string; workflow_status: string }>(
+            `SELECT r.status, r.mode, w.status AS workflow_status FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id WHERE r.id = $1`,
+            [row.automation_run_id])).rows[0] ?? null
+        : null;
       const ctx = (await tx.query<{
         opted_out: boolean; last_inbound_at: Date | null; paused: boolean; paused_by: string | null; channel_status: string;
         provider: Provider; number: string; wa: string | null; assigned: string | null; sender_may_reply: boolean;
@@ -179,6 +186,12 @@ export class Sender {
           : ctx.opted_out ? 'contact_opted_out'
           : !ctx.marketing_consent ? 'marketing_consent_required'
           : ctx.suppressed ? 'suppressed'
+          : null)
+        : auto ? (
+          auto.mode !== 'live' ? 'rehearsal_only'
+          : auto.status === 'stopped' || auto.status === 'skipped' ? 'automation_stopped'
+          : auto.workflow_status !== 'active' ? 'automation_paused'
+          : ctx.paused ? 'replies_paused'
           : null)
         : !ctx.sender_may_reply ? 'sender_not_allowed'
         : ctx.paused && ctx.paused_by !== row.sent_by_membership_id ? 'replies_paused'

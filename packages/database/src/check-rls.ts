@@ -38,7 +38,8 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
   cf_channel: ['channel_connections', 'provider_accounts'],
   // import_batches: only unimported previews older than a day, so their rows can be emptied (migration 0041)
   // webhook_events: scheduling columns of events not yet applied, so the worker can lease them (migration 0042)
-  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events'],
+  // workflow_runs: scheduling columns of automation runs under way (migration 0045)
+  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs'],
   cf_identity: ['memberships'],
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
@@ -96,6 +97,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'import_previews_expire(integer)': '7555cd7701daf9603bf2345c4d5a1a5f',
   // cf_dispatch: leases incoming webhook events for the worker, at most 50 per company per lease (0042, 0044)
   'inbound_claim(integer,integer)': 'd65995320f9e0f80b6332048e562586a',
+  // cf_dispatch: leases automation runs for the worker (migration 0045, W2.1)
+  'automation_claim(integer,integer)': 'a110b1d05b8b092a1e8f0db0beaf2cbd',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];

@@ -80,6 +80,12 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await owner.post(`/v1/contacts/imports/${imp.id}/commit`).expect(200);
   const me = (await owner.get('/v1/me/access').expect(200)).body.membershipId;
   await owner.put('/v1/inbox/assignment', { mode: 'off', hoursOnly: false, memberIds: [me] }).expect(200);
+  // Wave 2 (W2.1): an automation with a published version and a rehearsal run with its steps.
+  const auto = (await owner.post('/v1/automations', { name: `Automation ${label}`, draft: { trigger: { kind: 'message_received', keywords: [`never-${label}`] }, start: 'a',
+    steps: [{ id: 'a', kind: 'send_reply', text: { en: `Hello from ${label}` }, next: null }] } }).expect(201)).body;
+  const draft = (await owner.get(`/v1/automations/${auto.id}`).expect(200)).body;
+  await owner.post(`/v1/automations/${auto.id}/publish`, { expectedVersion: draft.version }).expect(200);
+  await owner.post(`/v1/automations/${auto.id}/rehearse`, { text: 'Hello' }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;
