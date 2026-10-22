@@ -4,6 +4,7 @@ import { Errors } from '../core/errors';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
 import { applyStatus } from './sender';
+import { InboundProcessor } from './inbound';
 
 /**
  * Provider health and recovery (Wave 1). One company's view of its WhatsApp connection: are events arriving, is
@@ -11,7 +12,8 @@ import { applyStatus } from './sender';
  *
  *  - re-apply delivery statuses that arrived before their message was recorded (idempotent);
  *  - download a customer's media again after a download failure (no effect on the customer);
- *  - re-read template review status from the provider (POST /v1/templates/sync).
+ *  - re-read template review status from the provider (POST /v1/templates/sync);
+ *  - try again incoming events the worker gave up on (applying is idempotent and never sends anything).
  *
  * Messages that failed or are uncertain are listed with their conversation; retrying them happens there, through the
  * normal retry with all its checks, so this screen never sends anything itself.
@@ -20,6 +22,11 @@ const MEDIA_ID_LIFETIME_DAYS = 7; // Meta: media ids from webhooks expire after 
 
 export class HealthService {
   constructor(private readonly deps: Deps) {}
+
+  /** Incoming events the worker gave up on are tried again from the start (audited). */
+  retryIncoming(actor: TenantActor) {
+    return InboundProcessor.retryFailed(this.deps.db, actor);
+  }
 
   async overview(actor: TenantActor) {
     // The item lists name customers, so they follow the inbox's visibility rule (review of slice 3, finding 10): a role
@@ -36,7 +43,10 @@ export class HealthService {
                 count(*) FILTER (WHERE outcome = 'orphan_status')::int AS "waitingStatuses",
                 min(received_at) FILTER (WHERE outcome = 'orphan_status') AS "oldestWaitingStatusAt",
                 count(*) FILTER (WHERE outcome = 'unknown_template' AND received_at > now() - interval '7 days')::int AS "unknownTemplateEvents7d",
-                count(*) FILTER (WHERE processed_at IS NULL)::int AS "unprocessed"
+                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL)::int AS "unprocessed",
+                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL AND received_at < now() - interval '2 minutes')::int AS "overdue",
+                min(received_at) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL) AS "oldestWaitingAt",
+                count(*) FILTER (WHERE failed_at IS NOT NULL)::int AS "failed"
          FROM webhook_events`)).rows[0]!;
       const sending = (await tx.query<Record<string, number>>(
         `SELECT count(*) FILTER (WHERE j.state = 'pending')::int AS "waiting",
@@ -94,6 +104,9 @@ export class HealthService {
       const problems: Array<{ code: string; level: 'degraded' | 'attention' }> = [];
       if (connections.length === 0) problems.push({ code: 'no_connection', level: 'degraded' });
       if (connections.some((c: { status: string }) => c.status !== 'active')) problems.push({ code: 'connection_disabled', level: 'degraded' });
+      // Incoming events are applied by the worker (AX-3): a backlog means customers' messages are not yet in the inbox.
+      if (Number(webhooks.overdue) > 0) problems.push({ code: 'incoming_delayed', level: 'degraded' });
+      if (Number(webhooks.failed) > 0) problems.push({ code: 'incoming_failed', level: 'attention' });
       if (sending.overdue! > 0 || sending.stuck! > 0) problems.push({ code: 'sending_delayed', level: 'degraded' });
       if (media.overdue! > 0) problems.push({ code: 'media_delayed', level: 'degraded' });
       if (Number(webhooks.waitingStatuses) > 0 && webhooks.oldestWaitingStatusAt

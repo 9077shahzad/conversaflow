@@ -24,9 +24,10 @@ export interface TestApp {
   close(): Promise<void>;
 }
 
-export async function startApp(): Promise<TestApp> {
+/** `env` overrides configuration for this app only (for example `{ INBOUND_APPLY: 'worker' }`). */
+export async function startApp(env: Record<string, string> = {}): Promise<TestApp> {
   const mailer = new MemoryMailer();
-  const deps = buildDeps(loadConfig(process.env), { mailer });
+  const deps = buildDeps(loadConfig({ ...process.env, ...env }), { mailer });
   const app = await createApp(deps);
   const ownerDb = createPool(process.env.DATABASE_URL!, 3);
   const notifyDb = createPool(process.env.DATABASE_NOTIFY_URL!, 2);

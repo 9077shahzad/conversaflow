@@ -4,12 +4,13 @@ import type { Deps, TenantActor } from '../core/context';
 import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
-import { consentKeyword, parseWebhook, type ParsedEvent, type Provider } from './channels';
-import { applyStatus, Sender } from './sender';
-import { applyTemplateEvent, checkParamValue, renderTemplate } from './templates.service';
+import { consentKeyword, type ParsedEvent, type Provider } from './channels';
+import { InboundProcessor, recordWebhook } from './inbound';
+import { Sender } from './sender';
+import { checkParamValue, renderTemplate } from './templates.service';
 import { acceptsInbound, outboundTypeFor } from './media';
 import { startTimerOnInbound } from './sla';
-import { autoAssignNewConversation, lockAssignmentIfOn } from './auto-assign';
+import { autoAssignNewConversation } from './auto-assign';
 import { conversationTags } from './inbox-tools';
 import { isUuid } from './members.service';
 
@@ -134,146 +135,18 @@ export class InboxService {
 
   // --- Webhook intake ---------------------------------------------------------------------------------------------
   /**
-   * Stores and applies the events of one verified delivery. Safe to repeat: each provider event is recorded once
-   * (unique key), a second delivery is counted as a duplicate and changes nothing. Events for unknown or disabled
-   * numbers are ignored (counted), never stored.
+   * Records the events of one verified delivery (AX-3): each provider event is recorded once (unique key); a repeat
+   * changes nothing. Events for unknown or disabled numbers are ignored (counted), never stored. The worker applies
+   * recorded events; with INBOUND_APPLY=request (development and tests only) they are applied here, after recording,
+   * through the same code.
    */
   async ingest(provider: Provider, payload: unknown) {
-    const { events, skipped } = parseWebhook(payload);
-    const counts = { applied: 0, duplicate: 0, stale: 0, orphan: 0, unrouted: 0, unknownTemplate: 0, skipped };
-    const byNumber = new Map<string, Array<Exclude<ParsedEvent, { kind: 'template' }>>>();
-    const byAccount = new Map<string, Array<Extract<ParsedEvent, { kind: 'template' }>>>();
-    for (const e of events) {
-      if (e.kind === 'template') byAccount.set(e.accountId, [...(byAccount.get(e.accountId) ?? []), e]);
-      else byNumber.set(e.providerNumberId, [...(byNumber.get(e.providerNumberId) ?? []), e]);
-    }
-
-    // Template review, quality and category updates belong to the business account, not a number.
-    for (const [account, list] of byAccount) {
-      const route = await withContext(this.deps.db, { tenantId: null, userId: null }, async (tx) =>
-        (await tx.query<{ tenant_id: string; account_ref: string }>('SELECT * FROM account_route($1, $2)', [provider, account])).rows[0]);
-      if (!route) { counts.unrouted += list.length; continue; }
-      list.sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
-      await withContext(this.deps.db, { tenantId: route.tenant_id, userId: null }, async (tx) => {
-        for (const e of list) {
-          const ins = await tx.query<{ id: string }>(
-            `INSERT INTO webhook_events (tenant_id, account_ref, event_key, kind, payload) VALUES ($1, $2, $3, 'template', $4)
-             ON CONFLICT (tenant_id, account_ref, event_key) WHERE account_ref IS NOT NULL DO NOTHING RETURNING id`,
-            [route.tenant_id, route.account_ref, e.key, JSON.stringify(e.raw)]);
-          if (!ins.rows[0]) { counts.duplicate++; continue; }
-          const outcome = await applyTemplateEvent(tx, route.account_ref, e);
-          await tx.query('UPDATE webhook_events SET processed_at = now(), outcome = $2 WHERE id = $1', [ins.rows[0].id, outcome]);
-          if (outcome === 'applied') counts.applied++; else if (outcome === 'stale_template') counts.stale++; else counts.unknownTemplate++;
-        }
-      });
-    }
-
-    for (const [number, list] of byNumber) {
-      const route = await withContext(this.deps.db, { tenantId: null, userId: null }, async (tx) =>
-        (await tx.query<{ tenant_id: string; connection_id: string }>('SELECT * FROM channel_route($1, $2)', [provider, number])).rows[0]);
-      if (!route) { counts.unrouted += list.length; continue; }
-      // Oldest first, so a delivery that bundles several events applies them in the provider's order.
-      list.sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime());
-      await withContext(this.deps.db, { tenantId: route.tenant_id, userId: null }, async (tx) => {
-        // Lock order, the same in every transaction: the company's assignment lock (when assignment is on), then each
-        // customer's lock in ascending number order, as contact imports do. Taken up front so two deliveries, or a
-        // delivery and an import, never wait for each other in a circle (slice 5 review M1, L3).
-        const assignmentLocked = list.some((e) => e.kind === 'message') ? await lockAssignmentIfOn(tx, route.tenant_id) : false;
-        const senders = [...new Set(list.filter((e): e is Extract<ParsedEvent, { kind: 'message' }> => e.kind === 'message').map((e) => e.from))].sort();
-        for (const from of senders) await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${route.tenant_id}:wa:${from}`]);
-        for (const e of list) {
-          const ins = await tx.query<{ id: string }>(
-            `INSERT INTO webhook_events (tenant_id, connection_id, event_key, kind, payload) VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (tenant_id, connection_id, event_key) DO NOTHING RETURNING id`,
-            [route.tenant_id, route.connection_id, e.key, e.kind, JSON.stringify(e.raw)]);
-          if (!ins.rows[0]) { counts.duplicate++; continue; }
-          const outcome = e.kind === 'message'
-            ? await this.applyInbound(tx, route.tenant_id, route.connection_id, e, assignmentLocked)
-            : await applyStatus(tx, e.providerMessageId, e.status, e.errorCode, e.callbackData);
-          await tx.query('UPDATE webhook_events SET processed_at = now(), outcome = $2 WHERE id = $1', [ins.rows[0].id, outcome]);
-          if (outcome === 'applied') counts.applied++;
-          else if (outcome === 'stale_status') counts.stale++;
-          else counts.orphan++;
-        }
-      });
-    }
-    return counts;
-  }
-
-  private async applyInbound(tx: Tx, tenantId: string, connectionId: string, e: Extract<ParsedEvent, { kind: 'message' }>, assignmentLocked = false) {
-    // Serialise work for one customer, so two deliveries for a new number cannot create two contacts.
-    await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:wa:${e.from}`]);
-    let contactId = (await tx.query<{ contact_id: string }>(
-      `SELECT contact_id FROM contact_identifiers WHERE kind = 'whatsapp' AND value = $1`, [e.from])).rows[0]?.contact_id;
-    if (!contactId) {
-      contactId = (await tx.query<{ id: string }>(
-        'INSERT INTO contacts (tenant_id, display_name) VALUES ($1, $2) RETURNING id', [tenantId, e.profileName])).rows[0]!.id;
-      await tx.query(`INSERT INTO contact_identifiers (tenant_id, contact_id, kind, value) VALUES ($1, $2, 'whatsapp', $3)`,
-        [tenantId, contactId, e.from]);
-    }
-    let conv = (await tx.query<ConvRow>(
-      `SELECT * FROM conversations WHERE contact_id = $1 AND connection_id = $2 AND status <> 'resolved' FOR UPDATE`,
-      [contactId, connectionId])).rows[0];
-    if (!conv) {
-      conv = (await tx.query<ConvRow>(
-        'INSERT INTO conversations (tenant_id, contact_id, connection_id) VALUES ($1, $2, $3) RETURNING *',
-        [tenantId, contactId, connectionId])).rows[0]!;
-    }
-    // The customer's first message in this conversation (new, or started by a campaign): read before it is updated.
-    const firstInbound = conv.last_inbound_at === null && conv.assigned_membership_id === null;
-    // Media is recorded now and downloaded, checked for malware and stored by a background job.
-    const media = e.media;
-    const mediaStatus = media ? (acceptsInbound(media.type, media.mime) ? 'pending' : 'unsupported') : null;
-    const kind = e.type === 'text' ? 'text' : media ? 'media' : 'unsupported';
-    const msg = await tx.query<{ id: string }>(
-      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, provider_type, provider_message_id, occurred_at, status, referral,
-                             media_type, media_status, provider_media_id, media_mime, media_filename)
-       VALUES ($1, $2, 'in', $3, $4, $5, $6, $7, 'received', $8, $9, $10, $11, $12, $13)
-       ON CONFLICT (tenant_id, provider_message_id) DO NOTHING RETURNING id`,
-      [tenantId, conv.id, kind, e.body, e.type === 'text' ? null : e.type,
-        e.providerMessageId, e.occurredAt, e.referral ? JSON.stringify(e.referral) : null,
-        media?.type ?? null, mediaStatus, media?.id ?? null, media?.mime?.slice(0, 120) ?? null, media?.filename?.slice(0, 255) ?? null]);
-    const messageId = msg.rows[0]?.id;
-    if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
-    // A customer's first message in a conversation nobody has: give it to the next team member if automatic assignment is on.
-    // Only if the assignment lock was taken at the start: switching assignment on in the middle of a delivery must not
-    // take that lock after a customer lock (review L3). The next first message is assigned as usual.
-    if (firstInbound && assignmentLocked) await autoAssignNewConversation(tx, tenantId, conv.id, new Date());
-    if (mediaStatus === 'pending') await tx.query('INSERT INTO media_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenantId, messageId]);
-    await startTimerOnInbound(tx, conv.id, e.occurredAt);
-    // A delayed message updates the thread position only if it is the newest; the service window uses the latest.
-    await tx.query(
-      `UPDATE conversations SET
-         last_inbound_at = greatest(coalesce(last_inbound_at, $2), $2),
-         last_message_id = CASE WHEN last_message_at IS NULL OR $2 >= last_message_at THEN $3 ELSE last_message_id END,
-         last_message_at = greatest(coalesce(last_message_at, $2), $2),
-         status = CASE WHEN status = 'pending' THEN 'open' ELSE status END,
-         activity_seq = activity_seq + 1,
-         version = version + 1
-       WHERE id = $1`, [conv.id, e.occurredAt, messageId]);
-
-    const consent = consentKeyword(e.body);
-    if (consent) {
-      const optedOut = (await tx.query<{ opted_out_at: Date | null }>('SELECT opted_out_at FROM contacts WHERE id = $1', [contactId])).rows[0]!.opted_out_at;
-      if ((consent === 'opt_out') !== (optedOut !== null)) {
-        // An opt-out also withdraws any marketing consent; opting back in does not restore it.
-        await tx.query(
-          `UPDATE contacts SET opted_out_at = CASE WHEN $2 THEN now() END,
-                  marketing_consent_at = CASE WHEN $2 THEN NULL ELSE marketing_consent_at END, updated_at = now() WHERE id = $1`,
-          [contactId, consent === 'opt_out']);
-        await tx.query(
-          `INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence) VALUES ($1, $2, $3, 'whatsapp', 'inbound_keyword', $4)`,
-          [tenantId, contactId, consent, e.providerMessageId]);
-        await tx.query(
-          `INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, $3, $4)`,
-          [tenantId, conv.id, consent === 'opt_out' ? 'opted_out' : 'opted_in', JSON.stringify({ evidence: e.providerMessageId })]);
-        await AuditService.record(tx, {
-          tenantId, actorUserId: null, action: consent === 'opt_out' ? 'contact.opted_out' : 'contact.opted_in',
-          targetType: 'contact', targetId: contactId, metadata: { source: 'inbound_keyword', channel: 'whatsapp' },
-        });
-      }
-    }
-    return 'applied' as const;
+    const inline = this.deps.config.INBOUND_APPLY === 'request';
+    const { counts, recorded } = await recordWebhook(this.deps.db, provider, payload, inline);
+    if (!inline || recorded.length === 0) return counts;
+    const applied = await new InboundProcessor(this.deps.db).process(recorded);
+    return { ...counts, applied: applied.applied, stale: applied.stale, orphan: applied.orphan, unknownTemplate: applied.unknownTemplate,
+      retrying: applied.retrying, failed: applied.failed, queued: applied.retrying };
   }
 
   // --- Inbox -------------------------------------------------------------------------------------------------------
@@ -749,4 +622,81 @@ export class InboxService {
               sent_by_membership_id AS "sentByMembershipId", original_author_membership_id AS "originalAuthorMembershipId"
        FROM messages WHERE id = $1`, [id])).rows[0]);
   }
+}
+
+/** Applies one recorded incoming message (called by the inbound processor with the customer's lock held). */
+export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId: string, e: Extract<ParsedEvent, { kind: 'message' }>, assignmentLocked = false) {
+  // Serialise work for one customer, so two deliveries for a new number cannot create two contacts.
+  await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:wa:${e.from}`]);
+  let contactId = (await tx.query<{ contact_id: string }>(
+    `SELECT contact_id FROM contact_identifiers WHERE kind = 'whatsapp' AND value = $1`, [e.from])).rows[0]?.contact_id;
+  if (!contactId) {
+    contactId = (await tx.query<{ id: string }>(
+      'INSERT INTO contacts (tenant_id, display_name) VALUES ($1, $2) RETURNING id', [tenantId, e.profileName])).rows[0]!.id;
+    await tx.query(`INSERT INTO contact_identifiers (tenant_id, contact_id, kind, value) VALUES ($1, $2, 'whatsapp', $3)`,
+      [tenantId, contactId, e.from]);
+  }
+  let conv = (await tx.query<ConvRow>(
+    `SELECT * FROM conversations WHERE contact_id = $1 AND connection_id = $2 AND status <> 'resolved' FOR UPDATE`,
+    [contactId, connectionId])).rows[0];
+  if (!conv) {
+    conv = (await tx.query<ConvRow>(
+      'INSERT INTO conversations (tenant_id, contact_id, connection_id) VALUES ($1, $2, $3) RETURNING *',
+      [tenantId, contactId, connectionId])).rows[0]!;
+  }
+  // The customer's first message in this conversation (new, or started by a campaign): read before it is updated.
+  const firstInbound = conv.last_inbound_at === null && conv.assigned_membership_id === null;
+  // Media is recorded now and downloaded, checked for malware and stored by a background job.
+  const media = e.media;
+  const mediaStatus = media ? (acceptsInbound(media.type, media.mime) ? 'pending' : 'unsupported') : null;
+  const kind = e.type === 'text' ? 'text' : media ? 'media' : 'unsupported';
+  const msg = await tx.query<{ id: string }>(
+    `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, provider_type, provider_message_id, occurred_at, status, referral,
+                           media_type, media_status, provider_media_id, media_mime, media_filename)
+     VALUES ($1, $2, 'in', $3, $4, $5, $6, $7, 'received', $8, $9, $10, $11, $12, $13)
+     ON CONFLICT (tenant_id, provider_message_id) DO NOTHING RETURNING id`,
+    [tenantId, conv.id, kind, e.body, e.type === 'text' ? null : e.type,
+      e.providerMessageId, e.occurredAt, e.referral ? JSON.stringify(e.referral) : null,
+      media?.type ?? null, mediaStatus, media?.id ?? null, media?.mime?.slice(0, 120) ?? null, media?.filename?.slice(0, 255) ?? null]);
+  const messageId = msg.rows[0]?.id;
+  if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
+  // A customer's first message in a conversation nobody has: give it to the next team member if automatic assignment is on.
+  // Only if the assignment lock was taken at the start: switching assignment on in the middle of a delivery must not
+  // take that lock after a customer lock (review L3). The next first message is assigned as usual.
+  if (firstInbound && assignmentLocked) await autoAssignNewConversation(tx, tenantId, conv.id, new Date());
+  if (mediaStatus === 'pending') await tx.query('INSERT INTO media_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenantId, messageId]);
+  await startTimerOnInbound(tx, conv.id, e.occurredAt);
+  // A delayed message updates the thread position only if it is the newest; the service window uses the latest.
+  await tx.query(
+    `UPDATE conversations SET
+       last_inbound_at = greatest(coalesce(last_inbound_at, $2), $2),
+       last_message_id = CASE WHEN last_message_at IS NULL OR $2 >= last_message_at THEN $3 ELSE last_message_id END,
+       last_message_at = greatest(coalesce(last_message_at, $2), $2),
+       status = CASE WHEN status = 'pending' THEN 'open' ELSE status END,
+       activity_seq = activity_seq + 1,
+       version = version + 1
+     WHERE id = $1`, [conv.id, e.occurredAt, messageId]);
+
+  const consent = consentKeyword(e.body);
+  if (consent) {
+    const optedOut = (await tx.query<{ opted_out_at: Date | null }>('SELECT opted_out_at FROM contacts WHERE id = $1', [contactId])).rows[0]!.opted_out_at;
+    if ((consent === 'opt_out') !== (optedOut !== null)) {
+      // An opt-out also withdraws any marketing consent; opting back in does not restore it.
+      await tx.query(
+        `UPDATE contacts SET opted_out_at = CASE WHEN $2 THEN now() END,
+                marketing_consent_at = CASE WHEN $2 THEN NULL ELSE marketing_consent_at END, updated_at = now() WHERE id = $1`,
+        [contactId, consent === 'opt_out']);
+      await tx.query(
+        `INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence) VALUES ($1, $2, $3, 'whatsapp', 'inbound_keyword', $4)`,
+        [tenantId, contactId, consent, e.providerMessageId]);
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, $3, $4)`,
+        [tenantId, conv.id, consent === 'opt_out' ? 'opted_out' : 'opted_in', JSON.stringify({ evidence: e.providerMessageId })]);
+      await AuditService.record(tx, {
+        tenantId, actorUserId: null, action: consent === 'opt_out' ? 'contact.opted_out' : 'contact.opted_in',
+        targetType: 'contact', targetId: contactId, metadata: { source: 'inbound_keyword', channel: 'whatsapp' },
+      });
+    }
+  }
+  return 'applied' as const;
 }

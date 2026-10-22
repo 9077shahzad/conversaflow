@@ -1,6 +1,7 @@
 /**
  * Worker process (same codebase as the API, separate process and database credentials — ADR-001).
- * Jobs: account emails (Notifier, role cf_notify); outbound messages (Sender, role cf_app inside each company's
+ * Jobs: account emails (Notifier, role cf_notify); incoming webhook events recorded by the API (InboundProcessor,
+ * leased through inbound_claim, AX-3); outbound messages (Sender, role cf_app inside each company's
  * context, leased through dispatch_claim); inbound media downloads (MediaFetcher, leased through media_claim, each
  * file checked for malware before it is stored). Sending recovers by itself: an expired lease is picked up again, and a
  * message that may already have reached the provider becomes 'uncertain' instead of being sent twice.
@@ -13,6 +14,7 @@ import { SandboxAdapter, type ChannelAdapter, type Provider } from './modules/ch
 import { Sender } from './modules/sender';
 import { MediaFetcher } from './modules/media';
 import { CampaignRunner } from './modules/campaigns';
+import { InboundProcessor } from './modules/inbound';
 import { ContactImportService } from './modules/contacts-import';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 
@@ -36,6 +38,7 @@ const env = z
     SCANNER_REQUIRE_OFFICIAL_SIGNATURES: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
     SCANNER_MAX_SIGNATURE_AGE_HOURS: z.coerce.number().int().min(1).max(168).default(48),
     MEDIA_POLL_MS: z.coerce.number().int().min(250).default(2000),
+    INBOUND_POLL_MS: z.coerce.number().int().min(100).default(500),
   })
   .parse(process.env);
 
@@ -64,13 +67,14 @@ const scanner = env.SCANNER === 'clamd'
 const sender = new Sender(appDb, channels, {}, undefined, storage);
 const media = new MediaFetcher(appDb, channels, storage, scanner, env.MAX_UPLOAD_BYTES);
 const campaigns = new CampaignRunner(appDb);
+const inbound = new InboundProcessor(appDb);
 
 let stopping = false;
 process.on('SIGTERM', () => (stopping = true));
 process.on('SIGINT', () => (stopping = true));
 
 (async () => {
-  console.log('ConversaFlow worker started: account emails, outbound messages, inbound media, campaigns, import preview expiry');
+  console.log('ConversaFlow worker started: account emails, incoming events, outbound messages, inbound media, campaigns, import preview expiry');
   void (async () => {
     while (!stopping) {
       try {
@@ -79,6 +83,17 @@ process.on('SIGINT', () => (stopping = true));
         console.error('campaign error', err instanceof Error ? err.message : err);
       }
       await new Promise((r) => setTimeout(r, env.MEDIA_POLL_MS));
+    }
+  })();
+  // Incoming webhook events recorded by the API: applied here (AX-3).
+  void (async () => {
+    while (!stopping) {
+      try {
+        while ((await inbound.dispatchDue(200)) > 0 && !stopping) { /* drain */ }
+      } catch (err) {
+        console.error('inbound error', err instanceof Error ? err.message : err);
+      }
+      await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
     }
   })();
   // Contact import previews that were never imported: names and numbers are cleared after a day (checked hourly).

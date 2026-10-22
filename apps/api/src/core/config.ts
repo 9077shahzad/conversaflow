@@ -36,13 +36,20 @@ const Schema = z.object({
    * turn it on by default (review note), and production refuses it.
    */
   CHANNEL_SANDBOX_ENABLED: z.enum(['true', 'false']).optional(),
+  /**
+   * Where incoming webhook events are applied (AX-3). `worker` (the default in production): the request records them
+   * and answers at once; the worker applies them. `request`: applied in the same request after recording, through the
+   * same code; for development and the test suite only, refused in production. Default: worker in production,
+   * request elsewhere.
+   */
+  INBOUND_APPLY: z.enum(['worker', 'request']).optional(),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),
   /** Token echoed during webhook verification (hub.verify_token). Generated per process when not set. */
   SANDBOX_VERIFY_TOKEN: z.string().min(16).optional(),
 });
 
-export type Config = Omit<z.infer<typeof Schema>, 'CHANNEL_SANDBOX_ENABLED'> & { CHANNEL_SANDBOX_ENABLED: boolean };
+export type Config = Omit<z.infer<typeof Schema>, 'CHANNEL_SANDBOX_ENABLED' | 'INBOUND_APPLY'> & { CHANNEL_SANDBOX_ENABLED: boolean; INBOUND_APPLY: 'worker' | 'request' };
 
 /** Reads configuration from the environment and refuses to start when anything required is missing. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -63,5 +70,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (parsed.data.NODE_ENV === 'production' && sandbox) {
     throw new Error('Invalid configuration: production requires CHANNEL_SANDBOX_ENABLED=false (the sandbox channel is a test double).');
   }
-  return { ...parsed.data, CHANNEL_SANDBOX_ENABLED: sandbox };
+  const inbound = parsed.data.INBOUND_APPLY ?? (parsed.data.NODE_ENV === 'production' ? 'worker' : 'request');
+  if (parsed.data.NODE_ENV === 'production' && inbound !== 'worker') {
+    throw new Error('Invalid configuration: production requires INBOUND_APPLY=worker (incoming events are applied by the worker).');
+  }
+  return { ...parsed.data, CHANNEL_SANDBOX_ENABLED: sandbox, INBOUND_APPLY: inbound };
 }

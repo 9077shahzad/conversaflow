@@ -7,7 +7,8 @@ import { fill, isLocale, t, type Locale } from '@/lib/i18n';
 
 /**
  * Provider health and recovery (Wave 1). Read-only except for recovery actions that cannot message a customer:
- * re-applying waiting delivery updates, downloading a customer's file again, re-reading template status.
+ * re-applying waiting delivery updates, downloading a customer's file again, re-reading template status, trying again
+ * incoming events the background service gave up on.
  * Retrying a message happens in its conversation, with all the usual checks.
  */
 interface Health {
@@ -16,6 +17,7 @@ interface Health {
   checkedAt: string;
   connections: Array<{ id: string; label: string; displayPhone: string; status: string; lastEventAt: string | null; events24h: number }>;
   sending: { waiting: number; overdue: number; stuck: number; gaveUp: number };
+  webhooks: { unprocessed: number; overdue: number; failed: number };
   delivery: { uncertain7d: number; failed7d: { blocked: number; rejected: number; exhausted: number; providerReported: number } };
   media: { pending: number; overdue: number; failed7d: number; blockedByScan7d: number };
   templates: { approved: number; pending: number; pausedOrDisabled: number; lowQuality: number };
@@ -84,6 +86,11 @@ export default function ChannelHealth() {
                   <p>{d.lastEvent}: {when(c.lastEventAt)} · {d.events24h}: {c.events24h}</p>
                 </div>
               ))}
+            </Card>
+            <Card title={d.incoming}>
+              <Row label={d.waiting} value={h.webhooks.unprocessed} />
+              <Row label={d.overdue} value={h.webhooks.overdue} warn />
+              <Row label={d.incomingFailed} value={h.webhooks.failed} warn />
             </Card>
             <Card title={d.sending}>
               <Row label={d.waiting} value={h.sending.waiting} />
@@ -156,6 +163,12 @@ export default function ChannelHealth() {
                   const r = await api<{ applied: number; stillWaiting: number }>('/v1/channels/recovery/statuses', { method: 'POST' });
                   return fill(d.reapplied, { applied: String(r.applied), stillWaiting: String(r.stillWaiting) });
                 })}>{d.reapply}</button>
+                {h.webhooks.failed > 0 && (
+                  <button type="button" className="btn-secondary" disabled={busy} onClick={() => act(async () => {
+                    const r = await api<{ requeued: number }>('/v1/channels/recovery/incoming', { method: 'POST' });
+                    return fill(d.incomingRequeued, { n: String(r.requeued) });
+                  })}>{d.retryIncoming}</button>
+                )}
                 <button type="button" className="btn-secondary" disabled={busy} onClick={() => act(async () => {
                   const r = await api<{ updated: number; unchanged: number }>('/v1/templates/sync', { method: 'POST' });
                   return fill(t(locale).templates.synced, { updated: String(r.updated), unchanged: String(r.unchanged) });

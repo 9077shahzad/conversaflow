@@ -457,6 +457,12 @@ export class ChannelsController {
     return this.health.reapplyStatuses(actor);
   }
 
+  /** Recovery: tries again incoming events the worker gave up on (AX-3). Applying never sends anything. */
+  @RequirePermission('channels.manage') @Post('recovery/incoming') @HttpCode(200)
+  retryIncoming(@CurrentActor() actor: TenantActor) {
+    return this.health.retryIncoming(actor);
+  }
+
   /** Recovery: downloads a customer's media again after a failed download. Never sends anything. */
   @RequirePermission('channels.manage') @Post('recovery/media/:messageId') @HttpCode(200)
   retryMedia(@CurrentActor() actor: TenantActor, @Param('messageId') id: string) {
