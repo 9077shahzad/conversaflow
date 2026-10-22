@@ -36,7 +36,9 @@ async function populate(owner: Client, label: string, tenantId: string) {
   for (const [i, text] of ['Hello', 'STOP'].entries()) {
     const raw = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: {
       metadata: { phone_number_id: number }, contacts: [{ wa_id: wa, profile: { name: `Customer ${label}` } }],
-      messages: [{ from: wa, id: `wamid.iso.${label}.${i}`, timestamp: String(Math.floor(Date.now() / 1000) + i), type: 'text', text: { body: text } }] } }] }] });
+      messages: [{ from: wa, id: `wamid.iso.${label}.${i}`, timestamp: String(Math.floor(Date.now() / 1000) + i), type: 'text', text: { body: text },
+        // W1.9: the first message came from an ad, so conversation_attributions has a row too.
+        ...(i === 0 ? { referral: { source_type: 'ad', source_id: `ad-${label}`, headline: `Ad ${label}` } } : {}) }] } }] }] });
     await request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
       .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, raw)).send(raw).expect(200);
     if (i === 0) {
