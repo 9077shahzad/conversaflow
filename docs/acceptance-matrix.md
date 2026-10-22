@@ -32,7 +32,7 @@ GitHub CI or a hosted environment.
 | Item | Status |
 | --- | --- |
 | G4 (migrations run by the database owner) and the sign-in risk | Open; owner acceptance pending. Not accepted |
-| Contact import with opt-in evidence, tags and saved replies, automatic assignment | Built in slice 5 (22 Oct 2026, local only; see `wave1-slice5-report.md`). Analyst visibility of contacts is an owner decision |
+| Contact import with opt-in evidence, tags and saved replies, automatic assignment | Built in slice 5 (22 Oct 2026, local only; see `wave1-slice5-report.md`). Analysts' contact visibility kept restricted (owner decision 22 Oct 2026) |
 | Usage and cost ledger, Click-to-WhatsApp ad reports | Remaining Wave 1 work |
 | Inbound events applied by the worker instead of in the request (AX-3) | Open; before live traffic and live campaigns |
 | Verified Meta marketing rates for Saudi Arabia and the UAE | Open; the estimate stays "unavailable" until they are checked and recorded with their date |

@@ -118,6 +118,9 @@ returns only a count, and only the business role may call it. Two Info notes, le
 whose conversations they can see (in practice, unassigned ones). If analysts should see the full contact list, a
 permission change is needed. Nothing is changed until you decide.
 
+**Decided 22 Oct 2026:** keep it restricted; analysts are not given the full contact list. See
+`wave1-slice5-decisions.md`.
+
 ## 8. Still pending
 
 - G4 (migrations run by the database owner) and the sign-in risk: open, **not accepted**.
