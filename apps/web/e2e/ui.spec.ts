@@ -143,6 +143,11 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText(locale === 'ar' ? 'مواعيد العمل' : 'Opening hours', { exact: true }).first()).toBeVisible();
       await checkPage(page, locale, 'inbox-setup', view);
 
+      await page.goto(`/${locale}/app/reports`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'التقارير' : 'Reports');
+      await expect(page.getByText('Summer AC service (demo ad)')).toBeVisible();
+      await checkPage(page, locale, 'reports', view);
+
       await page.goto(`/${locale}/app/channel-health`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'حالة القناة' : 'Channel health');
       await expect(page.getByText(locale === 'ar' ? 'رسائل تحتاج إلى متابعة' : 'Messages needing a person')).toBeVisible();

@@ -100,6 +100,15 @@ async function main() {
     await say('966500000104', 'Faisal (Demo)', 'STOP 🛑', 300);
     await say('966500000105', 'Huda (Demo)', 'Do you clean water tanks?', 26 * 3600);
 
+    // Two customers who came from an invented Click-to-WhatsApp ad (simulated referral data, for the ad report).
+    for (const [wa, name, text, ago] of [['966500000111', 'Saeed (Demo)', 'I saw your ad about AC servicing. Do you cover Khobar?', 1200],
+      ['966500000112', 'Maha (Demo)', 'شفت إعلانكم، كم سعر تنظيف المكيف؟', 700]] as const) {
+      await inbox.ingest('sandbox', { object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: number },
+        contacts: [{ wa_id: wa, profile: { name } }],
+        messages: [{ from: wa, id: `wamid.demo.${suffix}.ad.${wa}`, timestamp: String(now - ago), type: 'text', text: { body: text },
+          referral: { source_type: 'ad', source_id: '120000000000001', source_url: 'https://fb.me/demo-ad', headline: 'Summer AC service (demo ad)', ctwa_clid: `demo-clid-${wa}` } }] } }] }] });
+    }
+
     // Templates: two approved (the review decision arrives as a sandbox webhook), one still in review.
     const templates = new TemplatesService(deps);
     // The simulated provider records the decision too, as WhatsApp would, then reports it by webhook.

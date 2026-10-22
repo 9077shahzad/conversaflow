@@ -26,6 +26,7 @@ import { CampaignsService } from '../modules/campaigns';
 import { SavedRepliesService, TagsService } from '../modules/inbox-tools';
 import { ContactImportService, listContacts } from '../modules/contacts-import';
 import { AssignmentService } from '../modules/auto-assign';
+import { ReportsService } from '../modules/reports';
 import { timingSafeEqual } from 'node:crypto';
 import { verifySignature } from '../modules/channels';
 import type { Deps } from '../core/context';
@@ -442,6 +443,17 @@ export class PlatformController {
   }
 }
 
+@Controller('v1/reports')
+export class ReportsController {
+  constructor(@Inject(ReportsService) private readonly reports: ReportsService) {}
+
+  /** Click-to-WhatsApp ads: conversations credited to each ad and what happened next (counts only). */
+  @RequirePermission('reports.read') @Get('ads')
+  ads(@CurrentActor() actor: TenantActor, @Query() q: Record<string, string>) {
+    return this.reports.ads(actor, q);
+  }
+}
+
 @Controller('v1/channels')
 export class ChannelsController {
   constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(HealthService) private readonly health: HealthService) {}
@@ -523,6 +535,12 @@ export class InboxController {
   @RequirePermission('inbox.reply') @Get(':id')
   get(@CurrentActor() actor: TenantActor, @Param('id') id: string) {
     return this.inbox.get(actor, id);
+  }
+
+  /** Resolves or reopens a conversation (expected version required). */
+  @RequirePermission('inbox.reply') @Post(':id/status') @HttpCode(200)
+  setStatus(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) {
+    return this.inbox.setStatus(actor, id, body);
   }
 
   @RequirePermission('inbox.reply') @Post(':id/assign') @HttpCode(200)

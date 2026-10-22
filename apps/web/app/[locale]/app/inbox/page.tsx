@@ -66,14 +66,15 @@ function Inbox() {
   const [env, setEnv] = useState<Environment | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
   const [tagFilter, setTagFilter] = useState('');
+  const [showResolved, setShowResolved] = useState(false);
   const can = useCallback((p: string) => !!access?.permissions.includes(p), [access]);
 
   const loadList = useCallback(async () => {
     try {
-      const res = await api<{ items: ListItem[] }>(`/v1/conversations?status=active&assigned=${filter}&limit=50${tagFilter ? `&tag=${tagFilter}` : ''}`);
+      const res = await api<{ items: ListItem[] }>(`/v1/conversations?status=${showResolved ? 'resolved' : 'active'}&assigned=${filter}&limit=50${tagFilter ? `&tag=${tagFilter}` : ''}`);
       setItems(res.items);
     } catch { setItems((x) => x ?? []); }
-  }, [filter, tagFilter]);
+  }, [filter, tagFilter, showResolved]);
   const loadConv = useCallback(async () => {
     if (!selected) { setConv(null); return; }
     try { setConv(await api<Conversation>(`/v1/conversations/${selected}`)); } catch { setConv(null); }
@@ -101,6 +102,10 @@ function Inbox() {
                 {d.filters[f]}
               </button>
             ))}
+            <button type="button" aria-pressed={showResolved} onClick={() => setShowResolved((v) => !v)}
+              className={`rounded-full px-3 py-1.5 text-sm font-medium ${showResolved ? 'bg-teal text-white' : 'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50'}`}>
+              {d.showResolved}
+            </button>
             {tags.length > 0 && (
               <>
                 <label htmlFor="tag-filter" className="sr-only">{d.tagFilter}</label>
@@ -213,6 +218,9 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
               </select>
             </label>
           )}
+          {can('inbox.reply') && (!assignedOther || can('inbox.assign')) && (conv.status === 'resolved'
+            ? <button type="button" disabled={busy} onClick={() => act(() => api(`/v1/conversations/${conv.id}/status`, { method: 'POST', body: { status: 'open', expectedVersion: conv.version } }))} className="btn-secondary">{d.reopen}</button>
+            : <button type="button" disabled={busy} onClick={() => act(() => api(`/v1/conversations/${conv.id}/status`, { method: 'POST', body: { status: 'resolved', expectedVersion: conv.version } }))} className="btn-secondary">{d.resolve}</button>)}
           {can('inbox.pause') && !conv.pause.active && <button type="button" onClick={() => setPausing(true)} className="btn-secondary">{d.pause}</button>}
           {conv.pause.active && (conv.pause.pausedByMembershipId === me || can('inbox.pause')) && (
             <button type="button" disabled={busy} onClick={() => act(() => api(`/v1/conversations/${conv.id}/pause`, { method: 'DELETE' }))} className="btn-secondary">{d.release}</button>
@@ -247,7 +255,8 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
           if (x.kind === 'event') return (
             <li key={x.e.id} className="text-center text-xs text-slate-600">
               {fill(d.events[x.e.kind] ?? x.e.kind, { actor: x.e.actorMembershipId ? name(x.e.actorMembershipId) : d.system,
-                to: name((x.e.data as { to?: string; membershipId?: string }).to ?? (x.e.data as { membershipId?: string }).membershipId),
+                to: x.e.kind === 'status_changed' ? (d.statusNames[String((x.e.data as { to?: string }).to)] ?? String((x.e.data as { to?: string }).to))
+                  : name((x.e.data as { to?: string; membershipId?: string }).to ?? (x.e.data as { membershipId?: string }).membershipId),
                 tag: String((x.e.data as { name?: string }).name ?? '') })}
               {' · '}<time dateTime={x.e.createdAt}>{time(x.e.createdAt, locale)}</time>
             </li>

@@ -47,6 +47,7 @@ const ListQuery = z.object({
   before: z.string().datetime({ offset: true }).optional(),
 });
 const AssignRequest = z.object({ membershipId: z.string().uuid().nullable(), expectedVersion: z.number().int().min(0) });
+const StatusRequest = z.object({ status: z.enum(['resolved', 'open']), expectedVersion: z.number().int().min(0) }).strict();
 const NoteRequest = z.object({ body: z.string().trim().min(1).max(4000) });
 const PauseRequest = z.object({
   reason: z.string().trim().min(3).max(300),
@@ -308,6 +309,42 @@ export class InboxService {
         targetType: 'conversation', targetId: c.id, metadata: { from: c.assigned_membership_id, to: body.membershipId },
       });
       return { id: c.id, version: upd.rows[0].version, assignedMembershipId: body.membershipId };
+    });
+  }
+
+  /**
+   * Resolves or reopens a conversation (FR-201, FR-205). The person handling it, anyone for an unassigned one, or
+   * someone with inbox.assign. Resolving stops the reply timer. A resolved conversation stays in history; the
+   * customer's next message starts a new conversation, so reopening is refused if a newer one is already open.
+   */
+  async setStatus(actor: TenantActor, id: string, input: unknown) {
+    const body = parse(StatusRequest, input);
+    return withContext(this.deps.db, actor, async (tx) => {
+      const c = await this.loadVisible(tx, actor, id);
+      const mine = c.assigned_membership_id === null || c.assigned_membership_id === actor.membershipId;
+      if (!mine && !actor.permissions.has('inbox.assign')) throw new AppError(409, 'assigned_to_other', 'Another person is handling this conversation.');
+      const to = body.status;
+      if ((to === 'resolved') === (c.status === 'resolved')) {
+        throw Errors.conflict(to === 'resolved' ? 'already_resolved' : 'not_resolved', to === 'resolved' ? 'This conversation is already resolved.' : 'This conversation is not resolved.');
+      }
+      let upd;
+      try {
+        upd = await tx.query<{ version: number }>(
+          `UPDATE conversations SET status = $2, resolved_at = CASE WHEN $2 = 'resolved' THEN now() END,
+                  sla_kind = CASE WHEN $2 = 'resolved' THEN NULL ELSE sla_kind END,
+                  sla_started_at = CASE WHEN $2 = 'resolved' THEN NULL ELSE sla_started_at END,
+                  sla_due_at = CASE WHEN $2 = 'resolved' THEN NULL ELSE sla_due_at END,
+                  activity_seq = activity_seq + 1, version = version + 1
+           WHERE id = $1 AND version = $3 RETURNING version`, [c.id, to, body.expectedVersion]);
+      } catch (err) {
+        if ((err as { code?: string }).code === '23505') throw Errors.conflict('newer_conversation_open', 'The customer has a newer open conversation. Continue there.');
+        throw err;
+      }
+      if (!upd.rowCount) throw new AppError(409, 'conversation_changed', 'Someone else changed this conversation. Reload it and try again.', { version: c.version });
+      await tx.query(
+        `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'status_changed', $3, $4)`,
+        [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: c.status, to })]);
+      return { id: c.id, status: to, version: upd.rows[0]!.version };
     });
   }
 
@@ -630,6 +667,7 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
   await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:wa:${e.from}`]);
   let contactId = (await tx.query<{ contact_id: string }>(
     `SELECT contact_id FROM contact_identifiers WHERE kind = 'whatsapp' AND value = $1`, [e.from])).rows[0]?.contact_id;
+  const newContact = !contactId;
   if (!contactId) {
     contactId = (await tx.query<{ id: string }>(
       'INSERT INTO contacts (tenant_id, display_name) VALUES ($1, $2) RETURNING id', [tenantId, e.profileName])).rows[0]!.id;
@@ -660,6 +698,9 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
       media?.type ?? null, mediaStatus, media?.id ?? null, media?.mime?.slice(0, 120) ?? null, media?.filename?.slice(0, 255) ?? null]);
   const messageId = msg.rows[0]?.id;
   if (!messageId) return 'applied' as const; // already recorded under another event key; nothing more to do
+  // Click-to-WhatsApp: the conversation is credited to the first ad (or post) tapped within it (W1.9). Later taps in
+  // the same conversation do not change it.
+  if (e.referral) await recordAttribution(tx, tenantId, conv.id, contactId, messageId, e.referral, e.occurredAt, newContact);
   // A customer's first message in a conversation nobody has: give it to the next team member if automatic assignment is on.
   // Only if the assignment lock was taken at the start: switching assignment on in the middle of a delivery must not
   // take that lock after a customer lock (review L3). The next first message is assigned as usual.
@@ -699,4 +740,15 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
     }
   }
   return 'applied' as const;
+}
+
+const str = (v: unknown, max: number) => (typeof v === 'string' && v.length > 0 ? v.slice(0, max) : null);
+async function recordAttribution(tx: Tx, tenantId: string, conversationId: string, contactId: string, messageId: string,
+  referral: Record<string, unknown>, at: Date, newContact: boolean) {
+  const type = referral.source_type === 'ad' || referral.source_type === 'post' ? referral.source_type : 'unknown';
+  await tx.query(
+    `INSERT INTO conversation_attributions (conversation_id, tenant_id, contact_id, message_id, source_type, source_id, source_url, headline, ctwa_clid, new_contact, first_message_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (conversation_id) DO NOTHING`,
+    [conversationId, tenantId, contactId, messageId, type, str(referral.source_id, 100), str(referral.source_url, 500),
+      str(referral.headline, 300), str(referral.ctwa_clid, 300), newContact, at]);
 }
