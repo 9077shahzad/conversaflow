@@ -37,7 +37,8 @@ async function conv(wa: string) {
      WHERE ci.value = $1 ORDER BY c.created_at DESC LIMIT 1`, [wa]))).rows[0]!;
 }
 const report = async (c: Client = owner, qs = '') => (await c.get(`/v1/reports/ads${qs}`).expect(200)).body;
-const adRow = (r: { ads: Array<{ sourceId: string }> }, id: string) => r.ads.find((a) => a.sourceId === id);
+type Row = { sourceId: string; conversations: number; medianFirstReplyMinutes: number | null };
+const adRow = (r: { ads: Row[] }, id: string) => r.ads.find((a) => a.sourceId === id);
 
 beforeAll(async () => {
   t = await startApp();
