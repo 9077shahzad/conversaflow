@@ -1,4 +1,4 @@
-import { withContext, type Tx } from '@conversaflow/database';
+import { withContext, type Db, type Tx } from '@conversaflow/database';
 import { z } from 'zod';
 import type { Deps, TenantActor } from '../core/context';
 import { AppError, Errors } from '../core/errors';
@@ -144,7 +144,9 @@ type Classified = ParsedRow & { outcome: 'new' | 'existing' | 'problem'; contact
 
 /**
  * What an import "yes" does for one contact. Refused when the customer opted out of all messages, or when their latest
- * marketing decision is a withdrawal: the company's evidence may well predate it (review M2).
+ * marketing decision is a withdrawal: the company's evidence may well predate it (review M2). A withdrawal recorded by
+ * undoing an import is not the customer's decision and is not counted here, so a corrected file can be imported again
+ * (recheck N2).
  */
 function consentFor(wantsYes: boolean, e: { opted_out: boolean; consent: boolean; latest: string | null } | undefined): ConsentAction {
   if (!wantsYes) return null;
@@ -161,7 +163,8 @@ async function classify(tx: Tx, rows: ParsedRow[]): Promise<Classified[]> {
     const chunk = phones.slice(i, i + 1000);
     for (const e of (await tx.query<{ value: string; contact_id: string; opted_out: boolean; consent: boolean; latest: string | null }>(
       `SELECT ci.value, ci.contact_id, (ct.opted_out_at IS NOT NULL) AS opted_out, (ct.marketing_consent_at IS NOT NULL) AS consent,
-              (SELECT e.kind FROM consent_events e WHERE e.contact_id = ct.id AND e.kind IN ('marketing_opt_in', 'marketing_opt_out') ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS latest
+              (SELECT e.kind FROM consent_events e WHERE e.contact_id = ct.id AND e.kind IN ('marketing_opt_in', 'marketing_opt_out')
+                 AND NOT (e.source = 'import' AND e.kind = 'marketing_opt_out') ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS latest
        FROM contact_identifiers ci JOIN contacts ct ON ct.id = ci.contact_id WHERE ci.kind = 'whatsapp' AND ci.value = ANY($1)`, [chunk])).rows) {
       existing.set(e.value, e);
     }
@@ -213,6 +216,15 @@ export class ContactImportService {
     });
   }
 
+  /**
+   * Worker: empties the rows of previews that were never imported and are more than a day old, for every company
+   * (recheck L5). The lookup sees nothing else. Returns how many previews were cleared.
+   */
+  static async expirePreviews(db: Db, limit = 200): Promise<number> {
+    return withContext(db, { tenantId: null, userId: null }, async (tx) =>
+      (await tx.query<{ n: number }>('SELECT import_previews_expire($1) AS n', [limit])).rows[0]!.n);
+  }
+
   list(actor: TenantActor) {
     return withContext(this.deps.db, actor, async (tx) =>
       (await tx.query(`SELECT ${BATCH_COLUMNS} FROM import_batches WHERE status <> 'previewed' ORDER BY created_at DESC LIMIT 50`)).rows);
@@ -238,8 +250,9 @@ export class ContactImportService {
         await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${actor.tenantId}:wa:${r.phone}`]);
         const e = (await tx.query<{ contact_id: string; opted_out: boolean; consent: boolean; latest: string | null }>(
           `SELECT ci.contact_id, (ct.opted_out_at IS NOT NULL) AS opted_out, (ct.marketing_consent_at IS NOT NULL) AS consent,
-                  (SELECT e.kind FROM consent_events e WHERE e.contact_id = ct.id AND e.kind IN ('marketing_opt_in', 'marketing_opt_out') ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS latest
-           FROM contact_identifiers ci JOIN contacts ct ON ct.id = ci.contact_id WHERE ci.kind = 'whatsapp' AND ci.value = $1 FOR UPDATE OF ct`, [r.phone])).rows[0];
+                  (SELECT e.kind FROM consent_events e WHERE e.contact_id = ct.id AND e.kind IN ('marketing_opt_in', 'marketing_opt_out')
+                 AND NOT (e.source = 'import' AND e.kind = 'marketing_opt_out') ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS latest
+           FROM contact_identifiers ci JOIN contacts ct ON ct.id = ci.contact_id WHERE ci.kind = 'whatsapp' AND ci.value = $1 FOR NO KEY UPDATE OF ct`, [r.phone])).rows[0];
         let contactId: string; let isNew = false;
         if (e) {
           contactId = e.contact_id;
@@ -296,6 +309,14 @@ export class ContactImportService {
       if (!b) throw Errors.notFound('Import');
       if (b.status !== 'imported') throw Errors.conflict('import_not_applied', 'Only an applied import can be undone.');
       let removed = 0; let kept = 0; let consentWithdrawn = 0;
+      // The same per-number locks as an incoming message, in ascending order, so a first message from one of these
+      // customers waits for the undo instead of making it fail halfway (recheck N4).
+      const ids = b.rows.map((o) => o.contactId);
+      const phones = (await tx.query<{ value: string }>(
+        `SELECT DISTINCT value FROM contact_identifiers WHERE kind = 'whatsapp' AND contact_id = ANY($1::uuid[]) ORDER BY value`, [ids])).rows;
+      for (const p of phones.map((x) => x.value).sort()) {
+        await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${actor.tenantId}:wa:${p}`]);
+      }
       for (const o of b.rows) {
         if (o.created) {
           // Kept if anything else has happened to the contact: a conversation, a consent decision not made by this
@@ -303,7 +324,8 @@ export class ContactImportService {
           // history with the contact (review M3); the database trigger enforces the same rule.
           const del = await tx.query(`DELETE FROM contacts c WHERE c.id = $1 AND c.created_by_import = $2
                                         AND NOT EXISTS (SELECT 1 FROM conversations v WHERE v.contact_id = c.id)
-                                        AND NOT EXISTS (SELECT 1 FROM consent_events e WHERE e.contact_id = c.id AND coalesce(e.evidence, '') NOT LIKE 'Import ' || $2 || ':%')
+                                        AND NOT EXISTS (SELECT 1 FROM consent_events e WHERE e.contact_id = c.id
+                                                          AND NOT (e.source = 'import' AND coalesce(e.evidence, '') LIKE 'Import ' || $2 || ':%'))
                                         AND NOT EXISTS (SELECT 1 FROM campaign_recipients cr WHERE cr.contact_id = c.id)`, [o.contactId, id]);
           if (del.rowCount) { removed++; continue; }
           kept++;

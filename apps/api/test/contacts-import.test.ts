@@ -7,7 +7,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { signBody } from '../src/modules/channels';
-import { normalisePhone, parseContactsCsv, readCsv } from '../src/modules/contacts-import';
+import { ContactImportService, normalisePhone, parseContactsCsv, readCsv } from '../src/modules/contacts-import';
 import { activateSubscription, addMember, enableMfa, newCompany, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -309,5 +309,90 @@ describe('review of slice 5', () => {
   it('L5: an unclosed quotation mark or two columns meaning the same thing are refused with a clear reason', async () => {
     expect((await preview(owner, 'phone,name\n+971501234567,"Never closed\n+971501234568,Next\n').expect(400)).body.error.code).toBe('unclosed_quote');
     expect((await preview(owner, 'mobile,phone\n,+971501234567\n').expect(400)).body.error.code).toBe('duplicate_columns');
+  });
+});
+
+/** Runs `hold` in its own company transaction and keeps it open until `release` is called; rolls back afterwards. */
+function holdOpen(hold: (tx: import('@conversaflow/database').Tx) => Promise<unknown>) {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let ready!: () => void;
+  const started = new Promise<void>((r) => (ready = r));
+  const done = app(async (tx) => { await hold(tx); ready(); await gate; throw new Error('rollback'); }).catch(() => undefined);
+  return { started, release: async () => { release(); await done; } };
+}
+
+describe('recheck of the slice 5 fixes', () => {
+  it('N1: an import does not wait for, or deadlock with, another transaction that is adding records for the same contact', async () => {
+    const wa = fresh();
+    await inbound(wa, 'Hello').expect(200);
+    const id = (await contactByNumber(wa))!.id;
+    const p = (await preview(owner, `phone,name\n+${wa},Someone\n`).expect(201)).body;
+    // A campaign batch or a consent record being written for this contact holds a key-share lock on it (foreign key).
+    const other = holdOpen((tx) => tx.query(`INSERT INTO consent_events (tenant_id, contact_id, kind, channel, source, evidence)
+                                             VALUES ($1, $2, 'opt_in', 'whatsapp', 'agent_recorded', 'held open by the test')`, [tenant, id]));
+    await other.started;
+    const result = await Promise.race([
+      owner.post(`/v1/contacts/imports/${p.id}/commit`).then((r) => r.status),
+      new Promise((r) => setTimeout(() => r('blocked'), 4000)),
+    ]);
+    await other.release();
+    expect(result).toBe(200);
+  });
+
+  it('N2: a withdrawal recorded by undoing an import does not block importing the corrected file', async () => {
+    const wa = fresh();
+    await inbound(wa, 'Hello').expect(200);
+    const p = (await preview(owner, `phone,marketing_consent\n+${wa},yes\n`, 'Signed the offers form at the branch').expect(201)).body;
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200);
+    expect((await owner.post(`/v1/contacts/imports/${p.id}/undo`).expect(200)).body.summary.undo).toMatchObject({ consentWithdrawn: 1 });
+    const again = (await preview(owner, `phone,marketing_consent\n+${wa},yes\n`, 'Signed the offers form at the branch').expect(201)).body;
+    expect(again.summary).toMatchObject({ consentToRecord: 1, consentRefusedWithdrawn: 0 });
+    await owner.post(`/v1/contacts/imports/${again.id}/commit`).expect(200);
+    expect((await contactByNumber(wa))!.consent).not.toBeNull();
+  });
+
+  it('N3: a decision whose wording imitates the import\'s own record still keeps the contact on undo', async () => {
+    const wa = fresh();
+    const p = (await preview(owner, `phone\n+${wa}\n`).expect(201)).body;
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200);
+    const id = (await contactByNumber(wa))!.id;
+    await owner.post(`/v1/contacts/${id}/marketing-consent`, { granted: false, evidence: `Import ${p.id}: customer said no` }).expect(200);
+    expect((await owner.post(`/v1/contacts/imports/${p.id}/undo`).expect(200)).body.summary.undo).toMatchObject({ removed: 0, kept: 1 });
+    await expect(app((tx) => tx.query('DELETE FROM contacts WHERE id = $1', [id]))).rejects.toThrow(/no other consent decision/);
+  });
+
+  it('N4: undo takes the same per-number lock as an incoming message, so it waits instead of failing halfway', async () => {
+    const wa = fresh();
+    const p = (await preview(owner, `phone\n+${wa}\n`).expect(201)).body;
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(200);
+    const other = holdOpen((tx) => tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenant}:wa:${wa}`]));
+    await other.started;
+    let finished = false;
+    const undoing = owner.post(`/v1/contacts/imports/${p.id}/undo`).then((r) => { finished = true; return r; });
+    await new Promise((r) => setTimeout(r, 700));
+    expect(finished).toBe(false);
+    await other.release();
+    expect((await undoing).status).toBe(200);
+  });
+
+  it('L5: previews never imported are cleared after a day for every company, by the worker, without a new preview', async () => {
+    const wa = fresh();
+    const p = (await preview(owner, `phone,name\n+${wa},Kept Too Long\n`).expect(201)).body;
+    // Make the preview look 25 hours old (owner role, with temporary policies inside one transaction).
+    const c = await t.ownerDb.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query('CREATE POLICY test_age ON import_batches FOR UPDATE TO CURRENT_USER USING (true) WITH CHECK (true)');
+      await c.query('CREATE POLICY test_age_read ON import_batches FOR SELECT TO CURRENT_USER USING (true)');
+      expect((await c.query(`UPDATE import_batches SET created_at = now() - interval '25 hours' WHERE id = $1`, [p.id])).rowCount).toBe(1);
+      await c.query('DROP POLICY test_age ON import_batches');
+      await c.query('DROP POLICY test_age_read ON import_batches');
+      await c.query('COMMIT');
+    } finally { c.release(); }
+    expect(await ContactImportService.expirePreviews(t.deps.db)).toBeGreaterThanOrEqual(1);
+    const left = (await app((tx) => tx.query<{ rows: unknown[]; file_name: string }>('SELECT rows, file_name FROM import_batches WHERE id = $1', [p.id]))).rows[0]!;
+    expect(left).toEqual({ rows: [], file_name: 'customers.csv' });
+    await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(409);
   });
 });

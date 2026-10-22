@@ -13,6 +13,7 @@ import { SandboxAdapter, type ChannelAdapter, type Provider } from './modules/ch
 import { Sender } from './modules/sender';
 import { MediaFetcher } from './modules/media';
 import { CampaignRunner } from './modules/campaigns';
+import { ContactImportService } from './modules/contacts-import';
 import { ClamdScanner, LocalStorage, SignatureScanner } from './core/storage';
 
 const env = z
@@ -69,7 +70,7 @@ process.on('SIGTERM', () => (stopping = true));
 process.on('SIGINT', () => (stopping = true));
 
 (async () => {
-  console.log('ConversaFlow worker started: account emails, outbound messages, inbound media, campaigns');
+  console.log('ConversaFlow worker started: account emails, outbound messages, inbound media, campaigns, import preview expiry');
   void (async () => {
     while (!stopping) {
       try {
@@ -78,6 +79,17 @@ process.on('SIGINT', () => (stopping = true));
         console.error('campaign error', err instanceof Error ? err.message : err);
       }
       await new Promise((r) => setTimeout(r, env.MEDIA_POLL_MS));
+    }
+  })();
+  // Contact import previews that were never imported: names and numbers are cleared after a day (checked hourly).
+  void (async () => {
+    while (!stopping) {
+      try {
+        while ((await ContactImportService.expirePreviews(appDb, 200)) > 0 && !stopping) { /* drain */ }
+      } catch (err) {
+        console.error('import preview expiry error', err instanceof Error ? err.message : err);
+      }
+      await new Promise((r) => setTimeout(r, 3600_000));
     }
   })();
   void (async () => {
