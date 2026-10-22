@@ -34,24 +34,25 @@ export const AUTOMATION_LIMITS = { maxSteps: 40, maxDefinitionSteps: 30, runsPer
 
 const StepId = z.string().regex(/^[a-z0-9_-]{1,40}$/);
 const Next = StepId.nullable();
-const Text = z.object({ en: z.string().trim().max(1000).optional(), ar: z.string().trim().max(1000).optional() })
-  .refine((t) => !!(t.en || t.ar), 'Write the message in English, Arabic or both.');
+// A draft may be incomplete (an empty message, a step with nothing chosen yet); publishing lists what is missing.
+const Text = z.object({ en: z.string().trim().max(1000).optional(), ar: z.string().trim().max(1000).optional() });
+const Ref = z.union([z.string().uuid(), z.literal('')]);
 const Condition = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('within_business_hours') }),
-  z.object({ kind: z.literal('message_contains'), words: z.array(z.string().trim().min(1).max(60)).min(1).max(20) }),
-  z.object({ kind: z.literal('has_tag'), tagId: z.string().uuid() }),
+  z.object({ kind: z.literal('message_contains'), words: z.array(z.string().trim().min(1).max(60)).max(20) }),
+  z.object({ kind: z.literal('has_tag'), tagId: Ref }),
   z.object({ kind: z.literal('contact_language'), language: z.enum(['en', 'ar']) }),
   z.object({ kind: z.literal('first_message') }),
 ]);
 const Step = z.discriminatedUnion('kind', [
   z.object({ id: StepId, kind: z.literal('send_reply'), text: Text, next: Next }),
-  z.object({ id: StepId, kind: z.literal('send_template'), templateId: z.string().uuid(), params: z.array(z.object({ source: z.enum(['contact_name', 'text']), value: z.string().max(200).optional(), fallback: z.string().max(200).optional() })).max(10).default([]), next: Next }),
-  z.object({ id: StepId, kind: z.literal('add_tag'), tagId: z.string().uuid(), next: Next }),
-  z.object({ id: StepId, kind: z.literal('remove_tag'), tagId: z.string().uuid(), next: Next }),
-  z.object({ id: StepId, kind: z.literal('assign'), membershipId: z.string().uuid(), next: Next }),
+  z.object({ id: StepId, kind: z.literal('send_template'), templateId: Ref, params: z.array(z.object({ source: z.enum(['contact_name', 'text']), value: z.string().max(200).optional(), fallback: z.string().max(200).optional() })).max(10).default([]), next: Next }),
+  z.object({ id: StepId, kind: z.literal('add_tag'), tagId: Ref, next: Next }),
+  z.object({ id: StepId, kind: z.literal('remove_tag'), tagId: Ref, next: Next }),
+  z.object({ id: StepId, kind: z.literal('assign'), membershipId: Ref, next: Next }),
   z.object({ id: StepId, kind: z.literal('wait'), minutes: z.number().int().min(1).max(AUTOMATION_LIMITS.maxWaitMinutes), next: Next }),
   z.object({ id: StepId, kind: z.literal('condition'), if: Condition, then: Next, else: Next }),
-  z.object({ id: StepId, kind: z.literal('handoff'), note: z.string().trim().min(1).max(500), next: Next }),
+  z.object({ id: StepId, kind: z.literal('handoff'), note: z.string().trim().max(500), next: Next }),
   /** The company AI agent answers from the company's knowledge (W2.2); when it cannot, `ifHuman` is taken. */
   z.object({ id: StepId, kind: z.literal('ai_reply'), next: Next, ifHuman: Next }),
 ]);
@@ -89,6 +90,15 @@ export function validateDefinition(d: DefinitionT): Array<{ code: string; step?:
   if (d.start === null || !ids.has(d.start)) problems.push({ code: 'missing_start' });
   const nexts = (s: StepDef): Array<string | null> => (s.kind === 'condition' ? [s.then, s.else] : s.kind === 'ai_reply' ? [s.next, s.ifHuman] : [s.next]);
   for (const s of d.steps) for (const n of nexts(s)) if (n !== null && !ids.has(n)) problems.push({ code: 'unknown_next', step: s.id });
+  for (const s of d.steps) {
+    if (s.kind === 'send_reply' && !s.text.en && !s.text.ar) problems.push({ code: 'empty_message', step: s.id });
+    if (s.kind === 'send_template' && !s.templateId) problems.push({ code: 'unknown_template', step: s.id });
+    if ((s.kind === 'add_tag' || s.kind === 'remove_tag') && !s.tagId) problems.push({ code: 'unknown_tag', step: s.id });
+    if (s.kind === 'assign' && !s.membershipId) problems.push({ code: 'unknown_member', step: s.id });
+    if (s.kind === 'handoff' && !s.note) problems.push({ code: 'empty_note', step: s.id });
+    if (s.kind === 'condition' && s.if.kind === 'message_contains' && s.if.words.length === 0) problems.push({ code: 'no_words', step: s.id });
+    if (s.kind === 'condition' && s.if.kind === 'has_tag' && !s.if.tagId) problems.push({ code: 'unknown_tag', step: s.id });
+  }
   if (problems.length) return problems;
   // No cycles: a workflow always moves forward and ends (loop protection, FR-406).
   const state = new Map<string, 'visiting' | 'done'>();
@@ -112,18 +122,21 @@ async function referenceProblems(tx: Tx, d: DefinitionT): Promise<Array<{ code: 
   for (const s of d.steps) {
     if (s.kind === 'add_tag' || s.kind === 'remove_tag' || (s.kind === 'condition' && s.if.kind === 'has_tag')) {
       const tagId = s.kind === 'condition' ? (s.if as { tagId: string }).tagId : s.tagId;
+      if (!tagId) continue;
       if (!(await tx.query('SELECT 1 FROM tags WHERE id = $1', [tagId])).rowCount) out.push({ code: 'unknown_tag', step: s.id });
     }
-    if (s.kind === 'assign') {
+    if (s.kind === 'assign' && s.membershipId) {
       const ok = await tx.query(
         `SELECT 1 FROM memberships m JOIN membership_roles mr ON mr.membership_id = m.id
          JOIN role_permissions rp ON rp.role_id = mr.role_id AND rp.permission_key = 'inbox.reply' WHERE m.id = $1 AND m.status = 'active'`, [s.membershipId]);
       if (!ok.rowCount) out.push({ code: 'unknown_member', step: s.id });
     }
-    if (s.kind === 'send_template') {
-      const t = (await tx.query<{ status: string }>('SELECT status FROM message_templates WHERE id = $1', [s.templateId])).rows[0];
+    if (s.kind === 'send_template' && s.templateId) {
+      const t = (await tx.query<{ status: string; param_count: number }>('SELECT status, param_count FROM message_templates WHERE id = $1', [s.templateId])).rows[0];
       if (!t) out.push({ code: 'unknown_template', step: s.id });
       else if (t.status !== 'approved') out.push({ code: 'template_not_approved', step: s.id });
+      // Every placeholder needs a value (review of W2.1, L7).
+      else if (s.params.length !== t.param_count) out.push({ code: 'template_params_mismatch', step: s.id });
     }
   }
   return out;
@@ -180,6 +193,7 @@ export class AutomationsService {
         `UPDATE workflows SET draft = $2, name = coalesce($3, name), version = version + 1, updated_at = now()
          WHERE id = $1 AND version = $4 AND status <> 'archived' RETURNING version`, [id, JSON.stringify(body.draft), body.name ?? null, body.expectedVersion]);
       if (!upd.rowCount) await this.changed(tx, id);
+      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'automation.draft_saved', ip: actor.ip, targetType: 'workflow', targetId: id, metadata: {} });
       return { version: upd.rows[0]!.version, problems: validateDefinition(body.draft) };
     });
   }
@@ -189,7 +203,8 @@ export class AutomationsService {
     const body = parse(VersionInput, input);
     if (!isUuid(id)) throw Errors.notFound('Automation');
     return withContext(this.deps.db, actor, async (tx) => {
-      const w = (await tx.query<{ draft: DefinitionT; version: number; status: string }>('SELECT draft, version, status FROM workflows WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      // FOR NO KEY UPDATE: does not block runs being started (they hold a key-share lock on the workflow). Review M2.
+      const w = (await tx.query<{ draft: DefinitionT; version: number; status: string }>('SELECT draft, version, status FROM workflows WHERE id = $1 FOR NO KEY UPDATE', [id])).rows[0];
       if (!w || w.status === 'archived') throw Errors.notFound('Automation');
       if (w.version !== body.expectedVersion) await this.changed(tx, id);
       const draft = Definition.parse(w.draft);
@@ -204,7 +219,7 @@ export class AutomationsService {
     const body = parse(RollbackInput, input);
     if (!isUuid(id)) throw Errors.notFound('Automation');
     return withContext(this.deps.db, actor, async (tx) => {
-      const w = (await tx.query<{ version: number; status: string }>('SELECT version, status FROM workflows WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      const w = (await tx.query<{ version: number; status: string }>('SELECT version, status FROM workflows WHERE id = $1 FOR NO KEY UPDATE', [id])).rows[0];
       if (!w || w.status === 'archived') throw Errors.notFound('Automation');
       if (w.version !== body.expectedVersion) await this.changed(tx, id);
       const old = (await tx.query<{ definition: DefinitionT }>('SELECT definition FROM workflow_versions WHERE workflow_id = $1 AND number = $2', [id, body.toVersion])).rows[0];
@@ -235,7 +250,7 @@ export class AutomationsService {
     const body = parse(VersionInput, input);
     if (!isUuid(id)) throw Errors.notFound('Automation');
     return withContext(this.deps.db, actor, async (tx) => {
-      const w = (await tx.query<{ current_version_id: string | null; status: string; version: number }>('SELECT current_version_id, status, version FROM workflows WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      const w = (await tx.query<{ current_version_id: string | null; status: string; version: number }>('SELECT current_version_id, status, version FROM workflows WHERE id = $1 FOR NO KEY UPDATE', [id])).rows[0];
       if (!w || w.status === 'archived') throw Errors.notFound('Automation');
       if (w.version !== body.expectedVersion) await this.changed(tx, id);
       if (status === 'active' && !w.current_version_id) throw Errors.conflict('not_published', 'Publish the automation first.');
@@ -264,13 +279,18 @@ export class AutomationsService {
         if (problems.length) throw new AppError(422, 'automation_invalid', 'Fix the problems listed before rehearsing.', { problems });
       } else if (!w.current_version_id) throw Errors.conflict('not_published', 'Publish the automation first.');
       const r = (await tx.query<{ id: string }>(
-        `INSERT INTO workflow_runs (tenant_id, workflow_id, version_id, definition, mode, trigger_key, sample, status)
-         VALUES ($1, $2, $3, $4, 'rehearsal', $5, $6, 'running') RETURNING id`,
+        `INSERT INTO workflow_runs (tenant_id, workflow_id, version_id, definition, mode, trigger_key, sample, status, next_at)
+         VALUES ($1, $2, $3, $4, 'rehearsal', $5, $6, 'running', 'infinity') RETURNING id`,
         [actor.tenantId, id, snapshot ? null : w.current_version_id, snapshot ? JSON.stringify(snapshot) : null,
           `rehearsal:${crypto.randomUUID()}`, JSON.stringify(body)])).rows[0];
       return r!.id;
     });
-    await new AutomationRunner(this.deps.db, undefined, new AiService(this.deps, this.deps.ai)).runToEnd(actor.tenantId, runId);
+    try {
+      await new AutomationRunner(this.deps.db, undefined, new AiService(this.deps, this.deps.ai)).runToEnd(actor.tenantId, runId);
+    } catch (err) {
+      await withContext(this.deps.db, actor, (tx) => tx.query(`UPDATE workflow_runs SET status = 'failed', reason = 'rehearsal_error', finished_at = now() WHERE id = $1 AND status = 'running'`, [runId]));
+      throw err;
+    }
     return this.run(actor, runId);
   }
 
@@ -296,8 +316,25 @@ export class AutomationsService {
 
 // --- Triggers ---------------------------------------------------------------------------------------------------
 
-const norm = (s: string) => s.normalize('NFKC').toLocaleLowerCase().replace(/[ً-ْـ]/g, '');
-const contains = (text: string | null, words: string[]) => !!text && words.some((w) => norm(text).includes(norm(w)));
+/**
+ * Words, for matching keywords: lower case, Arabic diacritics and tatweel removed, and the common spelling variants
+ * folded (أ إ آ → ا, ى → ي, ة → ه). Review of W2.1, L1.
+ */
+const tokens = (s: string) => s.normalize('NFKC').toLowerCase().replace(/[\u064B-\u0652\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+  .split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+/** Arabic words often carry a prefix (و، ب، ال، بال، وال، لل): "بالسعر" still matches "سعر". */
+const base = (w: string) => { for (const p of ['وال', 'بال', 'لل', 'ال', 'و', 'ب']) if (w.startsWith(p) && w.length - p.length >= 3) return w.slice(p.length); return w; };
+/** A keyword (one or more words) matches whole words in the text, in order, never parts of words ("hi" ≠ "ship"). */
+function contains(text: string | null, words: string[]): boolean {
+  if (!text) return false;
+  const t = tokens(text).map(base);
+  return words.some((k) => {
+    const kw = tokens(k).map(base);
+    if (kw.length === 0) return false;
+    for (let i = 0; i + kw.length <= t.length; i++) if (kw.every((w, j) => t[i + j] === w)) return true;
+    return false;
+  });
+}
 
 /**
  * Called in the transaction that records a customer's message (so a run starts exactly once per message). Starts a
@@ -333,7 +370,7 @@ export async function startAutomationRuns(tx: Tx, tenantId: string, c: { convers
 }
 
 /** A person replied or paused replies: automation runs in this conversation stop at once (FR-206). */
-export async function stopAutomationRuns(tx: Tx, conversationId: string, reason: 'person_replied' | 'replies_paused' | 'conversation_resolved') {
+export async function stopAutomationRuns(tx: Tx, conversationId: string, reason: 'person_replied' | 'replies_paused' | 'conversation_resolved' | 'person_assigned') {
   await tx.query(`UPDATE workflow_runs SET status = 'stopped', reason = $2, finished_at = now(), lease_until = NULL
                   WHERE conversation_id = $1 AND status IN ('running', 'waiting') AND mode = 'live'`, [conversationId, reason]);
 }
@@ -346,7 +383,7 @@ const system = (tenantId: string) => ({ tenantId, userId: null }) as unknown as 
 type RunRow = {
   id: string; workflow_id: string; mode: 'live' | 'rehearsal'; status: string; current_step: string | null; steps_taken: number;
   conversation_id: string | null; contact_id: string | null; sample: Record<string, unknown> | null; attempts: number;
-  definition: DefinitionT; workflow_status: string; started_at: Date;
+  definition: DefinitionT; workflow_status: string; started_at: Date; due: boolean;
 };
 type Ctx = { tenantId: string; run: RunRow; def: DefinitionT; tx: Tx };
 type StepResult = { next: string | null; outcome: 'done' | 'would_do' | 'skipped' | 'blocked' | 'waiting'; detail: Record<string, unknown>; waitMinutes?: number };
@@ -376,11 +413,12 @@ export class AutomationRunner {
 
   /** Advances a live run until it waits, ends, or a step fails. */
   async advance(tenantId: string, runId: string) {
-    // The plan's monthly allowance is checked before a run takes its first step (rehearsals are not counted).
+    // The plan's monthly allowance: a run is reserved (counted) before its first step, so many runs started at once
+    // cannot all pass the check (review of W2.1, M3). Rehearsals are not counted.
     const first = await withContext(this.db, { tenantId, userId: null }, async (tx) =>
-      (await tx.query<{ first: boolean }>(`SELECT steps_taken = 0 AND mode = 'live' AND status = 'running' AS first FROM workflow_runs WHERE id = $1`, [runId])).rows[0]?.first);
+      (await tx.query<{ first: boolean }>(`SELECT steps_taken = 0 AND mode = 'live' AND status = 'running' AND next_at <= now() AS first FROM workflow_runs WHERE id = $1`, [runId])).rows[0]?.first);
     if (first && this.entitlements) {
-      try { await this.entitlements.assertRunAllowed(system(tenantId)); } catch (err) {
+      try { await this.entitlements.startRun(system(tenantId), runId); } catch (err) {
         if ((err as { code?: string }).code !== 'limit_reached') throw err;
         await withContext(this.db, { tenantId, userId: null }, (tx) => tx.query(
           `UPDATE workflow_runs SET status = 'skipped', reason = 'plan_limit', finished_at = now(), lease_until = NULL WHERE id = $1 AND status = 'running'`, [runId]));
@@ -401,12 +439,17 @@ export class AutomationRunner {
   /** Runs one step in its own transaction. Returns true when the run should continue now. */
   private async step(tenantId: string, runId: string, rehearsal: boolean): Promise<boolean> {
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      // Lock order as everywhere else: the conversation first, then the run (review of W2.1, M2).
+      const conv = (await tx.query<{ c: string | null }>('SELECT conversation_id AS c FROM workflow_runs WHERE id = $1', [runId])).rows[0]?.c;
+      if (conv) await tx.query('SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE', [conv]);
       const run = (await tx.query<RunRow>(
         `SELECT r.id, r.workflow_id, r.mode, r.status, r.current_step, r.steps_taken, r.conversation_id, r.contact_id, r.sample, r.attempts,
-                coalesce(v.definition, r.definition) AS definition, w.status AS workflow_status, r.started_at
+                coalesce(v.definition, r.definition) AS definition, w.status AS workflow_status, r.started_at, (r.next_at <= now()) AS due
          FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id LEFT JOIN workflow_versions v ON v.id = r.version_id
          WHERE r.id = $1 FOR UPDATE OF r`, [runId])).rows[0];
       if (!run || (run.status !== 'running' && run.status !== 'waiting')) return false;
+      // A live run moves only when it is due: a worker holding an old lease can never skip a wait or a back-off (M1).
+      if (run.mode === 'live' && !run.due) return false;
       if ((run.mode === 'rehearsal') !== rehearsal) return false;
       const def = run.definition;
       // Where the run is: a waiting run resumes at the step after its wait (stored as current_step).
@@ -486,6 +529,8 @@ export class AutomationRunner {
         const name = await this.contactName(ctx);
         const params = s.params.map((p) => (p.source === 'contact_name' ? name || p.fallback || '' : p.value || ''));
         if (params.some((p) => !checkParamValue(p))) return { next, outcome: 'blocked', detail: { reason: 'template_param_missing' } };
+        const count = (await ctx.tx.query<{ n: number }>('SELECT param_count AS n FROM message_templates WHERE id = $1', [s.templateId])).rows[0]!.n;
+        if (params.length !== count) return { next, outcome: 'blocked', detail: { reason: 'template_param_missing' } };
         if (!live) return { next, outcome: 'would_do', detail: { template: t.name, text: renderTemplate(t, params), approved: t.status === 'approved' } };
         if (t.status !== 'approved') return { next, outcome: 'blocked', detail: { reason: 'template_not_approved' } };
         const blocked = await this.sendBlocked(ctx, true, t.category === 'marketing');
@@ -593,8 +638,8 @@ export class AutomationRunner {
 
   private async enqueue(ctx: Ctx, stepId: string, m: { kind: 'text' | 'template'; body: string; templateId?: string; params?: string[]; category?: string }) {
     const msg = (await ctx.tx.query<{ id: string; occurred_at: Date }>(
-      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, occurred_at, status, template_id, template_params, pricing_category, automation_run_id, automation_step, client_message_id)
-       VALUES ($1, $2, 'out', $3, $4, clock_timestamp(), 'queued', $5, $6, $7, $8, $9, $10) RETURNING id, occurred_at`,
+      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, occurred_at, status, template_id, template_params, pricing_category, automation_run_id, automation_step, client_message_id, automation_run_mode)
+       VALUES ($1, $2, 'out', $3, $4, clock_timestamp(), 'queued', $5, $6, $7, $8, $9, $10, 'live') RETURNING id, occurred_at`,
       [ctx.tenantId, ctx.run.conversation_id, m.kind, m.body, m.templateId ?? null, m.params ? JSON.stringify(m.params) : null,
         m.category ?? 'service', ctx.run.id, stepId, stepUuid(ctx.run.id, stepId)])).rows[0]!;
     await ctx.tx.query('INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2)', [ctx.tenantId, msg.id]);

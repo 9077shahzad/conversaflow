@@ -97,8 +97,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'import_previews_expire(integer)': '7555cd7701daf9603bf2345c4d5a1a5f',
   // cf_dispatch: leases incoming webhook events for the worker, at most 50 per company per lease (0042, 0044, 0046)
   'inbound_claim(integer,integer)': '9e7a118f3009f851b1736f0f62dd3658',
-  // cf_dispatch: leases automation runs for the worker (migration 0045, W2.1)
-  'automation_claim(integer,integer)': 'a110b1d05b8b092a1e8f0db0beaf2cbd',
+  // cf_dispatch: leases automation runs for the worker, at most 20 per company per lease (0045, 0048)
+  'automation_claim(integer,integer)': 'e7941674d3d76974a0cf7e67e814cf90',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];

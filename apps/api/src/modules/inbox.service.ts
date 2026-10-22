@@ -305,6 +305,8 @@ export class InboxService {
         `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, $3, $4, $5)`,
         [actor.tenantId, c.id, body.membershipId ? 'assigned' : 'unassigned', actor.membershipId,
           JSON.stringify({ from: c.assigned_membership_id, to: body.membershipId })]);
+      // Assigned to a person: from now on that person handles it, and automations stop (FR-206; review of W2.1, L4).
+      if (body.membershipId) await stopAutomationRuns(tx, c.id, 'person_assigned');
       await AuditService.record(tx, {
         tenantId: actor.tenantId, actorUserId: actor.userId, action: 'conversation.assigned', ip: actor.ip,
         targetType: 'conversation', targetId: c.id, metadata: { from: c.assigned_membership_id, to: body.membershipId },

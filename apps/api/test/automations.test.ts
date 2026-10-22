@@ -258,3 +258,107 @@ describe('rehearsal (CF-EXT-019, acceptance 10)', () => {
       [tenant, c.id, r.id]))).rejects.toThrow(/rehearsal/);
   });
 });
+
+describe('review of W2.1', () => {
+  it('M1: a run waiting out a wait cannot be moved on early by a worker holding an old lease', async () => {
+    await pauseAll();
+    await publish('Two replies', { trigger: { kind: 'message_received', keywords: ['twice'] }, start: 'a', steps: [reply('a', 'First', 'الأولى', 'w'), { id: 'w', kind: 'wait', minutes: 600, next: 'b' }, reply('b', 'Second', 'الثانية')] });
+    const wa = fresh();
+    await say(wa, 'twice please').expect(200);
+    const [run] = await runsFor(wa);
+    await runner().advance(tenant, run!.id);                         // reaches the wait
+    await runner().advance(tenant, run!.id);                         // a stale second worker
+    await new Sender(t.deps.db, t.deps.channels).dispatchDue(100);
+    expect((await outbound(wa)).map((m) => m.body)).toEqual(['First']);
+    expect((await runsFor(wa))[0]!.status).toBe('waiting');
+  });
+
+  it('M3: the monthly allowance is reserved when a run starts, so runs waiting in the middle count too', async () => {
+    await pauseAll();
+    await publish('Slow allowance', { trigger: { kind: 'message_received', keywords: ['allowance'] }, start: 'w', steps: [{ id: 'w', kind: 'wait', minutes: 60, next: 'r' }, reply('r', 'Done', 'تم')] });
+    const db = await t.ownerDb.connect();
+    try {
+      await db.query(`INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'automation_executions', 0, 'test')
+                      ON CONFLICT (tenant_id, key) DO UPDATE SET limit_value = 0`, [tenant]).catch(async () => {
+        await db.query('BEGIN');
+        await db.query('CREATE POLICY test_ov ON entitlement_overrides FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)');
+        await db.query(`INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'automation_executions', 0, 'test')`, [tenant]);
+        await db.query('DROP POLICY test_ov ON entitlement_overrides');
+        await db.query('COMMIT');
+      });
+    } finally { db.release(); }
+    const wa = fresh();
+    await say(wa, 'allowance check').expect(200);
+    await work();
+    expect((await runsFor(wa)).map((r) => [r.status, r.reason])).toEqual([['skipped', 'plan_limit']]);
+    const db2 = await t.ownerDb.connect();
+    try {
+      await db2.query('BEGIN');
+      await db2.query('CREATE POLICY test_ov2 ON entitlement_overrides FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)');
+      await db2.query(`DELETE FROM entitlement_overrides WHERE tenant_id = $1 AND key = 'automation_executions'`, [tenant]);
+      await db2.query('DROP POLICY test_ov2 ON entitlement_overrides');
+      await db2.query('COMMIT');
+    } finally { db2.release(); }
+  });
+
+  it('M4: a finished run\'s queued message is not sent once a person has replied', async () => {
+    await pauseAll();
+    await publish('Fast answer', { trigger: { kind: 'message_received', keywords: ['fast'] }, start: 'r', steps: [reply('r', 'Automatic answer', 'إجابة تلقائية')] });
+    const wa = fresh();
+    await say(wa, 'fast question').expect(200);
+    while ((await runner().dispatchDue(100)) > 0) { /* queue only */ }
+    expect((await runsFor(wa))[0]!.status).toBe('completed');
+    const c = await conv(wa);
+    await owner.post(`/v1/conversations/${c.id}/reply`, { text: 'Human here', seenActivity: Number(c.activity_seq), clientMessageId: randomUUID() }).expect(201);
+    await new Sender(t.deps.db, t.deps.channels).dispatchDue(100);
+    const auto = (await outbound(wa)).find((m) => m.automation_run_id);
+    expect(auto).toMatchObject({ status: 'failed', error_code: 'person_replied' });
+  });
+
+  it('L1: keywords match whole words, and common Arabic spellings are treated alike', async () => {
+    await pauseAll();
+    await publish('Greeting', { trigger: { kind: 'message_received', keywords: ['hi', 'اسعار'] }, start: 'r', steps: [reply('r', 'Hello!', 'أهلًا!')] });
+    const a = fresh(); const b = fresh(); const c = fresh();
+    await say(a, 'I need to ship this').expect(200);
+    await say(b, 'Hi there').expect(200);
+    await say(c, 'ابغى أسعاركم... أقصد الأسعار').expect(200);
+    await work();
+    expect(await outbound(a)).toHaveLength(0);
+    expect(await outbound(b)).toHaveLength(1);
+    expect(await outbound(c)).toHaveLength(1);
+  });
+
+  it('L2/L6: rehearsal runs are never picked up by the worker, and no message can ever point at one', async () => {
+    const id = (await owner.post('/v1/automations', { name: 'Reh only', draft: { trigger: { kind: 'message_received' }, start: 'r', steps: [reply('r', 'x', 'x')] } }).expect(201)).body.id;
+    const r = (await owner.post(`/v1/automations/${id}/rehearse`, { text: 'hello' }).expect(201)).body;
+    const claimed = await withContext(t.deps.db, { tenantId: null, userId: null }, async (tx) => (await tx.query<{ run_id: string }>('SELECT * FROM automation_claim(200, 60)')).rows);
+    expect(claimed.map((x) => x.run_id)).not.toContain(r.id);
+    const c = (await app((tx) => tx.query<{ id: string }>('SELECT id FROM conversations LIMIT 1'))).rows[0]!;
+    await expect(t.ownerDb.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, occurred_at, status, client_message_id, automation_run_id, automation_step, automation_run_mode)
+       VALUES ($1, $2, 'out', 'text', 'x', now(), 'queued', gen_random_uuid(), $3, 'r', 'live')`, [tenant, c.id, r.id])).rejects.toThrow();
+  });
+
+  it('L4: a person being assigned the conversation stops its automation runs', async () => {
+    await pauseAll();
+    await publish('Assigned stop', { trigger: { kind: 'message_received', keywords: ['assignme'] }, start: 'w', steps: [{ id: 'w', kind: 'wait', minutes: 30, next: 'r' }, reply('r', 'Later', 'لاحقًا')] });
+    const wa = fresh();
+    await say(wa, 'assignme please').expect(200);
+    await work();
+    const c = await conv(wa);
+    const agentId = (await agent.get('/v1/me/access').expect(200)).body.membershipId;
+    await owner.post(`/v1/conversations/${c.id}/assign`, { membershipId: agentId, expectedVersion: c.version }).expect(200);
+    expect((await runsFor(wa)).map((r) => [r.status, r.reason])).toEqual([['stopped', 'person_assigned']]);
+  });
+
+  it('L7/L8: an incomplete draft can be saved; publishing lists what is missing, including template values', async () => {
+    const id = (await owner.post('/v1/automations', { name: 'Half done' }).expect(201)).body.id;
+    let w = (await owner.get(`/v1/automations/${id}`).expect(200)).body;
+    const draft = { trigger: { kind: 'message_received' }, start: 'a', steps: [
+      { id: 'a', kind: 'add_tag', tagId: '', next: 'b' }, { id: 'b', kind: 'send_reply', text: { en: '', ar: '' }, next: 'c' }, { id: 'c', kind: 'handoff', note: '', next: null }] };
+    const saved = (await owner.put(`/v1/automations/${id}/draft`, { draft, expectedVersion: w.version }).expect(200)).body;
+    expect(saved.problems.map((p: { code: string }) => p.code).sort()).toEqual(['empty_message', 'empty_note', 'unknown_tag']);
+    w = (await owner.get(`/v1/automations/${id}`).expect(200)).body;
+    await owner.post(`/v1/automations/${id}/publish`, { expectedVersion: w.version }).expect(422);
+  });
+});

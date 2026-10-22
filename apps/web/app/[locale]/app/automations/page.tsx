@@ -128,12 +128,16 @@ function Editor({ id, locale }: { id: string; locale: Locale }) {
   const [members, setMembers] = useState<Option[]>([]);
   const [templates, setTemplates] = useState<Option[]>([]);
   const [run, setRun] = useState<Run | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState(false);
 
   const load = useCallback(async () => {
     const x = await api<Full>(`/v1/automations/${id}`);
     setW(x); setDef(x.draft); setName(x.name); setProblems(x.problems);
   }, [id]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    load().then(() => setLoadError(null)).catch((e) => setLoadError(e instanceof ApiError && e.status === 404 ? d.notFound : t(locale).common.error));
+  }, [load, d, locale]);
   useEffect(() => {
     api<Array<{ id: string; name: string }>>('/v1/tags').then((x) => setTags(x.map((y) => ({ id: y.id, label: y.name })))).catch(() => undefined);
     api<Array<{ id: string; fullName: string; status: string; roles: string[] }>>('/v1/members')
@@ -150,6 +154,12 @@ function Editor({ id, locale }: { id: string; locale: Locale }) {
       await load().catch(() => undefined);
     } finally { setBusy(false); }
   }
+  if (loadError) return (
+    <div className="mt-4">
+      <Link href={`/${locale}/app/automations`} className="text-sm text-teal underline">{d.back}</Link>
+      <p role="alert" className="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">{loadError}</p>
+    </div>
+  );
   if (!w || !def) return <p className="mt-4 text-sm text-slate-700">{t(locale).common.loading}</p>;
   const ids = def.steps.map((s) => s.id);
   const update = (i: number, s: Step) => setDef({ ...def, steps: def.steps.map((x, j) => (j === i ? s : x)) });
@@ -190,7 +200,22 @@ function Editor({ id, locale }: { id: string; locale: Locale }) {
         }, d.published)}>{d.publish}</button>
         {w.status === 'active' && <button type="button" className="btn-secondary" disabled={busy} onClick={() => act(() => api(`/v1/automations/${id}/pause`, { method: 'POST', body: { expectedVersion: w.version } }), d.pausedNote)}>{d.pause}</button>}
         {w.status === 'paused' && <button type="button" className="btn-secondary" disabled={busy} onClick={() => act(() => api(`/v1/automations/${id}/resume`, { method: 'POST', body: { expectedVersion: w.version } }), d.resumedNote)}>{d.resume}</button>}
+        {!confirmArchive && <button type="button" className="btn-secondary" disabled={busy} onClick={() => setConfirmArchive(true)}>{d.archive}</button>}
       </div>
+      {confirmArchive && (
+        <div role="alertdialog" aria-labelledby="e-arch" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <p id="e-arch">{d.archiveConfirm}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button type="button" className="btn-primary" disabled={busy} onClick={async () => {
+              setBusy(true);
+              try { await api(`/v1/automations/${id}/archive`, { method: 'POST', body: { expectedVersion: w.version } }); window.location.assign(`/${locale}/app/automations`); }
+              catch (e) { setConfirmArchive(false); setNotice({ ok: false, text: e instanceof ApiError ? (d.errors[e.code] ?? t(locale).common.error) : t(locale).common.error }); await load().catch(() => undefined); }
+              finally { setBusy(false); }
+            }}>{d.archiveYes}</button>
+            <button type="button" className="btn-secondary" onClick={() => setConfirmArchive(false)}>{d.cancel}</button>
+          </div>
+        </div>
+      )}
       {notice && <p role={notice.ok ? 'status' : 'alert'} className={`mt-3 rounded-lg border px-3 py-2 text-sm ${notice.ok ? 'border-green-300 bg-green-50 text-green-900' : 'border-red-300 bg-red-50 text-red-800'}`}>{notice.text}</p>}
       {problems.length > 0 && (
         <div role="status" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
@@ -397,11 +422,13 @@ function FlowDiagram({ def, locale }: { def: Def; locale: Locale }) {
     const rows = new Map<number, string[]>();
     for (const [id, dpt] of depth) rows.set(dpt, [...(rows.get(dpt) ?? []), id]);
     const pos = new Map<string, { x: number; y: number }>();
-    for (const [dpt, list] of rows) list.forEach((id, i) => pos.set(id, { x: 20 + i * 200, y: 20 + dpt * 90 }));
     const width = Math.max(240, ...[...rows.values()].map((l) => 40 + l.length * 200));
+    // Arabic reads right to left: the first branch starts on the right (review of W2.1, UI).
+    const rtl = locale === 'ar';
+    for (const [dpt, list] of rows) list.forEach((id, i) => pos.set(id, { x: rtl ? width - 180 - i * 200 : 20 + i * 200, y: 20 + dpt * 90 }));
     const height = 40 + rows.size * 90;
-    return { pos, width, height, byId };
-  }, [def]);
+    return { pos, width, height, byId, rtl };
+  }, [def, locale]);
   if (layout.pos.size === 0) return <p className="mt-2 text-sm text-slate-700">{d.noFlow}</p>;
   const edges: Array<{ from: string; to: string; label?: string }> = [];
   for (const s of def.steps) {
@@ -420,7 +447,7 @@ function FlowDiagram({ def, locale }: { def: Def; locale: Locale }) {
           return (
             <g key={i}>
               <line x1={a.x + 80} y1={a.y + 44} x2={b.x + 80} y2={b.y} stroke="currentColor" strokeWidth="1.5" markerEnd="url(#arrow)" />
-              {e.label && <text x={(a.x + b.x) / 2 + 86} y={(a.y + 44 + b.y) / 2} fontSize="12" fill="currentColor">{e.label}</text>}
+              {e.label && <text x={(a.x + b.x) / 2 + (layout.rtl ? 74 : 86)} y={(a.y + 44 + b.y) / 2} fontSize="12" fill="currentColor" textAnchor={layout.rtl ? 'end' : 'start'} direction={layout.rtl ? 'rtl' : 'ltr'}>{e.label}</text>}
             </g>
           );
         })}

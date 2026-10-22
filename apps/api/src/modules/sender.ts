@@ -150,9 +150,15 @@ export class Sender {
       // Automation messages: sent only while their run has not been stopped (a person replied or paused replies, the
       // automation was paused) and the automation is still active (W2.1, FR-206).
       const auto = row.automation_run_id
-        ? (await tx.query<{ status: string; mode: string; workflow_status: string }>(
-            `SELECT r.status, r.mode, w.status AS workflow_status FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id WHERE r.id = $1`,
-            [row.automation_run_id])).rows[0] ?? null
+        ? (await tx.query<{ status: string; mode: string; workflow_status: string; person_since: boolean; resolved: boolean }>(
+            // FOR SHARE: a person stopping the run at this moment waits for this check, or this check sees it (L5).
+            `SELECT r.status, r.mode, w.status AS workflow_status,
+                    EXISTS (SELECT 1 FROM messages h WHERE h.conversation_id = m.conversation_id AND h.direction = 'out'
+                            AND h.sent_by_membership_id IS NOT NULL AND h.created_at > m.created_at) AS person_since,
+                    (c.status = 'resolved') AS resolved
+             FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id JOIN messages m ON m.id = $2
+             JOIN conversations c ON c.id = m.conversation_id WHERE r.id = $1 FOR SHARE OF r`,
+            [row.automation_run_id, row.message_id])).rows[0] ?? null
         : null;
       const ctx = (await tx.query<{
         opted_out: boolean; last_inbound_at: Date | null; paused: boolean; paused_by: string | null; channel_status: string;
@@ -190,6 +196,9 @@ export class Sender {
         : auto ? (
           auto.mode !== 'live' ? 'rehearsal_only'
           : auto.status === 'stopped' || auto.status === 'skipped' ? 'automation_stopped'
+          // Even a finished run's message is not sent once a person has written or the conversation is resolved (M4).
+          : auto.person_since ? 'person_replied'
+          : auto.resolved ? 'conversation_resolved'
           : auto.workflow_status !== 'active' ? 'automation_paused'
           : ctx.paused ? 'replies_paused'
           : null)

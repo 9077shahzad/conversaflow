@@ -398,7 +398,8 @@ const en = {
     } as Record<string, string>,
   },
   automations: {
-    title: 'Automations', intro: 'Answer and route customer messages automatically. Every automation can be rehearsed with a sample message first; a person replying or pausing replies always stops it.',
+    title: 'Automations', notFound: 'This automation no longer exists or was archived.', archive: 'Archive', archiveYes: 'Yes, archive it', cancel: 'Cancel',
+    archiveConfirm: 'Archiving stops this automation and any runs under way, and removes it from the list. Its history is kept.', intro: 'Answer and route customer messages automatically. Every automation can be rehearsed with a sample message first; a person replying or pausing replies always stops it.',
     noAccess: 'Automations need the automation management permission and two-step sign-in.', needsMfa: 'Set up two-step sign-in to manage automations.',
     newName: 'New automation name', create: 'Create', yours: 'Your automations', none: 'No automations yet.',
     statuses: { draft: 'Draft', active: 'Active', paused: 'Paused', archived: 'Archived' } as Record<string, string>,
@@ -855,7 +856,8 @@ const ar: typeof en = {
     } as Record<string, string>,
   },
   automations: {
-    title: 'الأتمتة', intro: 'الرد على رسائل العملاء وتوجيهها تلقائيًا. يمكن تجربة كل أتمتة برسالة نموذجية أولًا، ويوقفها دائمًا ردّ أحد الفريق أو إيقاف الردود مؤقتًا.',
+    title: 'الأتمتة', notFound: 'هذه الأتمتة لم تعد موجودة أو أُرشفت.', archive: 'أرشفة', archiveYes: 'نعم، أرشفها', cancel: 'إلغاء',
+    archiveConfirm: 'تؤدي الأرشفة إلى إيقاف هذه الأتمتة وأي تشغيل جارٍ، وإزالتها من القائمة. يُحتفظ بسجلها.', intro: 'الرد على رسائل العملاء وتوجيهها تلقائيًا. يمكن تجربة كل أتمتة برسالة نموذجية أولًا، ويوقفها دائمًا ردّ أحد الفريق أو إيقاف الردود مؤقتًا.',
     noAccess: 'تتطلب الأتمتة صلاحية إدارة الأتمتة والتحقق بخطوتين.', needsMfa: 'فعّل التحقق بخطوتين لإدارة الأتمتة.',
     newName: 'اسم الأتمتة الجديدة', create: 'إنشاء', yours: 'الأتمتة لديك', none: 'لا توجد أتمتة بعد.',
     statuses: { draft: 'مسودة', active: 'نشطة', paused: 'موقوفة مؤقتًا', archived: 'مؤرشفة' } as Record<string, string>,
