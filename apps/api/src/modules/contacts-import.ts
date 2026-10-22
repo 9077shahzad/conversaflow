@@ -234,11 +234,12 @@ export class ContactImportService {
   async commit(actor: TenantActor, id: string) {
     if (!isUuid(id)) throw Errors.notFound('Import');
     return withContext(this.deps.db, actor, async (tx) => {
-      const b = (await tx.query<{ status: string; rows: ParsedRow[]; consent_evidence: string | null; created_at: Date }>(
-        'SELECT status, rows, consent_evidence, created_at FROM import_batches WHERE id = $1 FOR UPDATE', [id])).rows[0];
+      // Expiry is decided by the database clock, the same clock the worker uses to clear old previews (recheck Info).
+      const b = (await tx.query<{ status: string; rows: ParsedRow[]; consent_evidence: string | null; expired: boolean }>(
+        `SELECT status, rows, consent_evidence, created_at < now() - interval '24 hours' AS expired FROM import_batches WHERE id = $1 FOR UPDATE`, [id])).rows[0];
       if (!b) throw Errors.notFound('Import');
       if (b.status !== 'previewed') throw Errors.conflict('import_done', 'This import has already been applied or undone.');
-      if (Date.now() - b.created_at.getTime() > 24 * 3600_000) throw Errors.conflict('preview_expired', 'This preview is more than a day old. Preview the file again.');
+      if (b.expired) throw Errors.conflict('preview_expired', 'This preview is more than a day old. Preview the file again.');
       const outcomes: Array<{ contactId: string; created: boolean; consentGranted: boolean }> = [];
       let created = 0; let updated = 0; let consentGranted = 0; let consentRefused = 0; let consentWithdrawnBefore = 0; let skipped = 0;
       // Numbers in ascending order: the webhook takes its per-number locks in the same order, so the two never deadlock

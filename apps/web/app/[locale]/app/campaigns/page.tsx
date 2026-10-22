@@ -230,9 +230,9 @@ function SuppressionForm({ locale, busy, onAdd }: { locale: Locale; busy: boolea
   const [note, setNote] = useState('');
   return (
     <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); onAdd({ waNumber: n, reason, note: note || undefined }); setN(''); setNote(''); }}>
-      <div>
+      <div className="min-w-0 max-w-full">
         <label htmlFor="s-n" className="block text-sm font-medium text-slate-900">{d.number}</label>
-        <input id="s-n" required dir="ltr" inputMode="tel" pattern="\+?[0-9]{6,20}" value={n} onChange={(e) => setN(e.target.value)} className="mt-1 rounded-lg border border-slate-300 px-3 py-2 text-base" />
+        <input id="s-n" required dir="ltr" inputMode="tel" pattern="\+?[0-9]{6,20}" value={n} onChange={(e) => setN(e.target.value)} className="mt-1 w-full max-w-full rounded-lg border border-slate-300 px-3 py-2 text-base sm:w-56" />
       </div>
       <div>
         <label htmlFor="s-r" className="block text-sm font-medium text-slate-900">{d.reason}</label>

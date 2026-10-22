@@ -182,9 +182,10 @@ function Importer({ locale, onDone }: { locale: Locale; onDone: () => void }) {
                 <tbody>
                   {preview.sample.map((r) => (
                     <tr key={r.line}>
-                      <td className="pe-3 tabular-nums" dir="ltr">+{r.phone}</td>
-                      <td className="pe-3" dir="auto">{r.name ?? '—'}</td>
-                      <td className="pe-3">{d.outcome[r.outcome] ?? r.outcome}</td>
+                      {/* Space on both sides: in Arabic the number (left to right) sits next to right-to-left text. */}
+                      <td className="px-2 ps-0 tabular-nums"><bdi dir="ltr">+{r.phone}</bdi></td>
+                      <td className="px-2"><bdi>{r.name ?? '—'}</bdi></td>
+                      <td className="px-2">{d.outcome[r.outcome] ?? r.outcome}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -201,7 +202,8 @@ function Importer({ locale, onDone }: { locale: Locale; onDone: () => void }) {
           <ul className="mt-2 grid gap-2">
             {batches.map((b) => (
               <li key={b.id} className="flex flex-wrap items-center gap-2 text-sm text-slate-800">
-                <span dir="auto" className="font-medium">{b.fileName}</span>
+                {/* A file name keeps its own order ("name.csv") in either language. */}
+                <bdi dir="ltr" className="font-medium">{b.fileName}</bdi>
                 <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold">{d.statuses[b.status] ?? b.status}</span>
                 {b.summary.result && <span>{fill(d.importedResult, { created: String(b.summary.result.created), updated: String(b.summary.result.updated), consent: String(b.summary.result.consentGranted), skipped: String(b.summary.result.skipped) })}</span>}
                 {b.status === 'imported' && (undoing === b.id

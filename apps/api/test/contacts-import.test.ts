@@ -4,7 +4,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { signBody } from '../src/modules/channels';
 import { ContactImportService, normalisePhone, parseContactsCsv, readCsv } from '../src/modules/contacts-import';
@@ -312,6 +312,20 @@ describe('review of slice 5', () => {
   });
 });
 
+/** Makes a preview look older (owner role, with temporary policies inside one transaction). */
+async function ageBatch(id: string, age: string) {
+  const c = await t.ownerDb.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('CREATE POLICY test_age ON import_batches FOR UPDATE TO CURRENT_USER USING (true) WITH CHECK (true)');
+    await c.query('CREATE POLICY test_age_read ON import_batches FOR SELECT TO CURRENT_USER USING (true)');
+    expect((await c.query(`UPDATE import_batches SET created_at = now() - $2::interval WHERE id = $1`, [id, age])).rowCount).toBe(1);
+    await c.query('DROP POLICY test_age ON import_batches');
+    await c.query('DROP POLICY test_age_read ON import_batches');
+    await c.query('COMMIT');
+  } finally { c.release(); }
+}
+
 /** Runs `hold` in its own company transaction and keeps it open until `release` is called; rolls back afterwards. */
 function holdOpen(hold: (tx: import('@conversaflow/database').Tx) => Promise<unknown>) {
   let release!: () => void;
@@ -379,20 +393,22 @@ describe('recheck of the slice 5 fixes', () => {
   it('L5: previews never imported are cleared after a day for every company, by the worker, without a new preview', async () => {
     const wa = fresh();
     const p = (await preview(owner, `phone,name\n+${wa},Kept Too Long\n`).expect(201)).body;
-    // Make the preview look 25 hours old (owner role, with temporary policies inside one transaction).
-    const c = await t.ownerDb.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query('CREATE POLICY test_age ON import_batches FOR UPDATE TO CURRENT_USER USING (true) WITH CHECK (true)');
-      await c.query('CREATE POLICY test_age_read ON import_batches FOR SELECT TO CURRENT_USER USING (true)');
-      expect((await c.query(`UPDATE import_batches SET created_at = now() - interval '25 hours' WHERE id = $1`, [p.id])).rowCount).toBe(1);
-      await c.query('DROP POLICY test_age ON import_batches');
-      await c.query('DROP POLICY test_age_read ON import_batches');
-      await c.query('COMMIT');
-    } finally { c.release(); }
+    await ageBatch(p.id, '25 hours');
     expect(await ContactImportService.expirePreviews(t.deps.db)).toBeGreaterThanOrEqual(1);
     const left = (await app((tx) => tx.query<{ rows: unknown[]; file_name: string }>('SELECT rows, file_name FROM import_batches WHERE id = $1', [p.id]))).rows[0]!;
     expect(left).toEqual({ rows: [], file_name: 'customers.csv' });
     await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(409);
+  });
+
+  it('expiry is decided by the database clock: an app clock running behind cannot import an expired preview', async () => {
+    const wa = fresh();
+    const p = (await preview(owner, `phone\n+${wa}\n`).expect(201)).body;
+    await ageBatch(p.id, '24 hours 5 seconds');
+    const realNow = Date.now.bind(Date);
+    const behind = vi.spyOn(Date, 'now').mockImplementation(() => realNow() - 60_000);   // app clock one minute behind
+    try {
+      expect((await owner.post(`/v1/contacts/imports/${p.id}/commit`).expect(409)).body.error.code).toBe('preview_expired');
+    } finally { behind.mockRestore(); }
+    expect(await contactByNumber(wa)).toBeUndefined();
   });
 });
