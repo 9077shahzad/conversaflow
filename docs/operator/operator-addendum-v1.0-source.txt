@@ -1,0 +1,552 @@
+ConversaFlow Operator BRD Addendum and Production Implementation Prompt
+
+Version 1.0
+Prepared for Muhammad Shahzad
+Prepared on 23 October 2026
+Recipient Claude working in the existing ConversaFlow development environment
+Status Owner requested requirements and implementation instructions
+Delivery target Working production capability with verified release evidence
+
+1 Mission and working instructions
+
+Act as the lead software architect, product engineer and delivery owner for the existing ConversaFlow product. Implement this addendum within the existing application and carry the work through verification and controlled production release. Produce working software, migrations, integrations, customer interfaces and operating documentation. A plan, prototype, attractive dashboard or collection of simulated tests does not complete this assignment.
+
+Build Conversa Operator as a ConversaFlow capability that turns a customer enquiry into a correctly priced, accepted, scheduled, delivered and financially reconciled service job. Use AI to understand and coordinate; use trusted business rules and systems to authorize and execute actions.
+
+This is an addition to the existing BRD, not permission to discard the current product, rename ConversaFlow, rewrite working modules, change existing commercial rules or silently remove pending requirements. Preserve the inbox, reliable sending, templates, campaigns, contacts, assignment, reporting, authentication, permissions and other existing capabilities.
+
+Start by examining the actual repository, applicable repository instructions, current BRD, migrations, tests, deployment configuration and integration contracts. Treat earlier chat descriptions of features as provisional until confirmed in code and a running environment. Distinguish implemented, tested, simulated, staging verified, production deployed and production enabled.
+
+Continue from audit into implementation without waiting for approval of routine engineering choices. Resolve ordinary technical blockers, document assumptions and continue independent work while genuine external dependencies are pending. Follow applicable environment permissions and security rules. Do not bypass required approvals, invent credentials, purchase services without an authorized budget, or perform unapproved destructive operations. The owner requests production delivery; inspect the deployment authority available in this environment and use the authorized release process.
+
+When a dependency genuinely requires owner action, provide the exact missing item, why it is needed, the smallest action required and the work already completed. Never use a vague blocker as a reason to abandon unrelated work. Never replace a real integration with a simulation and report it as live.
+
+2 Product outcome and starting market
+
+The first production vertical is AC maintenance and standardized home service bookings for service companies in Saudi Arabia and the UAE. Start with one complete AC maintenance workflow. Make service definitions configurable so cleaning can be added using the same architecture after the first workflow works.
+
+ConversaFlow is the customer interaction and orchestration layer. DOP may supply quoting and job operations; Field Force may supply workforce execution. Confirm their actual interfaces before integration. A tenant must also be able to connect an existing external job system through the connector contract. Buying every product in the portfolio must not be a prerequisite.
+
+The business outcome is more completed paid work with less coordination effort and fewer operational mistakes. A billion dollar valuation is an ambition, not a software acceptance criterion, forecast or marketing promise.
+
+Core customer journey:
+
+1. A customer sends text, a voice note or a photo.
+2. Conversa gathers only missing information.
+3. Approved rules determine a quote or an inspection booking.
+4. Real capacity is checked and any temporary slot hold is explicit.
+5. The customer accepts the exact quote version and booking terms.
+6. The job is created in the authoritative operations system.
+7. Dispatch and field delivery are coordinated.
+8. Completion records and customer acceptance are recorded.
+9. Payment is verified from the financial system.
+10. Exceptions remain visible until resolved.
+
+3 Competitive standard and evidence
+
+Research checked on 23 October 2026 shows that competing products already advertise AI actions, bookings, live business context, human handover and workflow testing. Treat those as baseline expectations.
+
+• Wati Astra advertises multilingual interaction, connected tool actions, appointment booking and CRM updates.
+• Intercom Fin Procedures documents business rules, system connectors, escalation and simulations.
+• Jobber Receptionist documents service enquiries and booking against configured availability.
+• Respond.io advertises agents for lead qualification, CRM updates, routing and connected customer journeys.
+
+These are vendor descriptions, not independent performance measurements. Do not claim that competitors lack a feature because their public pages do not mention it. Do not copy competitor designs, proprietary materials or unsupported marketing claims.
+
+ConversaFlow’s intended differentiation is a complete, auditable service workflow with strong Arabic usability, operational constraints, persistent exception handling, tenant isolation and evidence linking customer promises to delivered work and payment.
+
+Create a dated competitor baseline and a repeatable benchmark covering intake quality, unnecessary questions, booking correctness, pricing correctness, handover completeness, recovery, usability and total cost per completed workflow. If competitor trial access is unavailable, mark comparative performance unverified. Our own measured acceptance criteria still apply.
+
+4 Scope and priority
+
+R1 means required for the first production release:
+
+• Preserve and complete the existing messaging foundation needed by the workflow.
+• Arabic and English text and voice note intake.
+• Optional photo intake with secure handling and human fallback.
+• Configurable catalogue, service area, rate rules and approval controls.
+• Quotes, acceptance, capacity holds, booking and dispatch integration.
+• Job updates, completion evidence, payment reconciliation and exception recovery.
+• Human takeover, operator controls and audit.
+• Customer friendly configuration and reporting.
+• Tenant isolation, cost controls, testing, deployment and operational support.
+
+R1 must include the complete workflow, not just intake and booking. Implement it in small vertical slices rather than attempting every screen before proving any integration.
+
+R2 means explicitly future capability:
+
+• Real time voice calling where supported by the authorized provider.
+• Further social channels and deeper enterprise connectors.
+• Additional industry packs, including restaurant workflows.
+• Partner marketplace, cross business agent transactions and enterprise dedicated deployments.
+
+Design extension points for R2. Do not represent R2 as delivered, and do not make it a hidden dependency of R1.
+
+5 Customer experience requirements
+
+UX-01 Keep the public brand ConversaFlow. Conversa Operator can be a module name inside the product. Use familiar labels such as Inbox, Jobs, Quotes, Approvals, Exceptions, Reports and Settings. Keep engineering terminology out of customer screens.
+
+UX-02 Provide complete English and Arabic interfaces, proper RTL layouts, readable mixed Arabic and English content, locale aware dates and numbers, and clear currency formatting. Test actual Arabic text and PDF output rather than translating labels alone.
+
+UX-03 Let customers complete the service journey through WhatsApp and secure mobile friendly links without installing an application. Offer short plain language replies and clear actions such as Review quote, Confirm booking, Change appointment and Talk to a person.
+
+UX-04 Do not repeatedly ask for information already supplied. Confirm ambiguous numbers, addresses, dates or low quality voice transcription before taking a consequential action. Resolve relative dates using the customer’s confirmed location and business timezone. Preserve original text alongside normalized values where useful.
+
+UX-05 Display an honest status. Distinguish quote sent from quote accepted, slot held from booking confirmed, request recorded from job created, job finished from customer accepted, and invoice issued from paid.
+
+UX-06 Make customer costs clear before acceptance: service scope, exclusions, tax, callout charges, deposits, time window, expiry and cancellation terms. Show any change and obtain renewed acceptance where necessary.
+
+UX-07 Identify the assistant clearly as the company’s automated assistant. Make human help easy to request. Do not imitate a named employee or conceal automation.
+
+UX-08 Meet WCAG 2.2 AA requirements applicable to the implemented customer and staff web interfaces. Include keyboard access, visible focus, accessible form errors, adequate touch targets, screen reader labels, contrast and reduced motion. Record manual as well as automated checks.
+
+UX-09 Every interactive screen must have useful loading, empty, error, partial failure, disconnected and permission denied states. Failed actions must explain the next practical step without exposing stack traces or confidential configuration.
+
+UX-10 Give tenant administrators a guided setup: connect channel, configure services and prices, set working areas and hours, connect operations and payment systems, define approvals, test the journey, then enable the module. Preserve progress and identify exactly which dependencies remain.
+
+Example customer message:
+أحتاج صيانة أربع وحدات تكييف غداً مساءً في الخبر.
+
+A suitable clarification could be:
+هل الوحدات من نوع سبليت؟ وما اسم الحي؟
+
+Until availability is actually checked:
+سأتحقق من المواعيد المتاحة ثم أؤكد لك السعر والوقت قبل الحجز.
+
+These are sample messages, not fixed scripts for every situation.
+
+6 Functional requirements
+
+FR-01 Intake and identity
+Accept supported text, voice notes and images through the official channel integration. Link enquiries to tenant scoped contacts and service locations. A phone number is not universal proof of identity or authority. Require suitable verification for sensitive records and changes. Do not merge people across tenants or merge shared phone numbers automatically.
+
+FR-02 Structured service request
+Capture service type, quantity, equipment or property details, location, preferred time, language, access restrictions and customer contact preferences. Distinguish unknown, unavailable, not applicable and confirmed. Missing information must not become a false default.
+
+FR-03 Multimodal handling
+Transcribe supported voice notes and let staff inspect the transcript. Use photos to gather context and identify missing evidence, not to certify safety or make a guaranteed repair diagnosis. Set file size and duration limits, scan uploads, validate actual file types and provide a graceful fallback when processing fails. Quarantine files until scanning succeeds; do not pass unscanned attachments to models, staff downloads or outbound messages when scanning is unavailable.
+
+FR-04 Business knowledge
+Use tenant approved, versioned service information with source references, effective dates and review ownership. Operational facts such as price, available capacity and payment status come from their authoritative systems. A retrieved document cannot override executable pricing or permission rules. Flag conflicting or outdated content.
+
+FR-05 Catalogue and eligibility
+Configure service definitions, standardized tasks, exclusions, quantities, coverage areas, opening hours, crew skills, duration assumptions and any inspection requirement. Unsupported requests go to an appropriate human queue. Technical repairs requiring inspection must not receive invented final repair prices.
+
+FR-06 Pricing and margin
+Calculate all amounts with deterministic code using integer minor units or suitable decimal types. Configure tax treatment, minimum charges, travel charges, discounts, deposits and validity periods per tenant and jurisdiction. Use configured cost assumptions for margin checks and distinguish estimated from actual margin. AI must not invent prices, taxes, costs or unauthorized discounts.
+
+FR-07 Quote lifecycle
+Create immutable quote versions with scope, amount, currency, tax breakdown, rate version, expiry and customer terms. Store what was sent and what was accepted. A significant change creates a new version. Acceptance of an expired, superseded or materially changed quote must be rejected or routed for renewal.
+
+FR-08 Acceptance and authorization
+Use a secure acceptance process tied to the customer, quote version, job intent and tenant. Record the time, channel and relevant terms version. Prevent replay. An unclear chat response must be clarified if acceptance cannot be established reliably. Refunds, sensitive account changes and exceptional discounts require the configured authorization level.
+
+FR-09 Availability and reservations
+Read actual capacity, skills, service duration, travel buffers, territory and business hours. Show when the information was checked. Create expiring holds where supported; otherwise clearly label availability as provisional. Atomically enforce the capacity constraint when committing. Two concurrent customers must not receive the same exclusive resource.
+
+FR-10 Booking
+Create one booking and one appropriate job reference after prerequisites are met. Explain the committed service window and any remaining conditions. Rescheduling or cancellation must recheck capacity, applicable charges and permissions. Preserve booking history rather than silently overwriting commitments.
+
+FR-11 Dispatch and field execution
+Use the tenant’s configured operations connector to assign suitable workers and maintain job status. Handle rejected assignments, unavailable staff, late arrival and material constraints. Do not claim live tracking unless an authorized location feed exists and is sufficiently fresh. Display the last update and realistic uncertainty.
+
+FR-12 Completion evidence
+Configure required checklists, permitted photo evidence, worker notes, customer acceptance and any review requirement. Missing evidence creates an exception. A photo does not by itself prove service quality. Keep completion, customer acceptance and financial settlement as separate statuses.
+
+FR-13 Payments
+Use an existing authorized payment provider and hosted payment pages. Keep service customer payments separate from ConversaFlow subscription billing. Verify signed provider events and reconcile transaction amount, currency, tenant, merchant and invoice. Screenshots, chat statements and browser redirects must not mark an invoice as paid.
+
+FR-14 Payment exceptions
+Support pending, failed, partial, overpaid, refunded, disputed and reconciliation required states as relevant to the chosen provider. Handle late payment after slot expiry without inventing availability. Do not blindly repeat an ambiguous charge or refund. Use provider lookup and reconciliation first. Any actual charge needs an authorized participant, method and amount.
+
+FR-15 Persistent recovery
+Track each incomplete workflow until an explicit terminal outcome or human handover. Recover from worker restarts, timeouts, provider rate limits, lost responses and delayed events. Distinguish retryable errors, business rejection, unknown external outcome and owner action required. Give staff an actionable exception queue.
+
+FR-16 Human takeover
+Pause automated replies and writes for the conversation when an agent takes ownership or the customer requests a person. Prevent in flight generation from posting after takeover. Transfer collected facts, quote and job references, decisions, pending actions and the reason for escalation. Resume automation only through an explicit authorized handback.
+
+FR-17 Operational record
+Maintain linked records for enquiry, customer intent, quote version, accepted scope, booking, assignment, execution evidence, invoice, payment and exceptions. Store timestamps, actor, source, external reference and relevant rule version. This traceability is a core product capability.
+
+FR-18 Follow up and retention
+Support customer approved reminders, completion surveys, service renewal reminders and follow up on open quotes. Apply messaging permissions and quiet hours at send time. Separate service communication preferences from marketing consent. Explain skip reasons in reports.
+
+FR-19 Reporting
+Show the enquiry to paid job funnel, time to first useful response, quote acceptance, cancellations, human intervention, coordination time, completed jobs, reconciliation gaps and operating costs. Define each metric, denominator, timezone and refresh time. Preserve unknown attribution and cost values instead of treating them as zero.
+
+FR-20 Campaign and ad continuity
+Preserve existing campaigns and attribution work. Where authorized metadata is available, link the originating campaign or ad to enquiries and paid outcomes. Respect provider limits. Label observational attribution clearly; it does not prove that advertising or AI caused incremental sales.
+
+FR-21 Tenant administration
+Let authorized users configure services, approval thresholds, integrations, AI mode, spending limits, workflow versions and evidence requirements. Validate changes, preview their effect and keep change history. Production workflow changes require a tested version and controlled activation.
+
+FR-22 Procedure authoring
+Offer tested templates and a guided editor. An administrator may describe a process in plain language, but AI generated rules remain drafts until reviewed, validated and explicitly activated. Block impossible or conflicting workflows. Keep older workflow versions available for in flight work.
+
+FR-23 Automation modes
+Support Off, Assist, Approval required and Limited autonomous modes per tenant and workflow. AI is off by default for an existing tenant until an authorized administrator enables it. A tenant and platform emergency pause must prevent new outbound actions and cause queued workers to recheck permission before execution.
+
+FR-24 Metering and commercial controls
+Meter model usage, processing, messaging costs and relevant workflow activity. Display allowances, estimated charges, alerts and cost ceilings. Prevent retry loops from causing uncontrolled costs. Avoid unlimited usage promises. Changes to subscriptions or paid services require the appropriate commercial authority.
+
+7 Architecture requirements
+
+AR-01 Inspect and extend the actual stack. Earlier plans referenced TypeScript, Next.js and PostgreSQL, but the repository is authoritative. Prefer a modular monolith with clearly separated workers and integration boundaries when suitable. Do not introduce a microservice estate, custom foundation model or graph database without a documented need and operating budget.
+
+AR-02 Implement these logical components, reusing existing modules where possible:
+
+• Channel adapters and webhook ingress.
+• Tenant identity and authorization.
+• Conversation and customer context.
+• Media processing and knowledge retrieval.
+• AI planner with structured outputs.
+• Deterministic policy and validation layer.
+• Typed action registry and integration connectors.
+• Durable workflow execution and timers.
+• Quote, booking and outcome records.
+• Exception management and human control.
+• Usage metering, audit and observability.
+• Customer links and staff interfaces.
+
+AR-03 Keep the AI planner separated from action execution. Every write passes through server side validation of tenant, actor, permissions, business constraints, current state, applicable approval and idempotency. Do not give the model unrestricted database access, shell access, arbitrary URLs or arbitrary integration credentials.
+
+AR-04 Store workflow state durably. Long running work must survive process restarts and deployments and must not depend on browser state, an in memory timer or one request handler. Evaluate the existing queue and database implementation against a mature durable workflow engine such as Temporal. Select the simplest option that meets recovery requirements and document the tradeoff, cost and operational ownership.
+
+AR-05 Use a transactional outbox or equivalent proven mechanism to publish committed events, and an inbox or equivalent deduplication ledger for incoming events. Persist accepted work before acknowledging receipt according to provider timing requirements. Design for at least once delivery with idempotent effects. Do not claim universal exactly once execution across external systems.
+
+AR-06 Permit bounded parallel read only checks when useful, such as territory, catalogue and capacity lookups. Revalidate the relevant versions and capacity at commitment. Side effects with dependencies must follow their required order. Parallelism must not create inconsistent quotes or duplicate commitments.
+
+AR-07 Use typed schemas, versioned APIs, bounded timeouts, rate limits, retry policies with jitter, dead letter handling and controlled replay. On an ambiguous external response, query the authoritative service before retrying a consequential action. Compensation must follow business policy; a database rollback cannot undo an external payment or message.
+
+AR-08 Define state machines explicitly. Keep quote, booking, delivery and payment state separate. A service case can be open, waiting for customer, waiting for approval, scheduled, in progress, exception, handed over or closed. Quote accepted does not imply booked; booked does not imply paid; paid does not imply delivered. Specify allowed transitions, prerequisites, timeout behavior and authorized actors.
+
+AR-09 Version workflow definitions and retain their schemas and rules for in flight runs. Test worker compatibility before deployment. Do not silently reinterpret historical acceptance or replay an old financial instruction using a new price.
+
+8 Data model and source ownership
+
+Produce an actual schema diagram and migration plan after repository inspection. Candidate entities include:
+tenant, user, membership, role, contact, contact identity, consent record, service location, conversation, message, attachment, service request, catalogue item, rate version, quote, quote version, acceptance, resource, capacity hold, booking, external job reference, assignment, completion evidence, customer signoff, invoice reference, payment event, reconciliation exception, workflow definition, workflow run, action attempt, approval, integration connection, inbound event, outbox event, usage entry and audit entry.
+
+Reuse existing tables where their meaning is compatible. Avoid duplicating whole CRM or job systems merely to support orchestration.
+
+For each entity define:
+
+• Tenant scope, identifiers, ownership and retention.
+• Required, optional and explicitly unknown fields.
+• Uniqueness, foreign keys, indexes and concurrency control.
+• Currency and time semantics.
+• Encryption or access restrictions for sensitive fields.
+• Authoritative external system and permitted synchronization direction.
+
+Choose one source of truth per business fact for each tenant. If DOP owns quotes and jobs, ConversaFlow must not create a second independent master. Use external identifiers, version checks and reconciliation. If a tenant runs a supported native workflow, state exactly which facts ConversaFlow owns.
+
+Every event needs a stable event ID, event type and schema version, tenant, aggregate reference, occurred time, received time, correlation ID and causation or action reference. Minimize personal data in event envelopes. Distinguish event time from arrival order.
+
+Use UTC internally with the relevant tenant or service timezone stored explicitly. Store accepted local appointment windows as well as their unambiguous instants. Handle daylight saving transitions for future markets. Do not assume all currencies use the same decimal precision.
+
+9 Integration contracts
+
+Create a capability matrix for each connector: catalogue, price calculation, capacity lookup, hold, quote creation, acceptance, booking, job creation, assignment, status, completion, invoice and payment lookup.
+
+Specify request and response schemas, authentication, scopes, tenant binding, external IDs, version semantics, webhook signing, idempotency support, pagination, rate limits, errors, reconciliation and ownership of each fact.
+
+Minimum R1 integrations:
+
+1. The actual authorized WhatsApp Business provider.
+2. One real operational backend supporting the selected service workflow.
+3. One existing authorized payment provider where customer payment collection is enabled.
+4. Model and transcription services authorized for the tenant and operating region.
+
+DOP and Field Force integration must use their real supported contracts. Do not assume those products have an API or declare a stub to be an integration. If access is unavailable, build the adapter, contract tests, explicit disconnected experience and documentation, then keep live verification visibly blocked until the actual dependency is supplied.
+
+Keep mock connectors isolated from production routing. Production credentials must never resolve to a mock endpoint. Offer clear degraded operation, including human handling, when the upstream service is unavailable. Never show invented prices, availability, tracking or payment status to hide a disconnection.
+
+10 Security and tenant isolation
+
+SEC-01 Resolve the tenant from authenticated membership or a trusted mapping of provider account and integration connection. A tenant ID supplied in a customer message, model response or untrusted request is not authorization.
+
+SEC-02 Enforce tenant scope in application code and database access policies. Protect files, exports, search indexes, embeddings, caches, queues, notifications, reports and background tasks as well as ordinary tables. Use tenant scoped keys and validate relationships between referenced objects.
+
+SEC-03 Test isolation using the actual application database roles. PostgreSQL superusers, table owners and privileged functions can bypass normal policies; verify those paths deliberately. Review security definer functions and worker credentials. Do not rely on an administrator session to prove customer isolation.
+
+SEC-04 Apply least privilege roles for tenant owner, administrator, dispatcher, customer service agent, field worker, finance reviewer and auditor as appropriate. Platform support access must be explicit, scoped, time limited and audited.
+
+SEC-05 Encrypt secrets using the existing secret manager, rotate credentials, protect customer links against enumeration and replay, and audit sensitive actions. Use expiring signed links with server side scope checks. Never place secrets in prompts, browser bundles, logs or repository files.
+
+SEC-06 Treat incoming messages, documents, photos, transcriptions and retrieved knowledge as untrusted data. Test prompt injection, malicious instructions in uploaded content, cross tenant requests, tool misuse and data exfiltration. Natural language instructions alone are not a security boundary.
+
+SEC-07 Restrict outbound requests to permitted connectors and destinations. Protect media and URL fetching against SSRF, redirect abuse, private address access and oversized responses. Validate tool outputs before incorporating them into trusted state.
+
+SEC-08 Reuse secure authentication and session controls, require appropriate stronger authentication for privileged administration, verify webhook authenticity, protect against replay and use rate limits and abuse controls.
+
+SEC-09 Target the applicable Level 2 requirements of OWASP ASVS 5.0 as the security verification baseline, verifying the selected version during implementation. Record evidence and justified exceptions. Include secure rendering of AI and customer content, XSS prevention, CSRF protection where applicable, safe customer link handling and appropriate browser security headers. Opening a customer link must not itself authorize a booking or financial action. Do not claim certification or complete compliance solely because a scanner passes.
+
+SEC-10 Define data retention, deletion, export, backup retention and support access behavior. Maintain required financial records separately where applicable. Do not train across tenants or share customer chat data between customers. AI processing must use authorized providers, appropriate data minimization and the configured region. Do not silently move processing to a different region during fallback.
+
+11 Channel and regional requirements
+
+PL-01 Verify the current official WhatsApp Business rules and the actual provider’s supported APIs before live activation. Use authorized APIs. Do not use scraping, unofficial WhatsApp clients or workarounds intended to evade platform restrictions.
+
+PL-02 Implement applicable opt in and opt out controls, approved templates, message categories and customer service window checks. Recheck eligibility when a queued message is actually sent, because the permitted window or template status may have changed. Maintain a usable human escalation path.
+
+PL-03 Keep tenant specific business service assistance clearly scoped. Verify the platform terms applicable to AI functionality in the operating jurisdiction rather than assuming that access for general purpose AI assistants is universally allowed. The Business Solution terms page could not be retrieved fully during preparation of this brief; do not infer its current full contents from competitor marketing.
+
+PL-04 Model taxes, invoice content, payment eligibility, privacy notices, processing regions and retention as jurisdiction specific configuration. Confirm which requirements apply to the launch merchant and market. Do not advertise Saudi e invoicing, UAE tax, GDPR or Saudi privacy compliance without the corresponding implemented controls and review evidence.
+
+PL-05 Keep service consent, marketing consent and location permission distinct. Collect only information needed for the service. Hosted payment pages should handle card details. Do not ask customers to send payment card information in chat.
+
+These are product requirements, not a substitute for verifying current legal and provider obligations in the actual deployment.
+
+12 AI quality and evaluation
+
+AI-01 Use provider independent interfaces for reasoning, transcription and optional image interpretation. Select models by measured quality, latency, regional processing and cost. Do not train a foundation model for this release.
+
+AI-02 Require schema validated model outputs. Use only allowlisted tools. Reject malformed instructions and unsupported actions safely. Recheck permissions and state immediately before every action, even if an earlier planning step was authorized.
+
+AI-03 Maintain tenant scoped conversational memory and structured facts with provenance. Separate customer statements from confirmed system facts. Do not turn a model guess into durable operational truth.
+
+AI-04 Use bounded context and retrieval budgets. Route straightforward lookups and fixed pricing calculations through deterministic code. Set maximum tool calls, retries, execution time and spending per workflow.
+
+AI-05 Calibrate extraction quality against labeled examples. Do not rely on the model’s own confidence number as proof. Escalate uncertain addresses, quantities, dates, authority, abnormal requests and unresolved contradictions.
+
+AI-06 Version model configuration, prompts, knowledge and workflow definitions. Record identifiers, tool inputs and outputs with appropriate redaction, policy decisions and brief action explanations. Do not collect hidden chain of thought as an audit requirement.
+
+AI-07 Build a regression evaluation set before broad autonomy. Cover Arabic dialect variation, English, mixed language, short and long voice notes, noisy audio, missing facts, interruptions, change of mind, ambiguous acceptance and hostile input. Use consented or synthetic data and keep it separate from production analytics.
+
+AI-08 Include a replay or simulation interface for administrators to test a proposed workflow without sending messages, charging payments or writing to real operational systems. Make the mode unmistakable and keep test results separate from live results.
+
+AI-09 Support shadow evaluation and gradual enablement. A replacement model must pass the existing regression suite before activation. Fall back to a person or approved deterministic path when the provider fails.
+
+AI-10 Production autonomy is limited by workflow and action permissions. Successfully answering an FAQ does not authorize discounts, refunds, rescheduling, collecting a payment or changing customer records.
+
+13 Required screens and interfaces
+
+Build within the existing design system:
+
+• Guided setup and connection health.
+• Inbox with concise customer context, automation status and human takeover.
+• Enquiry details with confirmed and missing facts.
+• Quote review and version history.
+• Booking and schedule view with provisional versus confirmed status.
+• Job timeline linking operational updates and completion records.
+• Approval queue with scope, amount, reason and expiry.
+• Exceptions queue with owner, urgency, cause and next action.
+• Workflow template configuration, testing and version activation.
+• Tenant knowledge and service settings.
+• Usage, costs and business outcome reports.
+• Audit history and authorized support access.
+• Secure mobile customer views for quote acceptance, appointment changes, job status and payment.
+
+For each screen provide task based flows, role restrictions, English and Arabic copy, and all meaningful failure states. Avoid adding an elaborate generic automation builder when tested templates and a small guided editor can support the required workflows more clearly.
+
+14 Proposed engineering targets
+
+These are initial acceptance targets to validate against the existing infrastructure, not claims about current performance or contractual SLAs.
+
+• Target 99.9 percent monthly availability for ConversaFlow controlled core endpoints, measured separately from upstream provider availability. A test run does not establish a monthly uptime history.
+• Target p95 internal API response time under 750 milliseconds for ordinary operations at the agreed reference load, excluding media transfer, model inference and external provider execution.
+• Target p95 first useful automated text response within 10 seconds under normal reference conditions. Report voice note and image processing latency separately.
+• Durably ingest valid webhook events within provider required acknowledgement limits. Measure processing lag and backlog independently.
+• Prevent loss of acknowledged events during tested worker restarts and application deploys. Specify failure assumptions and durability boundaries.
+• Propose and prove database recovery objectives with the actual backup setup. Initial objectives are RPO at most 15 minutes and RTO at most 4 hours; do not advertise them before a restore exercise verifies them.
+• Reference load: 100 synthetic tenants, 20,000 total synthetic contacts and 10 incoming events per second for 30 minutes, with a bounded burst at 50 events per second for 5 minutes. Use test doubles for load on external providers. Document hardware, worker count, cost, queue lag, latency and saturation. If the hosting plan cannot meet this, identify and implement a costed remedy through the authorized budget process.
+• Bound tenant concurrency and provider usage so one busy tenant cannot starve others.
+• Propose a cost ceiling per completed workflow from measured messaging, model, processing and support usage. Unknown cost inputs must remain visible.
+
+Choose metrics and alert thresholds that the current team can operate. Avoid unsupported promises of zero latency, unlimited scale or flawless autonomous behavior.
+
+15 Acceptance scenarios and release evidence
+
+Create a traceability matrix mapping every UX, FR, AR, SEC, PL and AI requirement to implementation files, test cases, environment and evidence. Requirements stated in other sections also need coverage or an explicit disposition.
+
+At minimum verify:
+
+AC-01 An Arabic voice note creates a structured request with correct quantity, service location and preferred time; missing information is clarified once.
+AC-02 An English request and a mixed language request complete the same workflow correctly.
+AC-03 A noisy or contradictory request is clarified or escalated before any commitment.
+AC-04 A standard service quote matches the approved deterministic pricing fixtures exactly.
+AC-05 An unknown repair fault leads to the configured inspection process rather than an invented repair quote.
+AC-06 An expired quote cannot be accepted; a changed quote requires the correct renewed acceptance.
+AC-07 Concurrent requests for the last available slot produce one confirmed allocation, with a useful alternative for the other customer.
+AC-08 Duplicate and out of order inbound events do not duplicate quotes, jobs, messages or financial effects.
+AC-09 A payment succeeds but the provider response is lost; reconciliation identifies the actual result without a repeated charge.
+AC-10 A late payment arrives after a hold expires; the case is reconciled without promising unavailable capacity.
+AC-11 Wrong amount, currency, merchant, signature or tenant payment events do not mark the invoice as paid.
+AC-12 A worker crashes after an external job is created but before the acknowledgement is stored; recovery identifies the existing job.
+AC-13 Human takeover prevents an in flight AI response and queued write from taking over the conversation.
+AC-14 A worker becomes unavailable; the system creates the correct dispatch exception and follows the configured rescheduling approval process.
+AC-15 Missing completion evidence prevents the applicable closure step while preserving an accurate customer status.
+AC-16 Customer acceptance and provider verified payment are recorded independently of worker completion.
+AC-17 A photo containing malicious instructions cannot change tools, permissions or tenant scope.
+AC-18 Forged identifiers and direct API calls cannot access another tenant’s messages, files, search results, jobs, reports or financial data.
+AC-19 An expired customer link, revoked user and unauthorized field worker cannot perform privileged actions.
+AC-20 A tenant emergency pause stops new actions, including previously queued work before execution.
+AC-21 A queued outbound message whose eligibility changes is blocked or sent using the correct permitted template path.
+AC-22 A disconnected connector displays a truthful status and creates a useful human task.
+AC-23 A workflow version deploy does not corrupt in flight work or replay historical charges.
+AC-24 A database restore exercise does not blindly repeat external side effects; affected workflows remain held for reconciliation.
+AC-25 English and Arabic customer journeys work on mobile with proper RTL, keyboard access and screen reader labels.
+AC-26 Consent withdrawal and configured deletion or retention handling work across normal data stores, media, search and operational procedures.
+AC-27 Billing caps, runaway tool loops and tenant rate limits produce controlled degradation and cost alerts.
+AC-28 The original inbox, campaign, template, contact, sending, role and reporting behavior still passes relevant regression checks.
+
+Use at least 200 labeled conversational evaluation cases, with at least 80 primarily Arabic cases and 80 primarily English cases; the remainder may cover mixed language and edge cases. Include separate real voice recordings from consenting testers for transcription evaluation.
+
+Target at least 95 percent correct routing and required field handling on the frozen evaluation set, reporting results by language, scenario and failure severity. Report fully automated completion, correct human escalation and failed completion separately. Do not inflate automation success by counting every escalation as autonomous completion.
+
+All defined critical security, pricing, permission, tenant isolation and duplicate financial effect tests must pass. No known critical or high severity defect in the release path may remain open. A sample with no observed incident is not proof that future incidents are impossible.
+
+Separate unit, integration, real database, UI, adversarial AI, load and live provider verification results. Counts must reconcile without double counting. Required skipped or blocked tests are not passed. AI generated pass judgments require checks against deterministic expected state and manual review of a representative sample.
+
+16 Implementation sequence
+
+Phase 0 Current state and design
+Inspect the repository and environment. Produce the requirement gap matrix, actual architecture, authoritative system map, migration plan, connector inventory, threat model, release plan and prioritized backlog. Identify what already exists and retain it. Start implementation of the first safe vertical slice immediately after the essential audit; do not stop at a design presentation.
+
+Phase 1 Durable and secure foundation
+Complete missing messaging reliability, tenant scope, event ingestion, action registry, policy enforcement, durable state, human takeover, audit and cost controls. Prove restart recovery and cross tenant denial with a real test database.
+
+Phase 2 Enquiry to accepted quote
+Implement Arabic and English intake, voice processing, secure media, structured requests, business knowledge, deterministic pricing, versioned quotations and secure acceptance. Include customer and staff interfaces.
+
+Phase 3 Accepted quote to fulfilled job
+Connect real capacity, booking, dispatch, worker status, completion records, customer acceptance, hosted payment links and provider reconciliation. Demonstrate one complete service journey with actual supported integrations in staging.
+
+Phase 4 Exceptions and administrative control
+Complete rescheduling, payment ambiguity, connector failures, human queues, workflow configuration, simulation, reporting and customer friendly onboarding. Validate the normal journey and the recovery journey.
+
+Phase 5 Production delivery
+Run the applicable release checks, prepare and verify backups, deploy the exact tested build using the authorized release process, migrate additively, and activate the module for a designated consenting pilot tenant using flags and least privilege configuration.
+
+Phase 6 Pilot verification and wider availability
+Observe the controlled pilot, resolve defects, confirm integration and business outcomes, and expand tenant activation in measured cohorts. Do not contact unrelated businesses or create real charges as test traffic. Use designated participants and authorized transactions.
+
+All phases must retain baseline product functionality. Maintain a persistent task log so work can resume after context or session changes. Mark external dependencies precisely and continue all independent tasks.
+
+17 Deployment and production gate
+
+Use isolated development, staging and production configuration, provider credentials and tenant data. Do not silently point staging at a production database or send staging messages to actual customers.
+
+Use additive, reviewed migrations with a tested rollback or forward fix path. Back up the production database before the relevant change. Verify worker and schema compatibility, health checks, queues, scheduled work, secrets and the tested commit or build identifier.
+
+Required before enabling the R1 module in production:
+
+• Required implementation and regression evidence is complete.
+• Tenant isolation and permission tests use real database execution.
+• Real provider connectivity and webhook verification are proven in staging and then checked safely in production.
+• The selected operations system and financial merchant are mapped to the correct tenant.
+• Customer terms, contact preferences, rate rules and approval controls are configured for the pilot.
+• Required operational alerts, failure queues, kill switches, incident ownership and runbooks are functioning.
+• Backups and the restore procedure are verified.
+• Production smoke checks use authorized participants and any explicitly authorized financial transaction.
+• No unresolved critical or high severity defect affects the release path.
+
+A deployment with all Operator flags disabled may be a valid preparatory deployment, but is not completion of this module’s production delivery. A successful simulated payment is not evidence of live financial integration.
+
+Use restricted initial enablement, monitor for at least 24 hours after the first live workflow, and verify sufficient real workflow evidence before broader availability. If pilot activity is insufficient, report the evidence gap and the enabled scope honestly rather than claiming full general availability.
+
+Suggested automatic halt conditions include a suspected tenant data leak, unauthorized action, duplicate financial effect, invalid pricing commitment or irreconcilable job creation. Pause the affected execution path, preserve evidence, notify the designated operational owner through an authorized channel and begin the runbook. Other thresholds must be agreed from actual traffic and failure characteristics.
+
+A rollback must account for external side effects already committed. Restoring a database does not cancel a job, undo a payment or unsend a message. Reconcile external state before replaying held work.
+
+The owner wants a production outcome. Do not stop voluntarily at staging when the authorized environment and required evidence support deployment. If release is blocked by an unavailable credential, permission or genuine external dependency, complete the deployable work and give one precise action list without misrepresenting release status.
+
+18 Operating and commercial measurement
+
+Define and instrument:
+
+• Qualified enquiries and the qualification definition.
+• Quotes issued and accepted, tied to the correct version.
+• Confirmed bookings, delivered jobs and customer accepted jobs.
+• Reconciled paid jobs and money collected, with refunds and disputes visible.
+• Human handling minutes and number of interventions.
+• Time spent waiting on the customer, worker, provider or administrator.
+• Workflow failures, retries, replay, abandonment and recovery.
+• Messaging, model, processing and support costs.
+• Estimated and actual gross profit where sufficient cost data exists.
+• Tenant activation, continued use, renewal and support demand.
+
+Calculate incremental benefit only against an appropriate recorded baseline or controlled comparison. Funnel improvement alone does not prove causation. Show incomplete data and avoid claiming savings that have not been measured.
+
+Use a transparent subscription and metered usage design with no automatic commercial commitments inferred from this brief. Prices and spending limits remain tenant or owner business decisions.
+
+19 Required engineering deliverables
+
+Create and maintain these inside the existing project documentation structure, adapting filenames to repository conventions:
+
+1. BRD addendum with stable requirement IDs and priority.
+2. Current state and requirement gap matrix.
+3. Actual component and data flow diagrams.
+4. Architecture decision records with alternatives, costs and rationale.
+5. Entity model, migrations and authoritative system map.
+6. Versioned connector and action schemas with error contracts.
+7. Role and authorization matrix.
+8. Threat model and applicable security verification.
+9. English and Arabic customer and staff flows.
+10. Frozen evaluation fixtures and test evidence.
+11. Requirement to implementation to test traceability matrix.
+12. Environment and secret configuration guide without secret values.
+13. Deployment, migration, rollback, restore and reconciliation runbooks.
+14. Monitoring, cost controls, incident response and support guide.
+15. Pilot onboarding and tenant administrator guide.
+16. Final release evidence and honest status register.
+
+Do not generate polished documents as a substitute for code. Documentation must match the implementation. Keep sensitive production records, personal identifiers and credentials out of screenshots and reports.
+
+20 Reporting standard and immediate next action
+
+Start now with a concise repository grounded inventory and the first implementation slice. Then continue through the sequence. Give short updates containing completed work, verified results, current dependencies and the next concrete action. Do not repeatedly return the same proposed plan.
+
+For final delivery, state:
+
+• What changed and which requirements it implements.
+• The exact commit or build and migrations used.
+• Checks passed, failed and blocked, separated by test type.
+• Which integrations were simulated, staging verified and live verified.
+• The actual deployment URL and environment, only if verified.
+• Which tenants and workflow modes are enabled.
+• Any outstanding release dependency and its exact resolution.
+• Monitoring, rollback and operating ownership.
+• Remaining R2 roadmap, clearly separated from incomplete R1 work.
+
+Use one of these accurate status descriptions:
+Implemented locally; Staging verified; Production deployed but not enabled; Production enabled for controlled pilot; General availability verified; or Blocked with the specific dependency.
+
+Do not invent completion percentages, test results, customer adoption, production URLs, superiority or worldwide exclusivity. The required result is dependable customer friendly software with a verifiable production operating path.
+
+21 Research references and verification limits
+
+These references establish a dated baseline. Recheck official documentation, account capabilities, availability and terms during implementation. The requirements and proposed targets in this addendum are design decisions, not measured ConversaFlow performance.
+
+1. Wati Astra product overview
+https://www.wati.io/products/astra/
+Vendor advertised baseline for multilingual interaction, connected actions and workflow triggering.
+2. Intercom Fin Procedures explained
+https://www.intercom.com/help/en/articles/12495167-fin-procedures-explained
+Documents natural language procedures combined with deterministic rules, connectors, handover and simulations. Its reviewed page describes sequential procedure execution; bounded parallel reads are a proposed ConversaFlow design choice, not a claim of exclusive invention.
+3. Jobber Receptionist
+https://www.getjobber.com/features/ai-receptionist/
+Documents service request handling and booking using configured business availability.
+4. Respond.io AI Agents
+https://respond.io/ai-agents
+Vendor advertised baseline for lead qualification, routing, CRM context and connected customer conversations.
+5. WhatsApp Business Messaging Policy
+https://business.whatsapp.com/policy
+Redirected to https://whatsappbusiness.com/policy/ when checked. The reviewed policy describes permissions, templates, the customer service window, escalation and data handling expectations.
+6. WhatsApp Business Solution terms
+https://www.whatsapp.com/legal/business-solution-terms
+The page redirected to a blocked Facebook sign in page during preparation. Its full current text was not verified. Validate applicable current terms through an authorized official route before enabling the relevant live functionality.
+7. W3C Web Content Accessibility Guidelines 2.2
+https://www.w3.org/TR/WCAG22/
+Reference for the proposed accessibility acceptance requirements.
+8. OWASP Application Security Verification Standard
+https://asvs.owasp.org/
+Reference for selecting and verifying applicable application security controls.
+9. PostgreSQL Row Security Policies
+https://www.postgresql.org/docs/current/ddl-rowsecurity.html
+Reference for database isolation behavior and privileged role limitations. Use documentation matching the actual deployed PostgreSQL version.
+10. Temporal Workflow Execution overview
+https://docs.temporal.io/workflow-execution
+Reference for evaluating durable workflow execution. Temporal is a candidate, not a mandatory additional service or purchase.
+
+End of implementation prompt.
