@@ -52,22 +52,25 @@ export class OutcomesService {
            ORDER BY e.conversation_id, e.created_at DESC)
          SELECT count(*)::int AS resolved,
                 count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = r.conversation_id AND m.direction = 'out'
-                                 AND m.sent_by_membership_id IS NOT NULL AND m.api_key_id IS NULL AND m.created_at <= r.at))::int AS without_person,
+                                 AND m.sent_by_membership_id IS NOT NULL AND m.api_key_id IS NULL AND m.campaign_id IS NULL AND m.automation_run_id IS NULL
+                                 AND m.created_at <= r.at))::int AS without_person,
                 round((percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM r.at - c.first_inbound_at)) / 3600)::numeric, 1)::float AS median_hours
          FROM r JOIN conversations c ON c.id = r.conversation_id`, p)).rows[0]!;
 
       const out = (await tx.query<{ person: number; automation: number; ai: number; api: number; campaign: number }>(
-        `SELECT count(*) FILTER (WHERE sent_by_membership_id IS NOT NULL AND api_key_id IS NULL)::int AS person,
-                count(*) FILTER (WHERE automation_run_id IS NOT NULL AND ai_interaction_id IS NULL)::int AS automation,
-                count(*) FILTER (WHERE ai_interaction_id IS NOT NULL)::int AS ai,
-                count(*) FILTER (WHERE api_key_id IS NOT NULL)::int AS api,
-                count(*) FILTER (WHERE sent_by_membership_id IS NULL AND automation_run_id IS NULL)::int AS campaign
-         FROM messages WHERE direction = 'out' AND created_at >= $1 AND created_at < $2 AND status <> 'failed'`, p)).rows[0]!;
+        // One bucket per message, in this order: campaigns carry their creator's membership, so they come first.
+        `WITH m AS (SELECT CASE WHEN campaign_id IS NOT NULL THEN 'campaign' WHEN api_key_id IS NOT NULL THEN 'api'
+                                WHEN ai_interaction_id IS NOT NULL THEN 'ai' WHEN automation_run_id IS NOT NULL THEN 'automation'
+                                WHEN sent_by_membership_id IS NOT NULL THEN 'person' ELSE 'campaign' END AS who
+                    FROM messages WHERE direction = 'out' AND created_at >= $1 AND created_at < $2 AND status IN ('sent', 'delivered', 'read'))
+         SELECT count(*) FILTER (WHERE who = 'person')::int AS person, count(*) FILTER (WHERE who = 'automation')::int AS automation,
+                count(*) FILTER (WHERE who = 'ai')::int AS ai, count(*) FILTER (WHERE who = 'api')::int AS api, count(*) FILTER (WHERE who = 'campaign')::int AS campaign
+         FROM m`, p)).rows[0]!;
 
       const prom = (await tx.query<{ due: number; kept_on_time: number; kept_late: number; missed: number; recovered: number; open: number }>(
         `SELECT count(*)::int AS due,
-                count(*) FILTER (WHERE status = 'kept' AND missed_at IS NULL)::int AS kept_on_time,
-                count(*) FILTER (WHERE status = 'kept' AND missed_at IS NOT NULL)::int AS kept_late,
+                count(*) FILTER (WHERE status = 'kept' AND missed_at IS NULL AND closed_at <= due_at)::int AS kept_on_time,
+                count(*) FILTER (WHERE status = 'kept' AND (missed_at IS NOT NULL OR closed_at > due_at))::int AS kept_late,
                 count(*) FILTER (WHERE status = 'missed')::int AS missed,
                 count(*) FILTER (WHERE status = 'recovered')::int AS recovered,
                 count(*) FILTER (WHERE status = 'confirmed')::int AS open
@@ -77,11 +80,14 @@ export class OutcomesService {
         `SELECT count(*) FILTER (WHERE kind = 'talk_to_person')::int AS talk, count(*) FILTER (WHERE kind = 'complaint')::int AS complaints
          FROM customer_requests WHERE created_at >= $1 AND created_at < $2`, p)).rows[0]!;
 
-      const ai = (await tx.query<{ answers: number; suggestions: number; handed: number; cost: string; simulated: boolean }>(
+      // Cost is what settled calls were charged. Calls that failed or are still running are held at their maximum
+      // against the budget and may or may not be charged: shown apart, never added to the known cost.
+      const ai = (await tx.query<{ answers: number; suggestions: number; handed: number; cost: string; uncertain: string; simulated: boolean | null }>(
         `SELECT count(*) FILTER (WHERE decision = 'answer')::int AS answers, count(*) FILTER (WHERE decision = 'suggestion')::int AS suggestions,
                 count(*) FILTER (WHERE decision = 'human_needed')::int AS handed,
-                coalesce((SELECT sum(cost_usd) FROM ai_usage u WHERE u.created_at >= $1 AND u.created_at < $2), 0) AS cost,
-                coalesce(bool_and(simulated), true) AS simulated
+                coalesce((SELECT sum(cost_usd) FROM ai_usage u WHERE u.created_at >= $1 AND u.created_at < $2 AND u.status = 'settled'), 0) AS cost,
+                coalesce((SELECT sum(cost_usd) FROM ai_usage u WHERE u.created_at >= $1 AND u.created_at < $2 AND u.status <> 'settled'), 0) AS uncertain,
+                (SELECT bool_and(simulated) FROM ai_usage u WHERE u.created_at >= $1 AND u.created_at < $2) AS simulated
          FROM ai_interactions WHERE created_at >= $1 AND created_at < $2`, p)).rows[0]!;
       const aiCost = Number(ai.cost);
 
@@ -92,7 +98,7 @@ export class OutcomesService {
         replies: { byPeople: out.person, byAutomations: out.automation, byAi: out.ai, viaApi: out.api, campaignsAndTemplates: out.campaign },
         promises: { due: prom.due, keptOnTime: prom.kept_on_time, keptLate: prom.kept_late, missed: prom.missed, putRight: prom.recovered, stillOpen: prom.open },
         customerRequests: { askedForPerson: requests.talk, complaints: requests.complaints },
-        ai: { answered: ai.answers, suggested: ai.suggestions, handedToPerson: ai.handed, costUsd: aiCost, simulated: ai.simulated },
+        ai: { answered: ai.answers, suggested: ai.suggestions, handedToPerson: ai.handed, costUsd: aiCost, uncertainUsd: Number(ai.uncertain), simulated: ai.simulated },
         costs: {
           knownUsd: aiCost,
           perResolvedConversationUsd: res.resolved > 0 ? Math.round((aiCost / res.resolved) * 10_000) / 10_000 : null,
@@ -105,7 +111,8 @@ export class OutcomesService {
           { what: 'satisfaction', why: 'no_survey' },
           { what: 'whatsapp_costs', why: 'needs_live_pricing' },
         ],
-        assumptions: ['resolved_last_in_period', 'repeat_within_30_days', 'without_person_means_no_person_wrote_before_resolving', 'promises_by_due_date', 'ai_cost_actual_simulated_zero'],
+        assumptions: ['resolved_last_in_period', 'repeat_within_30_days', 'without_person_means_no_person_wrote_before_resolving', 'promises_by_due_date', 'ai_cost_actual_simulated_zero',
+          'replies_sent_only', 'whole_company_counts'],
       };
     });
   }

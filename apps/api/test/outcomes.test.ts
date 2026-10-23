@@ -27,7 +27,9 @@ function say(from: string, text: string) {
 }
 const conv = async (wa: string) => (await app((tx) => tx.query<{ id: string; version: number; activity_seq: string }>(
   `SELECT c.id, c.version, c.activity_seq FROM conversations c JOIN contact_identifiers ci ON ci.contact_id = c.contact_id WHERE ci.value = $1 ORDER BY c.created_at DESC LIMIT 1`, [wa]))).rows[0]!;
-const report = async (c: Client = owner) => (await c.get('/v1/reports/outcomes').expect(200)).body;
+// A window around today wide enough for any company time zone and for deadlines an hour or two ahead.
+const day = (offset: number) => new Date(Date.now() + offset * 86400_000).toISOString().slice(0, 10);
+const report = async (c: Client = owner) => (await c.get(`/v1/reports/outcomes?from=${day(-2)}&to=${day(2)}`).expect(200)).body;
 
 beforeAll(async () => {
   t = await startApp();
@@ -91,3 +93,28 @@ describe('outcome dashboard', () => {
     await owner.get('/v1/reports/outcomes?from=2026-01-01&to=2027-06-01').expect(400);
   });
 });
+
+describe('review of W2.9', () => {
+  it('known AI cost counts settled calls only; the simulated label needs AI use', async () => {
+    const r = await report();
+    expect(r.ai).toHaveProperty('uncertainUsd');
+    if (r.ai.costUsd === 0 && r.ai.uncertainUsd === 0) expect(r.ai.simulated).toBeNull();
+    expect(r.assumptions).toContain('whole_company_counts');
+  });
+
+  it('a promise closed as kept after its deadline is kept late, not on time', async () => {
+    const before = (await report()).promises;
+    const wa = fresh();
+    await say(wa, 'Late?').expect(200);
+    const c = await conv(wa);
+    const made = (await owner.post(`/v1/conversations/${c.id}/promises`, { description: 'Call back', dueAt: new Date(Date.now() + 3600_000).toISOString() }).expect(201)).body;
+    await t.ownerDb.query('ALTER TABLE promises NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE promises SET due_at = now() - interval '1 minute' WHERE id = $1`, [made.id]); }
+    finally { await t.ownerDb.query('ALTER TABLE promises FORCE ROW LEVEL SECURITY'); }
+    await owner.post(`/v1/promises/${made.id}/close`, { outcome: 'kept', expectedVersion: 0 }).expect(200);
+    const p = (await report()).promises;
+    expect(p.keptLate - before.keptLate).toBe(1);
+    expect(p.keptOnTime - before.keptOnTime).toBe(0);
+  });
+});
+

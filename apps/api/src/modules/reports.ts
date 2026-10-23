@@ -49,7 +49,7 @@ export class ReportsService {
          s AS (
            SELECT a.*,
              (SELECT min(m.created_at) FROM messages m WHERE m.conversation_id = a.conversation_id AND m.direction = 'out'
-                AND m.sent_by_membership_id IS NOT NULL AND m.created_at >= a.first_message_at AND m.created_at < a.window_end) AS first_reply_at,
+                AND m.sent_by_membership_id IS NOT NULL AND m.campaign_id IS NULL AND m.created_at >= a.first_message_at AND m.created_at < a.window_end) AS first_reply_at,
              EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id = a.conversation_id AND e.kind = 'status_changed'
                 AND e.data->>'to' = 'resolved' AND e.created_at >= a.first_message_at AND e.created_at < a.window_end) AS resolved,
              EXISTS (SELECT 1 FROM consent_events c WHERE c.contact_id = a.contact_id AND c.kind = 'opt_out'
