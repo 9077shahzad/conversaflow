@@ -166,3 +166,22 @@ describe('resolving and reopening conversations', () => {
     expect((await conv(wa)).resolved_at).toBeNull();
   });
 });
+
+describe('second recheck of W1.9', () => {
+  it('W2: an ad tapped today in a conversation that began earlier is not counted in today\'s ad rows or totals; rows add up to "from ads"', async () => {
+    const today = (await report()).period.to;
+    const adId = `ad${randomUUID().slice(0, 6)}`;
+    const wa = fresh();
+    await say(wa, 'Hello, no ad yet').expect(200);
+    const c = await conv(wa);
+    await t.ownerDb.query('ALTER TABLE conversations NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE conversations SET first_inbound_at = now() - interval '3 days' WHERE id = $1`, [c.id]); }
+    finally { await t.ownerDb.query('ALTER TABLE conversations FORCE ROW LEVEL SECURITY'); }
+    await say(wa, 'Now I tapped your ad', AD(adId)).expect(200);
+    const r = await report(owner, `?from=${today}&to=${today}`);
+    expect(adRow(r, adId)).toBeUndefined();
+    const sum = r.ads.reduce((n: number, a: { conversations: number }) => n + a.conversations, 0);
+    expect(sum).toBe(r.totals.fromAds);
+  });
+});
+

@@ -146,7 +146,7 @@ export class InboxService {
     const inline = this.deps.config.INBOUND_APPLY === 'request';
     const { counts, recorded } = await recordWebhook(this.deps.db, provider, payload, inline);
     if (!inline || recorded.length === 0) return counts;
-    const applied = await new InboundProcessor(this.deps.db).process(recorded);
+    const applied = await new InboundProcessor(this.deps.db, {}, { inRequest: true }).process(recorded);
     return { ...counts, applied: applied.applied, stale: applied.stale, orphan: applied.orphan, unknownTemplate: applied.unknownTemplate,
       retrying: applied.retrying, failed: applied.failed, queued: applied.retrying };
   }

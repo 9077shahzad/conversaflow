@@ -39,9 +39,16 @@ async function eligible(tx: Tx): Promise<Array<{ id: string; open: number }>> {
  * webhook delivery can carry messages from several customers in one transaction; taking this lock first keeps the
  * lock order the same in every transaction (assignment, then customers), so two deliveries cannot deadlock.
  */
-export async function lockAssignmentIfOn(tx: Tx, tenantId: string): Promise<boolean> {
+export async function lockAssignmentIfOn(tx: Tx, tenantId: string, tryOnly = false): Promise<boolean> {
   const mode = (await tx.query<{ mode: AssignmentMode }>('SELECT assignment_mode AS mode FROM tenant_settings')).rows[0]?.mode;
   if (!mode || mode === 'off') return false;
+  if (tryOnly) {
+    // The worker does not wait: when another transaction holds the lock, its events are put back for a moment
+    // without using an attempt (second recheck of AX-3).
+    const got = (await tx.query<{ ok: boolean }>('SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS ok', [`${tenantId}:auto-assign`])).rows[0]!.ok;
+    if (!got) throw Object.assign(new Error('assignment busy'), { code: 'customer_busy' });
+    return true;
+  }
   await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenantId}:auto-assign`]);
   return true;
 }

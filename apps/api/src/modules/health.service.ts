@@ -44,7 +44,10 @@ export class HealthService {
                 min(received_at) FILTER (WHERE outcome = 'orphan_status') AS "oldestWaitingStatusAt",
                 count(*) FILTER (WHERE outcome = 'unknown_template' AND received_at > now() - interval '7 days')::int AS "unknownTemplateEvents7d",
                 count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL)::int AS "unprocessed",
-                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL AND next_attempt_at < now() - interval '2 minutes')::int AS "overdue",
+                -- Overdue: past its next try by 2 minutes, or waiting more than 10 minutes since it arrived (an event put
+                -- back again and again because its customer stays busy never uses an attempt; second recheck of AX-3).
+                count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL
+                                 AND (next_attempt_at < now() - interval '2 minutes' OR received_at < now() - interval '10 minutes'))::int AS "overdue",
                 count(*) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL AND attempts > 0)::int AS "retrying",
                 min(received_at) FILTER (WHERE processed_at IS NULL AND failed_at IS NULL) AS "oldestWaitingAt",
                 count(*) FILTER (WHERE failed_at IS NOT NULL)::int AS "failed"

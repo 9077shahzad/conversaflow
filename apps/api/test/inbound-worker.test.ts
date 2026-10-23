@@ -263,6 +263,44 @@ describe('recheck of the AX-3 fixes', () => {
   });
 });
 
+describe('second recheck of the AX-3 fixes', () => {
+  it('the company\'s assignment lock is tried too: a long group elsewhere defers these events at once, without an attempt', async () => {
+    const me = (await owner.get('/v1/me/access').expect(200)).body.membershipId;
+    await owner.put('/v1/inbox/assignment', { mode: 'round_robin', hoursOnly: false, memberIds: [me] }).expect(200);
+    const wa = fresh();
+    await deliver(payload([{ from: wa, text: 'assignment busy' }])).expect(200);
+    const holder = await t.ownerDb.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${tenant}:auto-assign`]);
+      const started = Date.now();
+      await new InboundProcessor(t.deps.db).dispatchDue(200);
+      expect(Date.now() - started).toBeLessThan(1500);               // no 2-second lock wait
+      expect(await messagesFrom(wa)).toBe(0);
+      for (const e of await eventsFor(wa)) expect(e.attempts).toBe(0);
+    } finally { await holder.query('ROLLBACK'); holder.release(); }
+    await makeDue(); await drain();
+    expect(await messagesFrom(wa)).toBe(1);
+    await owner.put('/v1/inbox/assignment', { mode: 'off', hoursOnly: false, memberIds: [] }).expect(200);
+  });
+
+  it('an event put back again and again shows as delayed on channel health once it has waited 10 minutes', async () => {
+    await drain();
+    const wa = fresh();
+    await deliver(payload([{ from: wa, text: 'kept waiting' }])).expect(200);
+    // As if it had arrived 11 minutes ago and been deferred each time since (no attempt used, next try in the future).
+    await t.ownerDb.query('ALTER TABLE webhook_events NO FORCE ROW LEVEL SECURITY');
+    try {
+      await t.ownerDb.query(`UPDATE webhook_events SET received_at = now() - interval '11 minutes', next_attempt_at = now() + interval '5 seconds'
+                             WHERE processed_at IS NULL AND parsed::text LIKE $1`, [`%${wa}%`]);
+    } finally { await t.ownerDb.query('ALTER TABLE webhook_events FORCE ROW LEVEL SECURITY'); }
+    const health = (await owner.get('/v1/channels/health').expect(200)).body;
+    expect(health.webhooks.overdue).toBeGreaterThanOrEqual(1);
+    expect(health.problems.map((x: { code: string }) => x.code)).toContain('incoming_delayed');
+    await makeDue(); await drain();
+  });
+});
+
 describe('configuration', () => {
   it('production refuses to apply incoming events inside the request', () => {
     const prod = { ...process.env, NODE_ENV: 'production', SCANNER: 'clamd', SCANNER_REQUIRE_OFFICIAL_SIGNATURES: 'true', CHANNEL_SANDBOX_ENABLED: 'false', SMTP_URL: 'smtp://example.test' };

@@ -43,7 +43,9 @@ export class ReportsService {
       }>(
         `WITH a AS (
            SELECT a.*, a.first_message_at + make_interval(days => $3) AS window_end FROM conversation_attributions a
-           WHERE a.first_message_at >= $1 AND a.first_message_at < $2),
+           JOIN conversations c ON c.id = a.conversation_id
+           -- The same population as the totals: conversations whose customer first wrote in the period (second recheck W2).
+           WHERE c.first_inbound_at >= $1 AND c.first_inbound_at < $2),
          s AS (
            SELECT a.*,
              (SELECT min(m.created_at) FROM messages m WHERE m.conversation_id = a.conversation_id AND m.direction = 'out'

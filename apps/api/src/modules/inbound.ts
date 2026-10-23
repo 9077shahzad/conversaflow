@@ -96,7 +96,9 @@ export async function recordWebhook(db: Db, provider: Provider, payload: unknown
 
 export class InboundProcessor {
   /** faults: test hook, called inside the applying transaction before anything is marked processed (never set in production). */
-  constructor(private readonly db: Db, private readonly faults: { beforeMark?: (eventIds: string[]) => Promise<void> | void } = {}) {}
+  constructor(private readonly db: Db, private readonly faults: { beforeMark?: (eventIds: string[]) => Promise<void> | void } = {},
+    /** In the request (development and tests): wait for the company's assignment lock instead of putting events back. */
+    private readonly opts: { inRequest?: boolean } = {}) {}
 
   /** Worker: leases waiting events across companies and applies them. Returns how many were leased. */
   async dispatchDue(limit = 200): Promise<number> {
@@ -171,7 +173,7 @@ export class InboundProcessor {
         // Lock order, the same in every transaction: the company's assignment lock (when assignment is on), then each
         // customer's lock in ascending number order, as contact imports do (slice 5 review M1, L3).
         const messages = items.map((i) => i.e).filter((e): e is Extract<ParsedEvent, { kind: 'message' }> => e.kind === 'message');
-        const assignmentLocked = messages.length ? await lockAssignmentIfOn(tx, tenantId) : false;
+        const assignmentLocked = messages.length ? await lockAssignmentIfOn(tx, tenantId, !this.opts.inRequest) : false;
         // Customer locks are tried, not waited for: a busy customer defers the group straight away (recheck N2).
         for (const from of [...new Set(messages.map((e) => e.from))].sort()) {
           const got = (await tx.query<{ ok: boolean }>('SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS ok', [`${tenantId}:wa:${from}`])).rows[0]!.ok;
