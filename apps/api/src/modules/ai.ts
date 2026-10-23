@@ -427,7 +427,7 @@ async function monthCostUsd(tx: Tx): Promise<number> {
 async function recentMessages(tx: Tx, conversationId: string, limit = AI_LIMITS.recentMessages) {
   const rows = (await tx.query<{ direction: string; body: string | null; sent_by: string | null; auto: string | null }>(
     `SELECT direction, body, sent_by_membership_id AS sent_by, automation_run_id AS auto FROM messages WHERE conversation_id = $1 AND body IS NOT NULL
-     ORDER BY occurred_at DESC LIMIT $2`, [conversationId, limit])).rows.reverse();
+     ORDER BY occurred_at DESC, created_at DESC, id DESC LIMIT $2`, [conversationId, limit])).rows.reverse();
   return rows.map((m) => ({ from: m.direction === 'in' ? 'customer' as const : m.auto ? 'automation' as const : 'team' as const, text: m.body! }));
 }
 
