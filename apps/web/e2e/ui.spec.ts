@@ -154,9 +154,29 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText(locale === 'ar' ? /فعّل التحقق بخطوتين لتغيير إعدادات الذكاء الاصطناعي/ : /Set up two-step sign-in to change AI settings/)).toBeVisible();
       await checkPage(page, locale, 'ai', view);
 
+      await page.goto(`/${locale}/app/setup`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'البدء' : 'Getting started');
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'حزم البداية' : 'Starter packs' })).toBeVisible();
+      await checkPage(page, locale, 'setup', view);
+
+      await page.goto(`/${locale}/app/promises`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'الوعود' : 'Promises');
+      await checkPage(page, locale, 'promises', view);
+
+      await page.goto(`/${locale}/app/notifications`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'الإشعارات' : 'Notifications');
+      // No push keys in this build: the page says notifications are only recorded.
+      await expect(page.getByText(locale === 'ar' ? /وضع الاختبار/ : /Test mode/)).toBeVisible();
+      await checkPage(page, locale, 'notifications', view);
+
+      await page.goto(`/${locale}/app/developers`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'الواجهة البرمجية' : 'API and webhooks');
+      await checkPage(page, locale, 'developers', view);
+
       await page.goto(`/${locale}/app/reports`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'التقارير' : 'Reports');
       await expect(page.getByText('Summer AC service (demo ad)')).toBeVisible();
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? /النتائج والتكاليف/ : /Outcomes and costs/ })).toBeVisible();
       await checkPage(page, locale, 'reports', view);
 
       await page.goto(`/${locale}/app/channel-health`);
