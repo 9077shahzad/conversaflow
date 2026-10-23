@@ -376,7 +376,7 @@ export async function startAutomationRuns(tx: Tx, tenantId: string, c: { convers
 }
 
 /** A person replied or paused replies: automation runs in this conversation stop at once (FR-206). */
-export async function stopAutomationRuns(tx: Tx, conversationId: string, reason: 'person_replied' | 'replies_paused' | 'conversation_resolved' | 'person_assigned') {
+export async function stopAutomationRuns(tx: Tx, conversationId: string, reason: 'person_replied' | 'replies_paused' | 'conversation_resolved' | 'person_assigned' | 'person_requested') {
   await tx.query(`UPDATE workflow_runs SET status = 'stopped', reason = $2, finished_at = now(), lease_until = NULL
                   WHERE conversation_id = $1 AND status IN ('running', 'waiting') AND mode = 'live'`, [conversationId, reason]);
 }

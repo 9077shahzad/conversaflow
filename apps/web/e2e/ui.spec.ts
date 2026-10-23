@@ -163,6 +163,23 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'حالة القناة' : 'Channel health');
       await expect(page.getByText(locale === 'ar' ? 'رسائل تحتاج إلى متابعة' : 'Messages needing a person')).toBeVisible();
       await checkPage(page, locale, 'channel-health', view);
+
+      // Customer page (W2.4): a link made from a demo conversation opens the page with no sign-in; switched off, it stops.
+      const first = await page.evaluate(async () => ((await (await fetch('/v1/conversations?limit=1')).json()) as { items: Array<{ id: string }> }).items[0]!.id);
+      const made = await page.evaluate(async ([id, l]) => (await (await fetch(`/v1/conversations/${id}/customer-links`, { method: 'POST',
+        headers: { 'X-Requested-With': 'conversaflow', 'Content-Type': 'application/json' }, body: JSON.stringify({ days: 1, locale: l }) })).json()) as { id: string; url: string }, [first, locale] as const);
+      const customer = await browser.newContext({ viewport: size, locale: locale === 'ar' ? 'ar-SA' : 'en-GB' });
+      await customer.addInitScript(RECORD_CSP);
+      const cp = await customer.newPage();
+      const u = new URL(made.url);
+      await cp.goto(`${u.pathname}${u.hash}`);
+      await expect(cp.getByRole('heading', { level: 2, name: locale === 'ar' ? 'محادثاتك' : 'Your conversations' })).toBeVisible();
+      expect(new URL(cp.url()).hash).toBe('');                       // the token leaves the address bar at once
+      await checkPage(cp, locale, 'customer', view);
+      await page.evaluate(async (id) => fetch(`/v1/customer-links/${id}/revoke`, { method: 'POST', headers: { 'X-Requested-With': 'conversaflow' } }), made.id);
+      await cp.reload();
+      await expect(cp.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'هذا الرابط لا يعمل' : 'This link is not working');
+      await customer.close();
       await context.close();
     });
   }

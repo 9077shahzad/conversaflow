@@ -20,6 +20,12 @@ export class RateLimiter {
     if (count > rule.limit) throw Errors.tooManyRequests();
   }
 
+  /** Refuses once the limit is reached, without counting this request. */
+  async check(rule: RateRule, subject: string): Promise<void> {
+    const count = Number((await this.redis.get(`rl:${rule.name}:${subject}`)) ?? 0);
+    if (count >= rule.limit) throw Errors.tooManyRequests();
+  }
+
   async reset(rule: RateRule, subject: string): Promise<void> {
     await this.redis.del(`rl:${rule.name}:${subject}`);
   }
@@ -33,4 +39,8 @@ export const RATE_RULES = {
   // Per user too: signing in again must not reset the allowance for guessing codes.
   mfaPerUser: { name: 'mfa:user', limit: 10, windowSeconds: 60 * 60 },
   forgotPerEmail: { name: 'forgot:email', limit: 5, windowSeconds: 60 * 60 },
+  // Customer links (W2.4): all requests per address, wrong links per address, and requests per link.
+  customerLinkPerIp: { name: 'clink:ip', limit: 300, windowSeconds: 15 * 60 },
+  customerLinkFailPerIp: { name: 'clink:fail', limit: 20, windowSeconds: 60 * 60 },
+  customerLinkPerLink: { name: 'clink:link', limit: 120, windowSeconds: 15 * 60 },
 } satisfies Record<string, RateRule>;

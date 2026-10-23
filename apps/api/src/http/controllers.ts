@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { CustomerLinksService, CustomerPortalService, LINK_HEADER } from '../modules/customer-links';
 import {
   Body, Controller, Delete, Get, HttpCode, Inject, Param, Patch, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors,
 } from '@nestjs/common';
@@ -596,6 +597,54 @@ export class WebhooksController {
     }
     return this.inbox.ingest('sandbox', body);
   }
+}
+
+/**
+ * Customer control centre (W2.4). No sign-in: the customer's link, sent in the X-Customer-Link header, is looked up
+ * again on every request. State changes still need the usual X-Requested-With header (the page sends it).
+ */
+@Controller('v1/customer')
+export class CustomerPortalController {
+  constructor(@Inject(CustomerPortalService) private readonly portal: CustomerPortalService) {}
+  private link(req: CfRequest) {
+    const h = req.headers[LINK_HEADER];
+    return this.portal.open(typeof h === 'string' ? h : undefined, req.ip ?? null);
+  }
+
+  @Public() @Get('portal')
+  async view(@Req() req: CfRequest) { return this.portal.view(await this.link(req)); }
+
+  @Public() @Post('preferences') @HttpCode(200)
+  async prefs(@Req() req: CfRequest, @Body() body: unknown) { return this.portal.setPreferences(await this.link(req), body); }
+
+  @Public() @Post('consent') @HttpCode(200)
+  async consent(@Req() req: CfRequest, @Body() body: unknown) { return this.portal.setConsent(await this.link(req), body); }
+
+  @Public() @Post('requests') @HttpCode(201)
+  async request(@Req() req: CfRequest, @Body() body: unknown) { return this.portal.request(await this.link(req), body); }
+}
+
+@Controller('v1')
+export class CustomerLinksController {
+  constructor(@Inject(CustomerLinksService) private readonly links: CustomerLinksService) {}
+
+  @RequirePermission('inbox.reply') @Post('conversations/:id/customer-links')
+  issue(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.links.issue(actor, id, body); }
+
+  @RequirePermission('inbox.reply') @Get('conversations/:id/customer-links')
+  list(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.links.list(actor, id); }
+
+  @RequirePermission('inbox.reply') @Post('conversations/:id/customer-links/revoke-all') @HttpCode(200)
+  revokeAll(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.links.revokeAll(actor, id); }
+
+  @RequirePermission('inbox.reply') @Post('customer-links/:id/revoke') @HttpCode(200)
+  revoke(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.links.revoke(actor, id); }
+
+  @RequirePermission('inbox.reply') @Get('conversations/:id/customer-requests')
+  requests(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.links.requests(actor, id); }
+
+  @RequirePermission('inbox.reply') @Post('customer-requests/:id/handled') @HttpCode(200)
+  handle(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.links.handle(actor, id); }
 }
 
 @Controller('v1/conversations')

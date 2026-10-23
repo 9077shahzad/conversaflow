@@ -94,6 +94,10 @@ async function populate(owner: Client, label: string, tenantId: string) {
   const inbound = await withContext(t.deps.db, { tenantId, userId: owner.userId! }, async (tx) =>
     (await tx.query<{ id: string }>(`SELECT id FROM messages WHERE direction = 'in' AND body IS NOT NULL LIMIT 1`)).rows[0]!.id);
   await owner.post(`/v1/messages/${inbound}/translate`, { to: 'ar' }).expect(200);
+  // Wave 2 (W2.4): a customer page link and a request made through it.
+  const link = (await owner.post(`/v1/conversations/${conv.id}/customer-links`, { days: 1 }).expect(201)).body;
+  await request(t.app.getHttpServer()).post('/v1/customer/requests').set('X-Requested-With', 'conversaflow')
+    .set('X-Customer-Link', link.url.split('#')[1]).send({ kind: 'talk_to_person' }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;

@@ -35,7 +35,8 @@ const REVIEWED_TRIGGER_FUNCTIONS: Record<string, string> = {
  */
 const COMPANY_TABLE_READERS: Record<string, string[]> = {
   cf_auth: ['invitations'],
-  cf_channel: ['channel_connections', 'provider_accounts'],
+  // customer_links: routing columns of links neither revoked nor expired (migration 0051, W2.4)
+  cf_channel: ['channel_connections', 'provider_accounts', 'customer_links'],
   // import_batches: only unimported previews older than a day, so their rows can be emptied (migration 0041)
   // webhook_events: scheduling columns of events not yet applied, so the worker can lease them (migration 0042)
   // workflow_runs: scheduling columns of automation runs under way (migration 0045)
@@ -90,6 +91,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // cf_channel and cf_dispatch: webhook routing and send-job leasing (migrations 0022, 0024)
   'channel_route(text,text)': '1df6e4008edea1274471be11593aa226',
   'account_route(text,text)': '19be2ce700975b7c99cf8520ccb99891',
+  // cf_channel: customer page links (migration 0051, W2.4)
+  'customer_link_route(bytea)': '7cef33f7719ff13769f9e0fc3cdd16a2',
   'dispatch_claim(integer,integer)': '69cd1d0ac8475917c80b9676b32d79b4',
   'media_claim(integer,integer)': '60252793661bcad14021c70cf1292897',
   'campaign_claim(integer,integer)': '67d00d321cc9f4d3ad02f8ec88136888',
@@ -144,11 +147,13 @@ const REVIEWED_POLICY_FUNCTIONS: Record<string, string> = {
 const CHANNEL_ROUTING_COLUMNS: Record<string, string[]> = {
   channel_connections: ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'],
   provider_accounts: ['id', 'tenant_id', 'provider', 'account_id', 'status'],
+  customer_links: ['id', 'tenant_id', 'contact_id', 'conversation_id', 'token_hash', 'expires_at', 'revoked_at'],
 };
 /** The only functions cf_channel may own, pinned to the md5 of their reviewed definitions. */
 const CHANNEL_FUNCTIONS: Record<string, string> = {
   'channel_route(text,text)': '36b3b2385d8d3b07fd294ab6aa8033b7',
   'account_route(text,text)': '771c221d8b88a73a47dee069b8430bd5',
+  'customer_link_route(bytea)': 'acd109038d1099b623bb9298abae02ee',
 };
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {
