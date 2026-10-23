@@ -1,6 +1,7 @@
 'use client';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import { OutcomesPanel } from '@/components/Outcomes';
 import { api, ApiError } from '@/lib/api';
 import { fill, isLocale, t, type Locale } from '@/lib/i18n';
 
@@ -55,6 +56,7 @@ export default function Reports() {
       <h1 className="text-2xl font-bold text-navy sm:text-3xl">{d.title}</h1>
       <p className="mt-1 text-sm text-slate-700">{d.intro}</p>
       {access && !allowed && <p className="mt-4 text-sm text-slate-700">{d.noAccess}</p>}
+      {allowed && <OutcomesPanel locale={locale} />}
       {allowed && (
         <section className="mt-5 rounded-xl border border-slate-200 bg-white p-4" aria-labelledby="ads-h">
           <h2 id="ads-h" className="text-lg font-semibold text-navy">{d.adsTitle}</h2>

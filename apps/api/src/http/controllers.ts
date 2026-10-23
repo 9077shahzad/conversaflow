@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { OutcomesService } from '../modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
 import { PromisesService } from '../modules/promises';
 import { PushService } from '../modules/push';
@@ -524,7 +525,13 @@ export class AutomationRunsController {
 
 @Controller('v1/reports')
 export class ReportsController {
-  constructor(@Inject(ReportsService) private readonly reports: ReportsService) {}
+  constructor(@Inject(ReportsService) private readonly reports: ReportsService, @Inject(OutcomesService) private readonly outcomes: OutcomesService) {}
+
+  /** Outcomes and known costs for a period (W2.9), with what is not measured yet and the assumptions used. */
+  @RequirePermission('reports.read') @Get('outcomes')
+  outcomesReport(@CurrentActor() actor: TenantActor, @Query() q: Record<string, string>) {
+    return this.outcomes.report(actor, q);
+  }
 
   /** Click-to-WhatsApp ads: conversations credited to each ad and what happened next (counts only). */
   @RequirePermission('reports.read') @Get('ads')
