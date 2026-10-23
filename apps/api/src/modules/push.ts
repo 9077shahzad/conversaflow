@@ -68,8 +68,10 @@ const SubscribeInput = z.object({
 const PrefsInput = z.object({ assigned: z.boolean(), unassigned: z.boolean(), customerRequests: z.boolean() }).strict();
 
 const TEXT = {
-  en: { new_message: ['New message', 'A customer wrote in a conversation.'], customer_request: ['Customer request', 'A customer asked for help on their page.'], test: ['Notifications are on', 'This is a test from ConversaFlow.'] },
-  ar: { new_message: ['رسالة جديدة', 'كتب عميل في محادثة.'], customer_request: ['طلب عميل', 'طلب عميل المساعدة من صفحته.'], test: ['الإشعارات مفعّلة', 'هذا إشعار تجريبي من ConversaFlow.'] },
+  en: { promise_due_soon: ['Promise due soon', 'A promise to a customer is due within the hour.'], promise_missed: ['Promise missed', 'A promise to a customer passed its deadline.'],
+    new_message: ['New message', 'A customer wrote in a conversation.'], customer_request: ['Customer request', 'A customer asked for help on their page.'], test: ['Notifications are on', 'This is a test from ConversaFlow.'] },
+  ar: { promise_due_soon: ['وعد يقترب موعده', 'موعد وعد لعميل خلال ساعة.'], promise_missed: ['وعد فات موعده', 'فات موعد وعد لعميل.'],
+    new_message: ['رسالة جديدة', 'كتب عميل في محادثة.'], customer_request: ['طلب عميل', 'طلب عميل المساعدة من صفحته.'], test: ['الإشعارات مفعّلة', 'هذا إشعار تجريبي من ConversaFlow.'] },
 } as const;
 
 export class PushService {
@@ -193,7 +195,7 @@ export class PushWorker {
 
   private async one(tenantId: string, jobId: string) {
     const ctx = { tenantId, userId: null };
-    const job = await withContext(this.db, ctx, async (tx) => (await tx.query<{ kind: 'new_message' | 'customer_request' | 'test'; conversation_id: string | null; attempts: number;
+    const job = await withContext(this.db, ctx, async (tx) => (await tx.query<{ kind: 'new_message' | 'customer_request' | 'test' | 'promise_due_soon' | 'promise_missed'; conversation_id: string | null; attempts: number;
       sub_id: string; endpoint: string; p256dh: string; auth: string; locale: string }>(
       `SELECT j.kind, j.conversation_id, j.attempts, s.id AS sub_id, s.endpoint, s.p256dh, s.auth, t.locale
        FROM push_jobs j JOIN push_subscriptions s ON s.id = j.subscription_id JOIN tenants t ON t.id = j.tenant_id

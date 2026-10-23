@@ -16,7 +16,7 @@ import {
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
   TemplatesController, ContactsController, CampaignsController, SuppressionsController,
   TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-  CustomerPortalController, CustomerLinksController, NotificationsController,
+  CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -39,6 +39,7 @@ import { AutomationsService } from './modules/automations';
 import { AnthropicProvider, SimulatedAiProvider } from './modules/ai-provider';
 import { AiService } from './modules/ai';
 import { PushService, RecordingPushSender, WebPushSender } from './modules/push';
+import { PromisesService } from './modules/promises';
 import { CustomerLinksService, CustomerPortalService } from './modules/customer-links';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
@@ -93,13 +94,13 @@ export class AppModule {
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
         InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
         TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-        CustomerPortalController, CustomerLinksController, NotificationsController,
+        CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
-        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), { provide: PushService, useFactory: () => new PushService(deps, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
+        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), service(PromisesService), { provide: PushService, useFactory: () => new PushService(deps, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

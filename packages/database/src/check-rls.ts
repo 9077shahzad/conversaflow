@@ -41,7 +41,8 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
   // webhook_events: scheduling columns of events not yet applied, so the worker can lease them (migration 0042)
   // workflow_runs: scheduling columns of automation runs under way (migration 0045)
   // push_jobs: scheduling columns of notifications waiting to be sent (migration 0052, W2.5)
-  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs'],
+  // promises: scheduling columns of confirmed promises, to warn before and mark misses (migration 0053, W2.6)
+  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs', 'promises'],
   cf_identity: ['memberships'],
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
@@ -105,6 +106,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'automation_claim(integer,integer)': 'e7941674d3d76974a0cf7e67e814cf90',
   // cf_dispatch: leases notification jobs for the worker (migration 0052, W2.5)
   'push_claim(integer,integer)': '9135eef6a8f0df65916a960b7cc2f6af',
+  // cf_dispatch: confirmed promises to warn about or mark missed (migration 0053, W2.6)
+  'promises_due(integer)': '9d8420def710517608d3dc040a055351',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];

@@ -102,6 +102,8 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await owner.post('/v1/me/notifications/devices', { endpoint: `https://push.example.test/${label}`, keys: { p256dh: 'B'.repeat(87), auth: 'A'.repeat(22) } }).expect(201);
   await owner.put('/v1/me/notifications/preferences', { assigned: true, unassigned: true, customerRequests: true }).expect(200);
   await owner.post('/v1/me/notifications/test').expect(201);
+  // Wave 2 (W2.6): a promise.
+  await owner.post(`/v1/conversations/${conv.id}/promises`, { description: `Call back ${label}`, dueAt: new Date(Date.now() + 86400e3).toISOString() }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;

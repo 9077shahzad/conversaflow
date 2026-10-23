@@ -55,7 +55,7 @@ const en = {
   nav: {
     dashboard: 'Dashboard', inbox: 'Inbox', contacts: 'Contacts', campaigns: 'Campaigns', automations: 'Automations',
     reports: 'Reports', settings: 'Settings', company: 'Company', team: 'Team and roles', menu: 'Menu', main: 'Main navigation',
-    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', notifications: 'Notifications',
+    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', notifications: 'Notifications', promises: 'Promises',
   },
   dashboard: {
     welcome: 'Welcome, {name}',
@@ -126,6 +126,9 @@ const en = {
       customer_link_issued: 'A customer page link was created', customer_link_revoked: 'A customer page link was switched off',
       customer_request: 'The customer made a request on their page', customer_request_handled: 'A customer request was marked handled',
       customer_preferences: 'The customer changed their language',
+      promise_suggested: 'A promise was suggested from a reply', promise_confirmed: 'A promise was recorded', promise_due_soon: 'A promise is due within the hour',
+      promise_missed: 'A promise was missed', promise_kept: 'A promise was kept', promise_recovered: 'A missed promise was put right',
+      promise_dismissed: 'A suggested promise was dismissed', promise_cancelled: 'A promise was cancelled',
     } as Record<string, string>,
     tags: 'Tags', addTag: 'Add a tag', removeTag: 'Remove tag {name}', noTagsYet: 'No tags yet. A supervisor can add them in Inbox setup.',
     tagFilter: 'Filter by tag', allTags: 'All tags',
@@ -416,6 +419,16 @@ const en = {
     errors: { too_many_devices: 'Notifications are on for 10 devices already. Remove one first.', no_devices: 'Turn on notifications on this device first.',
       denied: 'Notifications are blocked for this site in your browser settings.', no_keys: 'Notifications are not set up for this installation yet.' } as Record<string, string>,
   },
+  promises: {
+    title: 'Promises', intro: 'What the team told customers it would do, with a deadline and the person responsible. You are warned an hour before a deadline; a missed promise is shown until it is put right.',
+    none: 'No promises in this conversation yet.', noneHere: 'Nothing here.', add: 'Record a promise', what: 'What was promised', byWhen: 'By when (your time)',
+    save: 'Save', cancelEdit: 'Cancel', confirm: 'Confirm', dismiss: 'Not a promise', kept: 'Kept', cancel: 'Cancel promise', recover: 'Put right',
+    recoverHow: 'How was it put right?', due: 'due {when}', fromReply: 'suggested from a reply', because: 'Suggested because the reply said: "{words}"', open: 'Open the conversation',
+    statuses: { suggested: 'Suggested', confirmed: 'Open', kept: 'Kept', missed: 'Missed', recovered: 'Put right', dismissed: 'Not a promise', cancelled: 'Cancelled' } as Record<string, string>,
+    tabs: { open: 'Open', missed: 'Missed', closed: 'Closed' } as Record<string, string>, everyone: 'Everyone\'s promises',
+    rules: 'Detected promises', autoConfirm: 'Confirm detected promises automatically, with the person who wrote the reply as owner (otherwise they are suggestions to confirm)',
+    errors: { promise_changed: 'Someone else changed this promise. It has been reloaded.', promise_closed: 'This promise is no longer open.', promise_state: 'That is not possible for this promise now.' } as Record<string, string>,
+  },
   ai: {
     title: 'AI assistant', intro: 'The AI drafts and answers using only your company\'s own knowledge and settings. It never confirms bookings, refunds or payments, and a person can always take over.',
     noAccess: 'These settings need the AI management or knowledge permission.', needsMfa: 'Set up two-step sign-in to change AI settings.',
@@ -560,7 +573,7 @@ const ar: typeof en = {
   nav: {
     dashboard: 'لوحة التحكم', inbox: 'صندوق الوارد', contacts: 'جهات الاتصال', campaigns: 'الحملات', automations: 'الأتمتة',
     reports: 'التقارير', settings: 'الإعدادات', company: 'الشركة', team: 'الفريق والأدوار', menu: 'القائمة', main: 'التنقل الرئيسي',
-    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', notifications: 'الإشعارات',
+    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', notifications: 'الإشعارات', promises: 'الوعود',
   },
   dashboard: {
     welcome: 'مرحبًا، {name}',
@@ -631,6 +644,9 @@ const ar: typeof en = {
       customer_link_issued: 'أُنشئ رابط لصفحة العميل', customer_link_revoked: 'أُوقف رابط لصفحة العميل',
       customer_request: 'قدّم العميل طلبًا من صفحته', customer_request_handled: 'تمت معالجة طلب للعميل',
       customer_preferences: 'غيّر العميل لغته',
+      promise_suggested: 'اقتُرح وعد من رد', promise_confirmed: 'سُجّل وعد', promise_due_soon: 'يحين موعد وعد خلال ساعة',
+      promise_missed: 'فات موعد وعد', promise_kept: 'تم الوفاء بوعد', promise_recovered: 'عولج وعد فائت',
+      promise_dismissed: 'رُفض وعد مقترح', promise_cancelled: 'أُلغي وعد',
     },
     tags: 'الوسوم', addTag: 'أضف وسمًا', removeTag: 'إزالة الوسم {name}', noTagsYet: 'لا توجد وسوم بعد. يمكن للمشرف إضافتها في إعداد صندوق الوارد.',
     tagFilter: 'تصفية حسب الوسم', allTags: 'كل الوسوم',
@@ -920,6 +936,16 @@ const ar: typeof en = {
     devices: 'أجهزتي', noDevices: 'الإشعارات غير مفعّلة على أي جهاز.', unknownDevice: 'جهاز غير معروف', remove: 'إزالة',
     errors: { too_many_devices: 'الإشعارات مفعّلة على 10 أجهزة. أزل أحدها أولًا.', no_devices: 'فعّل الإشعارات على هذا الجهاز أولًا.',
       denied: 'الإشعارات محظورة لهذا الموقع في إعدادات المتصفح.', no_keys: 'الإشعارات غير مضبوطة لهذه النسخة بعد.' } as Record<string, string>,
+  },
+  promises: {
+    title: 'الوعود', intro: 'ما وعد به الفريق العملاء، مع الموعد والشخص المسؤول. تصلك تنبيهات قبل الموعد بساعة، ويبقى الوعد الفائت ظاهرًا حتى تتم معالجته.',
+    none: 'لا توجد وعود في هذه المحادثة بعد.', noneHere: 'لا يوجد شيء هنا.', add: 'تسجيل وعد', what: 'ما الذي وُعد به', byWhen: 'الموعد (بتوقيتك)',
+    save: 'حفظ', cancelEdit: 'إلغاء', confirm: 'تأكيد', dismiss: 'ليس وعدًا', kept: 'تم الوفاء', cancel: 'إلغاء الوعد', recover: 'معالجة',
+    recoverHow: 'كيف تمت المعالجة؟', due: 'الموعد {when}', fromReply: 'مقترح من رد', because: 'اقتُرح لأن الرد قال: «{words}»', open: 'فتح المحادثة',
+    statuses: { suggested: 'مقترح', confirmed: 'قائم', kept: 'تم الوفاء', missed: 'فائت', recovered: 'تمت المعالجة', dismissed: 'ليس وعدًا', cancelled: 'ملغى' } as Record<string, string>,
+    tabs: { open: 'قائمة', missed: 'فائتة', closed: 'مغلقة' } as Record<string, string>, everyone: 'وعود الجميع',
+    rules: 'الوعود المكتشفة', autoConfirm: 'تأكيد الوعود المكتشفة تلقائيًا، ويكون كاتب الرد هو المسؤول (وإلا تبقى اقتراحات تحتاج إلى تأكيد)',
+    errors: { promise_changed: 'غيّر شخص آخر هذا الوعد. أُعيد تحميله.', promise_closed: 'هذا الوعد لم يعد قائمًا.', promise_state: 'هذا غير ممكن لهذا الوعد الآن.' } as Record<string, string>,
   },
   ai: {
     title: 'مساعد الذكاء الاصطناعي', intro: 'يكتب الذكاء الاصطناعي المسودات ويجيب اعتمادًا على معرفة شركتك وإعداداتها فقط. لا يؤكد أبدًا حجزًا أو استردادًا أو دفعًا، ويمكن لأي شخص من الفريق التدخل دائمًا.',

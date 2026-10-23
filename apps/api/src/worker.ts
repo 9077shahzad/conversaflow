@@ -6,6 +6,7 @@
  * file checked for malware before it is stored). Sending recovers by itself: an expired lease is picked up again, and a
  * message that may already have reached the provider becomes 'uncertain' instead of being sent twice.
  */
+import { PromiseWatcher } from './modules/promises';
 import { PushWorker, RecordingPushSender, WebPushSender } from './modules/push';
 import { createPool } from '@conversaflow/database';
 import { z } from 'zod';
@@ -89,6 +90,7 @@ const inbound = new InboundProcessor(appDb);
 // AI for the "AI reply" automation step: the same configuration as the API (simulated unless an AI account is set up).
 const aiService = new AiService({ db: appDb, config: { NODE_ENV: env.NODE_ENV, AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
   env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
+const promiseWatcher = new PromiseWatcher(appDb);
 const pushWorker = new PushWorker(appDb, env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
   ? new WebPushSender({ publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT })
   : new RecordingPushSender());
@@ -119,6 +121,13 @@ process.on('SIGINT', () => (stopping = true));
         console.error('inbound error', err instanceof Error ? err.message : err);
       }
       await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
+    }
+  })();
+  // Promises (W2.6): warnings before deadlines, and misses (checked every minute).
+  void (async () => {
+    while (!stopping) {
+      try { await promiseWatcher.dispatchDue(200); } catch (err) { console.error('promise error', err instanceof Error ? err.message : err); }
+      await new Promise((r) => setTimeout(r, 60_000));
     }
   })();
   // Notifications on the team's devices (W2.5).

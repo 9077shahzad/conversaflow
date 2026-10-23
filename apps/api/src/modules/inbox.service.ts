@@ -5,6 +5,7 @@ import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { queueConversationNotice } from './push';
+import { suggestFromReply } from './promises';
 import { maskLinks } from './customer-links';
 import { consentKeyword, type ParsedEvent, type Provider } from './channels';
 import { InboundProcessor, recordWebhook } from './inbound';
@@ -436,6 +437,8 @@ export class InboxService {
       'INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2) RETURNING id', [actor.tenantId, msg.id])).rows[0]!;
     // A person on the team wrote: automations stop in this conversation (FR-206).
     await stopAutomationRuns(tx, c.id, 'person_replied');
+    // A commitment with a time in the reply becomes a suggested promise for the writer to confirm (W2.6).
+    if (text && !template) await suggestFromReply(tx, { tenantId: actor.tenantId, userId: actor.userId, membershipId: actor.membershipId, conversationId: c.id, messageId: msg.id, text });
     await tx.query(
       `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4,
               activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,

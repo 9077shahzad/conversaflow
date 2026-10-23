@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { PromisesService } from '../modules/promises';
 import { PushService } from '../modules/push';
 import { CustomerLinksService, CustomerPortalService, LINK_HEADER } from '../modules/customer-links';
 import {
@@ -676,6 +677,33 @@ export class NotificationsController {
 
   @RequirePermission('inbox.reply') @Post('test') @HttpCode(201)
   test(@CurrentActor() actor: TenantActor) { return this.push.test(actor); }
+}
+
+/** Promises made to customers (W2.6). Visibility follows the inbox rule. */
+@Controller('v1')
+export class PromisesController {
+  constructor(@Inject(PromisesService) private readonly promises: PromisesService) {}
+
+  @RequirePermission('inbox.reply') @Get('promises')
+  list(@CurrentActor() actor: TenantActor, @Query() q: unknown) { return this.promises.list(actor, q); }
+
+  @RequirePermission('inbox.reply') @Get('conversations/:id/promises')
+  forConversation(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.promises.forConversation(actor, id); }
+
+  @RequirePermission('inbox.reply') @Post('conversations/:id/promises') @HttpCode(201)
+  create(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.promises.create(actor, id, body); }
+
+  @RequirePermission('inbox.reply') @Post('promises/:id/confirm') @HttpCode(200)
+  confirm(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.promises.confirm(actor, id, body); }
+
+  @RequirePermission('inbox.reply') @Post('promises/:id/close') @HttpCode(200)
+  close(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.promises.close(actor, id, body); }
+
+  @RequirePermission('inbox.assign') @Get('promises/settings')
+  settings(@CurrentActor() actor: TenantActor) { return this.promises.settings(actor); }
+
+  @RequirePermission('inbox.assign') @Put('promises/settings')
+  saveSettings(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.promises.saveSettings(actor, body); }
 }
 
 @Controller('v1/conversations')
