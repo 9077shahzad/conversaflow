@@ -362,3 +362,89 @@ describe('review of W2.1', () => {
     await owner.post(`/v1/automations/${id}/publish`, { expectedVersion: w.version }).expect(422);
   });
 });
+
+describe('recheck of the W2.1 review fixes', () => {
+  async function limitRuns(n: number | null) {
+    const used = Number((await app((tx) => tx.query<{ used: string }>(`SELECT coalesce((SELECT used FROM usage_counters WHERE key = 'automation_executions'
+      AND period_start = date_trunc('month', now())::date), 0) AS used`))).rows[0]!.used);
+    const db = await t.ownerDb.connect();
+    try {
+      await db.query('BEGIN');
+      await db.query('CREATE POLICY test_ov3 ON entitlement_overrides FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)');
+      await db.query(`DELETE FROM entitlement_overrides WHERE tenant_id = $1 AND key = 'automation_executions'`, [tenant]);
+      if (n !== null) {
+        await db.query(`INSERT INTO entitlement_overrides (tenant_id, key, limit_value, reason) VALUES ($1, 'automation_executions', $2, 'test')`, [tenant, used + n]);
+      }
+      await db.query('DROP POLICY test_ov3 ON entitlement_overrides');
+      await db.query('COMMIT');
+    } catch (e) { await db.query('ROLLBACK'); throw e; } finally { db.release(); }
+  }
+
+  it('N1: a run stopped by a person gives its place back; the next customer\'s run can start', async () => {
+    await pauseAll();
+    await publish('One place', { trigger: { kind: 'message_received', keywords: ['place'] }, start: 'w', steps: [{ id: 'w', kind: 'wait', minutes: 60, next: 'r' }, reply('r', 'Later', 'لاحقًا')] });
+    await limitRuns(1);
+    try {
+      const a = fresh(); const b = fresh(); const c = fresh();
+      await say(a, 'place one').expect(200);
+      await work();
+      expect((await runsFor(a))[0]!.status).toBe('waiting');            // holds the only place
+      await say(b, 'place two').expect(200);
+      await work();
+      expect((await runsFor(b)).map((r) => [r.status, r.reason])).toEqual([['skipped', 'plan_limit']]);
+      const ca = await conv(a);
+      await owner.post(`/v1/conversations/${ca.id}/reply`, { text: 'A person now', seenActivity: Number(ca.activity_seq), clientMessageId: randomUUID() }).expect(201);
+      expect((await runsFor(a))[0]!.status).toBe('stopped');
+      await say(c, 'place three').expect(200);
+      await work();
+      expect((await runsFor(c))[0]!.status).toBe('waiting');            // the stopped run's place was given back
+    } finally { await limitRuns(null); }
+  });
+
+  it('N2: a first step that fails and is retried reserves only once', async () => {
+    await pauseAll();
+    await publish('Retry once', { trigger: { kind: 'message_received', keywords: ['retryonce'] }, start: 'w', steps: [{ id: 'w', kind: 'wait', minutes: 60, next: 'r' }, reply('r', 'x', 'x')] });
+    const wa = fresh();
+    await say(wa, 'retryonce').expect(200);
+    const [run] = await runsFor(wa);
+    const failed = () => app((tx) => tx.query<{ n: string }>(`SELECT coalesce((SELECT used FROM usage_counters WHERE key = 'automation_executions_failed' AND period_start = date_trunc('month', now())::date), 0) AS n`));
+    const before = Number((await failed()).rows[0]!.n);
+    const m = new AutomationMetering(t.deps);
+    await m.startRun({ tenantId: tenant, userId: null } as never, run!.id);
+    await m.startRun({ tenantId: tenant, userId: null } as never, run!.id);
+    expect(Number((await failed()).rows[0]!.n)).toBe(before);
+    const reserved = (await app((tx) => tx.query<{ r: Date | null }>('SELECT reserved_at AS r FROM workflow_runs WHERE id = $1', [run!.id]))).rows[0]!.r;
+    expect(reserved).toBeTruthy();
+  });
+
+  it('N3: Arabic prefixes are stripped from the customer\'s words only, so a keyword never turns into another word', async () => {
+    await pauseAll();
+    await publish('Card', { trigger: { kind: 'message_received', keywords: ['بطاقة', 'الاسعار'] }, start: 'r', steps: [reply('r', 'Card!', 'بطاقة!')] });
+    const energy = fresh(); const card = fresh(); const withB = fresh(); const prices = fresh();
+    await say(energy, 'عندي مشكلة طاقة').expect(200);
+    await say(card, 'ابغى بطاقتي... أقصد البطاقة').expect(200);
+    await say(withB, 'بالبطاقة لو سمحت').expect(200);
+    await say(prices, 'كم أسعاركم؟ أبغى اسعار').expect(200);
+    await work();
+    expect(await outbound(energy)).toHaveLength(0);
+    expect(await outbound(card)).toHaveLength(1);
+    expect(await outbound(withB)).toHaveLength(1);
+    expect(await outbound(prices)).toHaveLength(1);
+  });
+
+  it('L4: a finished run\'s queued message is not sent once a person has been assigned', async () => {
+    await pauseAll();
+    await publish('Assign later', { trigger: { kind: 'message_received', keywords: ['assignlater'] }, start: 'r', steps: [reply('r', 'Automatic', 'تلقائي')] });
+    const wa = fresh();
+    await say(wa, 'assignlater').expect(200);
+    while ((await runner().dispatchDue(100)) > 0) { /* queue only */ }
+    expect((await runsFor(wa))[0]!.status).toBe('completed');
+    const c = await conv(wa);
+    const agentId = (await agent.get('/v1/me/access').expect(200)).body.membershipId;
+    await owner.post(`/v1/conversations/${c.id}/assign`, { membershipId: agentId, expectedVersion: c.version }).expect(200);
+    await new Sender(t.deps.db, t.deps.channels).dispatchDue(100);
+    const auto = (await outbound(wa)).find((m) => m.automation_run_id);
+    expect(auto).toMatchObject({ status: 'failed', error_code: 'person_assigned' });
+  });
+});
+

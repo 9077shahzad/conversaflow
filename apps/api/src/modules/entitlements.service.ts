@@ -133,25 +133,28 @@ export class AutomationMetering {
   constructor(private readonly deps: Pick<Deps, 'db'>) {}
 
   /**
-   * Starts a run: checks the limit and reserves the run id in ONE locked step, so parallel starts cannot overshoot.
+   * Starts a run: checks the limit and reserves a place for the run in ONE locked step, so parallel starts cannot
+   * overshoot. The place is held while the run is under way (workflow_runs.reserved_at); recordRunOutcome records
+   * how it ended.
    * The run is recorded as 'failed' until recordRunOutcome(..., 'completed') is called (a run that never reports
    * stays in the failed column and is not billed).
    */
   async startRun(actor: Pick<TenantActor, 'tenantId' | 'userId'>, runId: string): Promise<void> {
     await withContext(this.deps.db, actor, async (tx) => {
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 8))', [actor.tenantId]);
+      // Already holding a place (a retried first step): nothing more to reserve (recheck of W2.1, N2).
+      const mine = (await tx.query<{ reserved: boolean }>('SELECT reserved_at IS NOT NULL AS reserved FROM workflow_runs WHERE id = $1', [runId])).rows[0];
+      if (mine?.reserved) return;
       const limit = await limitFor(tx, 'automation_executions');
+      // Completed runs this month, plus live runs reserved this month and still under way. A run that is stopped,
+      // skipped or fails stops holding a place (recheck of W2.1, N1); failed runs are tracked, not billed.
       const { rows } = await tx.query<{ used: string }>(
         `SELECT coalesce((SELECT used FROM usage_counters WHERE key = 'automation_executions'
                           AND period_start = date_trunc('month', now())::date), 0)
-              + (SELECT count(*) FROM usage_events WHERE key = 'automation_run' AND outcome = 'failed'
-                   AND period_start = date_trunc('month', now())::date) AS used`);
+              + (SELECT count(*) FROM workflow_runs WHERE mode = 'live' AND status IN ('running', 'waiting')
+                   AND reserved_at >= date_trunc('month', now())) AS used`);
       if (limit !== null && Number(rows[0]!.used) >= limit) throw Errors.limitReached('automation_executions', limit);
-      await tx.query(
-        `INSERT INTO usage_events (tenant_id, key, source_id, outcome, period_start)
-         VALUES ($1, 'automation_run', $2, 'failed', date_trunc('month', now())::date) ON CONFLICT DO NOTHING`,
-        [actor.tenantId, runId]);
-      await bump(tx, actor.tenantId, 'automation_executions_failed', 1);
+      await tx.query('UPDATE workflow_runs SET reserved_at = now() WHERE id = $1', [runId]);
     });
   }
 

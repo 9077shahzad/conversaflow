@@ -327,11 +327,17 @@ const base = (w: string) => { for (const p of ['وال', 'بال', 'لل', 'ال
 /** A keyword (one or more words) matches whole words in the text, in order, never parts of words ("hi" ≠ "ship"). */
 function contains(text: string | null, words: string[]): boolean {
   if (!text) return false;
-  const t = tokens(text).map(base);
+  // Prefixes are stripped from the customer's words only, and each word is compared with and without its prefix, so
+  // a keyword is never shortened into another word ("بطاقة" card ≠ "طاقة" energy). A keyword may be written with the
+  // article "ال" (recheck of W2.1, N3).
+  const t = tokens(text).map((w) => [w, base(w)]);
+  const article = (w: string) => (w.startsWith('ال') && w.length >= 5 ? w.slice(2) : w);
   return words.some((k) => {
-    const kw = tokens(k).map(base);
+    const kw = tokens(k);
     if (kw.length === 0) return false;
-    for (let i = 0; i + kw.length <= t.length; i++) if (kw.every((w, j) => t[i + j] === w)) return true;
+    for (let i = 0; i + kw.length <= t.length; i++) {
+      if (kw.every((w, j) => t[i + j]!.includes(w) || t[i + j]!.includes(article(w)))) return true;
+    }
     return false;
   });
 }

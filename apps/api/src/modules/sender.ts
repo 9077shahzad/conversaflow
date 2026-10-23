@@ -150,11 +150,14 @@ export class Sender {
       // Automation messages: sent only while their run has not been stopped (a person replied or paused replies, the
       // automation was paused) and the automation is still active (W2.1, FR-206).
       const auto = row.automation_run_id
-        ? (await tx.query<{ status: string; mode: string; workflow_status: string; person_since: boolean; resolved: boolean }>(
+        ? (await tx.query<{ status: string; mode: string; workflow_status: string; person_since: boolean; resolved: boolean; assigned_since: boolean }>(
             // FOR SHARE: a person stopping the run at this moment waits for this check, or this check sees it (L5).
             `SELECT r.status, r.mode, w.status AS workflow_status,
                     EXISTS (SELECT 1 FROM messages h WHERE h.conversation_id = m.conversation_id AND h.direction = 'out'
                             AND h.sent_by_membership_id IS NOT NULL AND h.created_at > m.created_at) AS person_since,
+                    -- A person assigned or taking over after the message was queued (recheck of W2.1, L4).
+                    EXISTS (SELECT 1 FROM conversation_events e WHERE e.conversation_id = m.conversation_id AND e.kind IN ('assigned', 'takeover')
+                            AND e.actor_membership_id IS NOT NULL AND e.created_at > m.created_at) AS assigned_since,
                     (c.status = 'resolved') AS resolved
              FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id JOIN messages m ON m.id = $2
              JOIN conversations c ON c.id = m.conversation_id WHERE r.id = $1 FOR SHARE OF r`,
@@ -199,6 +202,7 @@ export class Sender {
           // Even a finished run's message is not sent once a person has written or the conversation is resolved (M4).
           : auto.person_since ? 'person_replied'
           : auto.resolved ? 'conversation_resolved'
+          : auto.assigned_since ? 'person_assigned'
           : auto.workflow_status !== 'active' ? 'automation_paused'
           : ctx.paused ? 'replies_paused'
           : null)

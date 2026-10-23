@@ -303,7 +303,10 @@ function Editor({ id, locale }: { id: string; locale: Locale }) {
                 <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold">{d.modes[r.mode] ?? r.mode}</span>
                 <span>{d.runStatuses[r.status] ?? r.status}{r.reason ? ` · ${d.reasons[r.reason.split(':')[0]!] ?? r.reason}` : ''}</span>
                 <span className="text-slate-700">{new Date(r.startedAt).toLocaleString(locale === 'ar' ? 'ar-SA-u-nu-latn-ca-gregory' : 'en-GB')}</span>
-                <button type="button" className="btn-secondary" onClick={async () => setRun(await api<Run>(`/v1/automation-runs/${r.id}`))}>{d.details}</button>
+                <button type="button" className="btn-secondary" onClick={async () => {
+                  try { setRun(await api<Run>(`/v1/automation-runs/${r.id}`)); }
+                  catch { setNotice({ ok: false, text: t(locale).common.error }); }
+                }}>{d.details}</button>
               </li>
             ))}
           </ul>
