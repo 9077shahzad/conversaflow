@@ -659,6 +659,9 @@ export class InboxController {
   assistSuggest(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.ai.suggestReply(actor, id); }
 
   /** Explanations of AI results in this conversation (CF-EXT-021). */
+  @RequirePermission('inbox.reply') @Get(':id/ai/:interactionId')
+  aiExplanation(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Param('interactionId') iid: string) { return this.ai.interaction(actor, id, iid); }
+
   @RequirePermission('inbox.reply') @Get(':id/ai')
   aiExplanations(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.ai.interactions(actor, id); }
 

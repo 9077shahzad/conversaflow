@@ -263,7 +263,7 @@ describe('review of W2.2/W2.3', () => {
     expect(m[0]!.ai_interaction_id).toBeTruthy();
     const why = (await app((tx) => tx.query<{ settings_version: number; checker_version: string }>('SELECT settings_version, checker_version FROM ai_interactions WHERE id = $1', [m[0]!.ai_interaction_id]))).rows[0]!;
     expect(why.settings_version).toBeGreaterThan(0);
-    expect(why.checker_version).toBe('checks-3');
+    expect(why.checker_version).toBe('checks-4');
   });
 
   it('M1: the AI is not asked when nothing could be sent (opted out, paused, resolved or outside the window)', async () => {
@@ -396,6 +396,22 @@ describe('recheck of the W2.2/W2.3 review fixes', () => {
     const c = await conv(wa);
     const ev = (await app((tx) => tx.query<{ data: { reason?: string } }>(`SELECT data FROM conversation_events WHERE conversation_id = $1 AND kind = 'ai_handoff'`, [c.id]))).rows;
     expect(ev.map((e) => e.data.reason), JSON.stringify(ev)).toContain('changed_during_ai');
+  });
+});
+
+describe('second recheck of the W2.2/W2.3 fixes', () => {
+  const src = [{ id: 'a', title: 'AC cleaning', text: 'AC cleaning costs SAR 150 per unit, minimum 2 units. Prices valid from 2026-10-10.' }];
+  it('answer mode withholds dispatch, arrival, rescheduling and money-back wording in English and Arabic', () => {
+    for (const s2 of ['We have rescheduled your visit', 'Your visit is rescheduled to Tuesday', 'We will reimburse you', 'Your money back is on us', 'Your invoice is settled',
+      'Your order went out', 'Our technician is on his way to you now', 'The technician will arrive tomorrow morning', 'We noted your visit for Tuesday',
+      'تم تسجيل طلبك', 'تم استلام طلبك', 'رجعنا لك فلوسك', 'الفني في الطريق اليك', 'سيصلك الفني غدا']) {
+      expect(checkAnswer(s2, ['a'], src, { answerMode: true }), s2).not.toEqual([]);
+    }
+  });
+  it('a currency with a number that is not right next to it is withheld in answer mode; dates are not phone numbers', () => {
+    expect(checkAnswer('Cost in SAR per split unit: 2', ['a'], src, { answerMode: true })).toContain('unsupported_price');
+    expect(checkAnswer('AC cleaning costs SAR 150 per unit.', ['a'], src, { answerMode: true })).toEqual([]);
+    expect(checkAnswer('Prices are valid from 2026-10-10.', ['a'], src)).toEqual([]);
   });
 });
 

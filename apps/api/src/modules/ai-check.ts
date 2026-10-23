@@ -13,7 +13,7 @@
  * Arabic-Indic and Persian digits to 0–9, invisible characters, tatweel and diacritics removed, alef, ya and ta
  * marbuta forms unified, lower case.
  */
-export const CHECKER_VERSION = 'checks-3';
+export const CHECKER_VERSION = 'checks-4';
 
 const INVISIBLE = /[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
 const ARABIC_MARKS = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]/g;
@@ -49,7 +49,7 @@ export function numbersIn(norm: string): string[] {
 
 /** Phone-like digit runs (8 or more digits with spaces, dots, dashes or brackets between), digits only. */
 export function phonesIn(norm: string): string[] {
-  return [...norm.matchAll(/\+?\(?\d[\d\s().-]{6,}\d/g)].map((m) => m[0].replace(/\D/g, '')).filter((d) => d.length >= 8);
+  return [...norm.replace(/\d{4}-\d{1,2}-\d{1,2}/g, ' ').matchAll(/\+?\(?\d[\d\s().-]{6,}\d/g)].map((m) => m[0].replace(/\D/g, '')).filter((d) => d.length >= 8);
 }
 
 /** Links: anything shaped like host.tld (with or without a scheme or path), and IP addresses. */
@@ -62,12 +62,17 @@ export function linksIn(norm: string): string[] {
 
 const CURRENCY = /(sar|aed|usd|qar|kwd|bhd|omr|eur|gbp|sr|\$|€|£|﷼|ر\.?س|ريال|ريالات|رس|درهم|دراهم|دولار|يورو|هلله|هللات|riyals?|rials?|dirhams?|dollars?|euros?|pounds?|halalas?)/;
 const NUMBER_WORDS = /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b|(واحد|اثنين|اثنان|ثلاث|اربع|خمس|ست|سبع|ثمان|تسع|عشر|مئه|ميه|مائه|الف|الفين)(?=[^\p{L}]|$)/u;
+/** A currency word or sign right before or after the number (spaces and a dot, colon or dash between at most). */
+function nextToCurrency(norm: string, at: number, len: number): boolean {
+  const before = norm.slice(Math.max(0, at - 10), at).replace(/[\s.:-]+$/, '');
+  const after = norm.slice(at + len, at + len + 10).replace(/^[\s.:-]+/, '');
+  return new RegExp(`(${CURRENCY.source})$`).test(before) || new RegExp(`^(${CURRENCY.source})`).test(after);
+}
 /** Amounts written next to a currency in a text: "SAR 150", "150 ريال", "١٥٠ ر.س". */
 export function pricesIn(norm: string): Set<string> {
   const out = new Set<string>();
   for (const m of norm.matchAll(/\d+(?:[.,]\d+)*/g)) {
-    const around = norm.slice(Math.max(0, m.index! - 12), m.index! + m[0].length + 12);
-    if (CURRENCY.test(around)) out.add(numbersIn(m[0])[0]!);
+    if (nextToCurrency(norm, m.index!, m[0].length)) out.add(numbersIn(m[0])[0]!);
   }
   return out;
 }
@@ -94,7 +99,7 @@ const SUCCESS_CLAIMS: RegExp[] = [
  * Answer mode is stricter (recheck N3): an answer sent without a person must not mention bookings, confirmations,
  * refunds, payments or cancellations at all, however it is phrased. In suggest mode the phrase checks above apply.
  */
-const ACTION_WORDS = /\b(book(ed|ing|ings)?|confirm(ed|s|ation)?|refund(ed|s|ing)?|paid|pay(ment|ments)?|cancel(l?ed|lation)?|reserv(e|ed|ation)|schedul(e|ed)|locked in|got you down|gone through|returned|all done|all set|guarantee(d)?)\b|(حجز|محجوز|حجوزات|تاكيد|مؤكد|موكد|اكد|استرداد|استرجاع|ارجاع المبلغ|دفع|مدفوع|سداد|الغاء|ملغي|ضمان|مضمون)/u;
+const ACTION_WORDS = /\b(book(ed|ing|ings)?|confirm(ed|s|ation)?|refund(ed|s|ing)?|reimburs\w*|paid|pay(ment|ments)?|invoice(d|s)?|settled|cancel(l?ed|lation)?|reserv(e|ed|ation)|(re)?schedul\w*|locked in|got you down|gone through|went out|returned|money back|all done|all set|guarantee(d)?|noted|on (his|her|the|its|their|our) way|arriv\w*|dispatch\w*|deliver(ed|y|ing)?|coming (to you|today|tomorrow))\b|(حجز|محجوز|حجوزات|تاكيد|مؤكد|موكد|اكد|استرداد|استرجاع|ارجاع المبلغ|رجع|فلوس|دفع|مدفوع|سداد|الغاء|ملغي|ضمان|مضمون|تسجيل|استلام|في الطريق|سيصل|يصلك|الفني|توصيل|موعد)/u;
 const LOOKALIKE_SCRIPTS = /[Ͱ-ϿЀ-ԯⰀ-ⱟꙀ-ꚟᎠ-᏿]/;
 
 export function claimsSuccess(text: string): boolean {
@@ -116,7 +121,7 @@ export function checkAnswer(text: string, citations: string[], sources: Array<{ 
 
   const knownPhones = new Set(phonesIn(corpus));
   // Numbers in the sources, leaving out the digit groups of phone numbers (they are not prices or quantities).
-  const known = new Set(numbersIn(corpus.replace(/\+?\(?\d[\d\s().-]{6,}\d/g, (m) => (m.replace(/\D/g, '').length >= 8 ? ' ' : m))));
+  const known = new Set(numbersIn(corpus.replace(/\d{4}-\d{1,2}-\d{1,2}/g, (d) => d.replace(/-/g, ' ; ')).replace(/\+?\(?\d[\d\s().-]{6,}\d/g, (m) => (m.replace(/\D/g, '').length >= 8 ? ' ' : m))));
   const knownPrices = pricesIn(corpus);
   const phoneDigits = new Set(phonesIn(answer));
   for (const p of phoneDigits) if (!knownPhones.has(p)) { reasons.push('unsupported_number'); break; }
@@ -125,9 +130,10 @@ export function checkAnswer(text: string, citations: string[], sources: Array<{ 
   for (const m of answer.matchAll(/\d+(?:[.,]\d+)*/g)) {
     const n = numbersIn(m[0])[0]!;
     if (inPhones(n)) continue;
-    const around = answer.slice(Math.max(0, m.index! - 12), m.index! + m[0].length + 12);
     // A price must be a price in a source: the same amount next to a currency there (recheck N2).
-    if (CURRENCY.test(around)) { if (!knownPrices.has(n)) { reasons.push('unsupported_price'); break; } continue; }
+    if (nextToCurrency(answer, m.index!, m[0].length)) { if (!knownPrices.has(n)) { reasons.push('unsupported_price'); break; } continue; }
+    // Answer mode: a currency anywhere with a number that is not right next to it could be a price in disguise.
+    if (opts.answerMode && CURRENCY.test(answer)) { reasons.push('unsupported_price'); break; }
     if (!known.has(n)) { reasons.push('unsupported_number'); break; }
   }
   // Amounts written in words next to a currency cannot be checked: withheld (recheck N4).

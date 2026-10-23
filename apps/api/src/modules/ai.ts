@@ -241,6 +241,17 @@ export class AiService {
     });
   }
 
+  async interaction(actor: TenantActor, conversationId: string, id: string) {
+    if (!isUuid(conversationId) || !isUuid(id)) throw Errors.notFound('Explanation');
+    return withContext(this.deps.db, actor, async (tx) => {
+      await visible(tx, actor, conversationId);
+      const r = (await tx.query(`SELECT id, task, decision, reason, reasons, citations, settings_version AS "settingsVersion", checker_version AS "checkerVersion", simulated, created_at AS "createdAt"
+        FROM ai_interactions WHERE id = $1 AND conversation_id = $2`, [id, conversationId])).rows[0];
+      if (!r) throw Errors.notFound('Explanation');
+      return r;
+    });
+  }
+
   async interactions(actor: TenantActor, conversationId: string) {
     if (!isUuid(conversationId)) throw Errors.notFound('Conversation');
     return withContext(this.deps.db, actor, async (tx) => {

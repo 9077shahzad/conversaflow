@@ -72,8 +72,7 @@ export function AiWhy({ conversationId, interactionId, locale, label }: { conver
     setOpen(!open);
     if (why || open) return;
     try {
-      const all = await api<Array<{ id: string; decision: string; reasons: string[]; citations: Array<{ title: string }>; settingsVersion: number | null; checkerVersion: string | null }>>(`/v1/conversations/${conversationId}/ai`);
-      setWhy(all.find((x) => x.id === interactionId) ?? null);
+      setWhy(await api<{ decision: string; reasons: string[]; citations: Array<{ title: string }>; settingsVersion: number | null; checkerVersion: string | null }>(`/v1/conversations/${conversationId}/ai/${interactionId}`));
     } catch { setFailed(true); }
   }
   return (
