@@ -21,6 +21,7 @@ type Item = { href: string; key: keyof ReturnType<typeof t>['nav']; later?: bool
 const ITEMS: Item[] = [
   { href: '', key: 'dashboard', icon: 'M4 13h6V4H4zm10 7h6V11h-6zM4 20h6v-5H4zm10-11h6V4h-6z' },
   { href: '/inbox', key: 'inbox', icon: 'M4 5h16v10h-5l-3 3-3-3H4z' },
+  { href: '/setup', key: 'setup', icon: 'M4 6h2m4 0h10M4 12h10m4 0h2M4 18h6m4 0h6' },
   { href: '/templates', key: 'templates', icon: 'M6 3h9l3 3v15H6zm3 7h6m-6 4h6m-6 4h4' },
   { href: '/channel-health', key: 'health', icon: 'M3 12h4l3-7 4 14 3-7h4' },
   { href: '/contacts', key: 'contacts', icon: 'M12 12a4 4 0 100-8 4 4 0 000 8zm-7 8a7 7 0 0114 0' },

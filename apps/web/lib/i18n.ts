@@ -55,7 +55,7 @@ const en = {
   nav: {
     dashboard: 'Dashboard', inbox: 'Inbox', contacts: 'Contacts', campaigns: 'Campaigns', automations: 'Automations',
     reports: 'Reports', settings: 'Settings', company: 'Company', team: 'Team and roles', menu: 'Menu', main: 'Main navigation',
-    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', notifications: 'Notifications', promises: 'Promises', developers: 'API and webhooks',
+    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', setup: 'Getting started', notifications: 'Notifications', promises: 'Promises', developers: 'API and webhooks',
   },
   dashboard: {
     welcome: 'Welcome, {name}',
@@ -458,6 +458,22 @@ const en = {
       without_person_means_no_person_wrote_before_resolving: '"Without a person" means no team member wrote before it was resolved (automations, the AI or nobody answered).',
       promises_by_due_date: 'Promises are counted by their deadline; kept on time means closed as kept by the deadline, out of those already closed or missed.', replies_sent_only: 'Replies count only messages WhatsApp accepted (not queued, failed or uncertain ones).', whole_company_counts: 'Counts cover the whole company, including conversations you cannot open; no names or messages are shown.', ai_cost_actual_simulated_zero: 'AI cost is what the AI service charged; the simulated AI costs nothing.' } as Record<string, string>,
   },
+  setup: {
+    title: 'Getting started', intro: 'The steps that get your team answering customers well, worked out from what you have already done.',
+    progress: '{done} of {total} done', go: 'Go there', doneLabel: 'done', todoLabel: 'not done yet',
+    items: { hours: 'Set your opening hours', channel: 'Connect WhatsApp (the sandbox for testing)', team: 'Invite a colleague', firstReply: 'Reply to a customer',
+      savedReply: 'Add a saved reply', knowledge: 'Publish a knowledge article for the AI', automation: 'Turn on an automation', notifications: 'Turn on notifications on your phone' } as Record<string, string>,
+    packs: 'Starter packs', packsHelp: 'Ready-made tags, saved replies in English and Arabic, knowledge drafts and an automation draft for your kind of business. Nothing goes to customers until you check, edit and publish it.',
+    packNames: { home_services: 'Home services and maintenance', clinic: 'Clinic', restaurant: 'Restaurant' } as Record<string, string>,
+    packContents: '{tags} tags · {replies} saved replies · {articles} knowledge drafts · 1 automation draft', apply: 'Add to my workspace', packApplied: 'Added. Edit the drafts before publishing them.',
+    describe: 'Describe an automation in your own words', describeHelp: 'It becomes a draft you can read step by step, rehearse and then publish. Phrasings it understands:',
+    examples: ['When a customer writes outside business hours, reply "We are closed now" and hand over to the team.', 'When a customer writes "menu", reply "Here is our menu".',
+      'عندما يكتب العميل "الأسعار" رد "أسعارنا في الرابط" ثم انتظر 2 ساعة ثم أضف الوسم "VIP"'],
+    name: 'Name', description: 'What should happen', makeDraft: 'Make a draft', drafted: 'Draft made. Open it to check and rehearse it.', openDraft: 'Open the draft',
+    errors: { not_understood: 'This could not be turned into steps. Use the phrasings above, or build it step by step on the Automations page.', forbidden: 'You do not have permission to add these.' } as Record<string, string>,
+    skipped: 'Not added (needs permission): {what}.', partNames: { tags: 'tags', replies: 'saved replies', articles: 'knowledge drafts' } as Record<string, string>,
+    makeAutomation: 'Make the automation draft', automationOffer: 'Suggested automation: {name}',
+  },
   ai: {
     title: 'AI assistant', intro: 'The AI drafts and answers using only your company\'s own knowledge and settings. It never confirms bookings, refunds or payments, and a person can always take over.',
     noAccess: 'These settings need the AI management or knowledge permission.', needsMfa: 'Set up two-step sign-in to change AI settings.',
@@ -602,7 +618,7 @@ const ar: typeof en = {
   nav: {
     dashboard: 'لوحة التحكم', inbox: 'صندوق الوارد', contacts: 'جهات الاتصال', campaigns: 'الحملات', automations: 'الأتمتة',
     reports: 'التقارير', settings: 'الإعدادات', company: 'الشركة', team: 'الفريق والأدوار', menu: 'القائمة', main: 'التنقل الرئيسي',
-    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', notifications: 'الإشعارات', promises: 'الوعود', developers: 'الواجهة البرمجية',
+    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', setup: 'البدء', notifications: 'الإشعارات', promises: 'الوعود', developers: 'الواجهة البرمجية',
   },
   dashboard: {
     welcome: 'مرحبًا، {name}',
@@ -1004,6 +1020,22 @@ const ar: typeof en = {
     assumptions: { resolved_last_in_period: 'تُحسب المحادثة محلولة في الفترة إذا كان آخر حل لها ضمنها.', repeat_within_30_days: 'العميل العائد بدأ محادثة أخرى خلال 30 يومًا من محادثة سابقة.',
       without_person_means_no_person_wrote_before_resolving: '«دون شخص» تعني أن أحدًا من الفريق لم يكتب قبل الحل (ردّت الأتمتة أو الذكاء الاصطناعي أو لم يردّ أحد).',
       promises_by_due_date: 'تُحسب الوعود حسب موعدها؛ «في موعدها» تعني أنها أُغلقت كمنجزة قبل الموعد، من بين الوعود المغلقة أو الفائتة.', replies_sent_only: 'تُحسب الردود التي قبلها واتساب فقط (لا المنتظرة أو الفاشلة أو غير المؤكدة).', whole_company_counts: 'تشمل الأرقام الشركة كلها، بما فيها محادثات لا يمكنك فتحها؛ ولا تُعرض أسماء أو رسائل.', ai_cost_actual_simulated_zero: 'تكلفة الذكاء الاصطناعي هي ما تحاسب عليه الخدمة، والذكاء الاصطناعي المحاكى بلا تكلفة.' } as Record<string, string>,
+  },
+  setup: {
+    title: 'البدء', intro: 'الخطوات التي تساعد فريقك على خدمة العملاء جيدًا، محسوبة مما أنجزته بالفعل.',
+    progress: 'تم {done} من {total}', go: 'الانتقال', doneLabel: 'تم', todoLabel: 'لم يتم بعد',
+    items: { hours: 'حدد مواعيد العمل', channel: 'اربط واتساب (البيئة التجريبية للاختبار)', team: 'ادعُ زميلًا', firstReply: 'رد على عميل',
+      savedReply: 'أضف ردًا محفوظًا', knowledge: 'انشر مقال معرفة للذكاء الاصطناعي', automation: 'شغّل أتمتة', notifications: 'فعّل الإشعارات على هاتفك' } as Record<string, string>,
+    packs: 'حزم البداية', packsHelp: 'وسوم جاهزة وردود محفوظة بالعربية والإنجليزية ومسودات معرفة ومسودة أتمتة لنوع نشاطك. لا يصل شيء إلى العملاء حتى تراجعه وتعدله وتنشره.',
+    packNames: { home_services: 'خدمات المنازل والصيانة', clinic: 'عيادة', restaurant: 'مطعم' } as Record<string, string>,
+    packContents: '{tags} وسوم · {replies} ردود محفوظة · {articles} مسودات معرفة · مسودة أتمتة واحدة', apply: 'إضافتها إلى مساحة العمل', packApplied: 'أُضيفت. عدّل المسودات قبل نشرها.',
+    describe: 'صف الأتمتة بكلماتك', describeHelp: 'تتحول إلى مسودة تقرؤها خطوة بخطوة وتجربها ثم تنشرها. صيغ مفهومة:',
+    examples: ['When a customer writes outside business hours, reply "We are closed now" and hand over to the team.', 'When a customer writes "menu", reply "Here is our menu".',
+      'عندما يكتب العميل "الأسعار" رد "أسعارنا في الرابط" ثم انتظر 2 ساعة ثم أضف الوسم "VIP"'],
+    name: 'الاسم', description: 'ما الذي يجب أن يحدث', makeDraft: 'إنشاء مسودة', drafted: 'أُنشئت المسودة. افتحها لمراجعتها وتجربتها.', openDraft: 'فتح المسودة',
+    errors: { not_understood: 'تعذر تحويل الوصف إلى خطوات. استخدم الصيغ أعلاه، أو أنشئها خطوة بخطوة من صفحة الأتمتة.', forbidden: 'ليست لديك صلاحية إضافة هذه العناصر.' } as Record<string, string>,
+    skipped: 'لم تُضف (تتطلب صلاحية): {what}.', partNames: { tags: 'الوسوم', replies: 'الردود المحفوظة', articles: 'مسودات المعرفة' } as Record<string, string>,
+    makeAutomation: 'إنشاء مسودة الأتمتة', automationOffer: 'أتمتة مقترحة: {name}',
   },
   ai: {
     title: 'مساعد الذكاء الاصطناعي', intro: 'يكتب الذكاء الاصطناعي المسودات ويجيب اعتمادًا على معرفة شركتك وإعداداتها فقط. لا يؤكد أبدًا حجزًا أو استردادًا أو دفعًا، ويمكن لأي شخص من الفريق التدخل دائمًا.',

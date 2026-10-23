@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { SetupService } from '../modules/setup';
 import { OutcomesService } from '../modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
 import { PromisesService } from '../modules/promises';
@@ -802,6 +803,25 @@ export class DevelopersController {
   deliveries(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.hooks.deliveries(actor, id); }
   @RequirePermission('api.manage') @Post('deliveries/:id/resend') @HttpCode(201)
   resend(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.hooks.resend(actor, id); }
+}
+
+/** Guided setup (W2.7): checklist for everyone in the company; packs and drafts for those who manage these things. */
+@Controller('v1/setup')
+export class SetupController {
+  constructor(@Inject(SetupService) private readonly setup: SetupService) {}
+
+  @RequirePermission('tenant.read') @Get('checklist')
+  checklist(@CurrentActor() actor: TenantActor) { return this.setup.checklist(actor); }
+
+  @RequirePermission('tenant.read') @Get('packs')
+  packs(@CurrentActor() actor: TenantActor) { return this.setup.packs(actor); }
+
+  // Each part of a pack checks its own permission (tags, saved replies, knowledge) in the service.
+  @RequirePermission('tenant.read') @Post('packs/:key/apply') @HttpCode(200)
+  apply(@CurrentActor() actor: TenantActor, @Param('key') key: string) { return this.setup.applyPack(actor, key); }
+
+  @RequirePermission('automations.manage') @Post('describe') @HttpCode(201)
+  describe(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.setup.fromDescription(actor, body); }
 }
 
 @Controller('v1/conversations')
