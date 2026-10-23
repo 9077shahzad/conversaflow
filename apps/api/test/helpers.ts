@@ -30,7 +30,8 @@ export interface TestApp {
 /** `env` overrides configuration for this app only (for example `{ INBOUND_APPLY: 'worker' }`). */
 export async function startApp(env: Record<string, string> = {}): Promise<TestApp> {
   const mailer = new MemoryMailer();
-  const deps = buildDeps(loadConfig({ ...process.env, ...env }), { mailer });
+  // Outgoing webhooks may reach the test's own local receiver (never allowed in production).
+  const deps = buildDeps(loadConfig({ WEBHOOKS_ALLOW_PRIVATE: 'true', ...process.env, ...env }), { mailer });
   const app = await createApp(deps);
   const ownerDb = createPool(process.env.DATABASE_URL!, 3);
   const notifyDb = createPool(process.env.DATABASE_NOTIFY_URL!, 2);

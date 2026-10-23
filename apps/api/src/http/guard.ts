@@ -14,6 +14,7 @@ const PUBLIC = 'cf:public';
 const PERMISSION = 'cf:permission';
 const ALLOW_PENDING_MFA = 'cf:allow-pending-mfa';
 const SIGNED_WEBHOOK = 'cf:signed-webhook';
+const API_KEY = 'cf:api-key';
 
 /** No sign-in needed (sign-up, login, password reset). */
 export const Public = () => SetMetadata(PUBLIC, true);
@@ -24,6 +25,11 @@ export const RequirePermission = (permission: Permission) => SetMetadata(PERMISS
  * verify the provider's signature over the raw body before reading anything (CF-EXT-001).
  */
 export const SignedWebhook = () => SetMetadata(SIGNED_WEBHOOK, true);
+/**
+ * The public API (W2.8): authenticated by an API key in the Authorization header, checked by the handler on every
+ * request. No cookies or session are used, so the browser cross-site checks do not apply.
+ */
+export const ApiKeyAuth = () => SetMetadata(API_KEY, true);
 /** Reachable while the second sign-in step (MFA) is still outstanding. */
 export const AllowPendingMfa = () => SetMetadata(ALLOW_PENDING_MFA, true);
 
@@ -59,7 +65,7 @@ export class AccessGuard implements CanActivate {
 
     // Cross-site request forgery: state-changing calls must carry a custom header (which browsers will not
     // send cross-site without a CORS pre-flight we do not allow) and, when present, our own Origin.
-    if (meta<boolean>(SIGNED_WEBHOOK)) return true;
+    if (meta<boolean>(SIGNED_WEBHOOK) || meta<boolean>(API_KEY)) return true;
     if (!SAFE_METHODS.has(req.method)) {
       if (req.headers['x-requested-with'] !== 'conversaflow') throw new AppError(403, 'csrf', 'Request blocked.');
       const origin = req.headers.origin;

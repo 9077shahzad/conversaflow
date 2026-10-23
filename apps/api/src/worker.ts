@@ -6,6 +6,7 @@
  * file checked for malware before it is stored). Sending recovers by itself: an expired lease is picked up again, and a
  * message that may already have reached the provider becomes 'uncertain' instead of being sent twice.
  */
+import { WebhookWorker } from './modules/public-api';
 import { PromiseWatcher } from './modules/promises';
 import { PushWorker, RecordingPushSender, WebPushSender } from './modules/push';
 import { createPool } from '@conversaflow/database';
@@ -55,6 +56,8 @@ const env = z
     VAPID_PUBLIC_KEY: z.string().regex(/^[A-Za-z0-9_-]{80,100}$/).optional(),
     VAPID_PRIVATE_KEY: z.string().regex(/^[A-Za-z0-9_-]{40,50}$/).optional(),
     VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
+    // Outgoing webhooks (W2.8): private and local addresses are refused unless explicitly allowed outside production.
+    WEBHOOKS_ALLOW_PRIVATE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   })
   .parse(process.env);
 
@@ -91,6 +94,7 @@ const inbound = new InboundProcessor(appDb);
 const aiService = new AiService({ db: appDb, config: { NODE_ENV: env.NODE_ENV, AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
   env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
 const promiseWatcher = new PromiseWatcher(appDb);
+const webhooks = new WebhookWorker(appDb, undefined, env.NODE_ENV !== 'production' && env.WEBHOOKS_ALLOW_PRIVATE);
 const pushWorker = new PushWorker(appDb, env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
   ? new WebPushSender({ publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT })
   : new RecordingPushSender());
@@ -120,6 +124,13 @@ process.on('SIGINT', () => (stopping = true));
       } catch (err) {
         console.error('inbound error', err instanceof Error ? err.message : err);
       }
+      await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
+    }
+  })();
+  // Outgoing webhooks (W2.8).
+  void (async () => {
+    while (!stopping) {
+      try { while ((await webhooks.dispatchDue(100)) > 0 && !stopping) { /* drain */ } } catch (err) { console.error('webhook error', err instanceof Error ? err.message : err); }
       await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
     }
   })();

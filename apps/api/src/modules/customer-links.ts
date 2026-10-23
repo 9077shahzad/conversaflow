@@ -9,6 +9,7 @@ import { AuditService } from './audit.service';
 import { stopAutomationRuns } from './automations';
 import { isUuid } from './members.service';
 import { queueConversationNotice } from './push';
+import { emitEvent } from './public-api';
 import { startTimerOnInbound } from './sla';
 
 /**
@@ -342,6 +343,7 @@ export class CustomerPortalService {
           [l.tenantId, conv.id, JSON.stringify({ requestId: row.id, kind: body.kind })]);
         if (body.kind === 'talk_to_person' || body.kind === 'complaint') await stopAutomationRuns(tx, conv.id, 'person_requested');
         await queueConversationNotice(tx, l.tenantId, conv.id, 'customer_request');
+        await emitEvent(tx, l.tenantId, 'customer_request.created', { requestId: row.id, kind: body.kind, conversationId: conv.id, contactId: l.contactId });
       }
       await AuditService.record(tx, { tenantId: l.tenantId, actorUserId: null, action: 'customer_request.created', ip: l.ip ?? undefined,
         targetType: 'customer_request', targetId: row.id, metadata: { kind: body.kind, linkId: l.linkId } });

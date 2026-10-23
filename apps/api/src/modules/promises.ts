@@ -5,6 +5,7 @@ import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
+import { emitEvent } from './public-api';
 import { companyHours } from './sla';
 import { detectPromise } from './promise-detect';
 
@@ -258,6 +259,7 @@ export class PromiseWatcher {
       let kind: 'promise_missed' | 'promise_due_soon';
       if (p.past) {
         await tx.query(`UPDATE promises SET status = 'missed', missed_at = now(), version = version + 1 WHERE id = $1`, [p.id]);
+        await emitEvent(tx, tenantId, 'promise.missed', { promiseId: p.id, conversationId: p.conversation_id, dueAt: p.due_at });
         kind = 'promise_missed';
       } else if (p.soon && !p.warned_at) {
         await tx.query('UPDATE promises SET warned_at = now() WHERE id = $1', [p.id]);

@@ -5,7 +5,7 @@ export const ALL_PERMISSIONS = [
   'tenant.read', 'tenant.update', 'members.read', 'members.invite', 'members.manage', 'roles.read', 'roles.manage',
   'billing.read', 'billing.manage', 'audit.read', 'files.read', 'files.write', 'contacts.read', 'contacts.write',
   'inbox.read_all', 'inbox.reply', 'reports.read', 'inbox.assign', 'channels.manage', 'inbox.pause', 'templates.manage', 'channels.monitor', 'campaigns.manage', 'automations.manage', 'ai.manage', 'knowledge.manage',
-  'tags.manage', 'saved_replies.manage', 'contacts.import',
+  'tags.manage', 'saved_replies.manage', 'contacts.import', 'api.manage',
 ] as const;
 export type Permission = (typeof ALL_PERMISSIONS)[number];
 

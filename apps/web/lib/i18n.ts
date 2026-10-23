@@ -55,7 +55,7 @@ const en = {
   nav: {
     dashboard: 'Dashboard', inbox: 'Inbox', contacts: 'Contacts', campaigns: 'Campaigns', automations: 'Automations',
     reports: 'Reports', settings: 'Settings', company: 'Company', team: 'Team and roles', menu: 'Menu', main: 'Main navigation',
-    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', notifications: 'Notifications', promises: 'Promises',
+    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', notifications: 'Notifications', promises: 'Promises', developers: 'API and webhooks',
   },
   dashboard: {
     welcome: 'Welcome, {name}',
@@ -429,6 +429,20 @@ const en = {
     rules: 'Detected promises', autoConfirm: 'Confirm detected promises automatically, with the person who wrote the reply as owner (otherwise they are suggestions to confirm)',
     errors: { promise_changed: 'Someone else changed this promise. It has been reloaded.', promise_closed: 'This promise is no longer open.', promise_state: 'That is not possible for this promise now.' } as Record<string, string>,
   },
+  developers: {
+    title: 'API and webhooks', intro: 'Connect the company\'s own systems. API keys act as the person who created them, only within the access chosen. Webhooks tell your systems when something happens.',
+    noAccess: 'This page needs the API management permission (owners and admins, with two-step sign-in).',
+    keys: 'API keys', newKey: 'New API key', name: 'Name', scopes: 'Access', expires: 'Expires after (days, optional)', create: 'Create key',
+    shownOnce: 'Copy this key now. It is shown only once:', copy: 'Copy', copied: 'Copied', revoke: 'Revoke', noKeys: 'No API keys yet.',
+    states: { active: 'Active', revoked: 'Revoked', expired: 'Expired' } as Record<string, string>, requests: '{n} requests in 24 hours', lastUsed: 'last used {when}', never: 'never used',
+    scopeNames: { 'conversations:read': 'Read conversations and messages', 'messages:send': 'Send replies', 'contacts:read': 'Read contacts', 'contacts:write': 'Change contacts', 'reports:read': 'Read reports' } as Record<string, string>,
+    webhooks: 'Webhooks', newHook: 'New webhook', url: 'Address (https)', events: 'Events', add: 'Add webhook', secretOnce: 'Signing secret, shown only once:',
+    rotate: 'New secret', remove: 'Delete', disable: 'Switch off', enable: 'Switch on', deliveries: 'Recent deliveries', resend: 'Send again', noHooks: 'No webhooks yet.',
+    eventNames: { 'message.received': 'Customer message received', 'message.status': 'Message status changed', 'conversation.resolved': 'Conversation resolved', 'customer_request.created': 'Customer request', 'promise.missed': 'Promise missed' } as Record<string, string>,
+    deliveryStates: { pending: 'Waiting', leased: 'Sending', delivered: 'Delivered', failed: 'Failed' } as Record<string, string>,
+    docs: 'API reference: base address /api/v1 on the API host; send "Authorization: Bearer <key>". Replies need an "Idempotency-Key" header (a UUID). Signatures: HMAC-SHA256 of "<t>.<body>" with the secret, in the ConversaFlow-Signature header.',
+    errors: { too_many_keys: 'A company can have up to 50 active keys.', too_many_endpoints: 'A company can have up to 20 webhooks.', forbidden: 'You cannot give a key access you do not have yourself.' } as Record<string, string>,
+  },
   ai: {
     title: 'AI assistant', intro: 'The AI drafts and answers using only your company\'s own knowledge and settings. It never confirms bookings, refunds or payments, and a person can always take over.',
     noAccess: 'These settings need the AI management or knowledge permission.', needsMfa: 'Set up two-step sign-in to change AI settings.',
@@ -573,7 +587,7 @@ const ar: typeof en = {
   nav: {
     dashboard: 'لوحة التحكم', inbox: 'صندوق الوارد', contacts: 'جهات الاتصال', campaigns: 'الحملات', automations: 'الأتمتة',
     reports: 'التقارير', settings: 'الإعدادات', company: 'الشركة', team: 'الفريق والأدوار', menu: 'القائمة', main: 'التنقل الرئيسي',
-    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', notifications: 'الإشعارات', promises: 'الوعود',
+    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', notifications: 'الإشعارات', promises: 'الوعود', developers: 'الواجهة البرمجية',
   },
   dashboard: {
     welcome: 'مرحبًا، {name}',
@@ -946,6 +960,20 @@ const ar: typeof en = {
     tabs: { open: 'قائمة', missed: 'فائتة', closed: 'مغلقة' } as Record<string, string>, everyone: 'وعود الجميع',
     rules: 'الوعود المكتشفة', autoConfirm: 'تأكيد الوعود المكتشفة تلقائيًا، ويكون كاتب الرد هو المسؤول (وإلا تبقى اقتراحات تحتاج إلى تأكيد)',
     errors: { promise_changed: 'غيّر شخص آخر هذا الوعد. أُعيد تحميله.', promise_closed: 'هذا الوعد لم يعد قائمًا.', promise_state: 'هذا غير ممكن لهذا الوعد الآن.' } as Record<string, string>,
+  },
+  developers: {
+    title: 'الواجهة البرمجية وخطافات الويب', intro: 'اربط أنظمة شركتك. تعمل مفاتيح API باسم الشخص الذي أنشأها وضمن الصلاحيات المختارة فقط. وتُبلغ خطافات الويب أنظمتك عند حدوث شيء.',
+    noAccess: 'تتطلب هذه الصفحة صلاحية إدارة الواجهة البرمجية (المالكون والمسؤولون، مع التحقق بخطوتين).',
+    keys: 'مفاتيح API', newKey: 'مفتاح جديد', name: 'الاسم', scopes: 'الصلاحيات', expires: 'ينتهي بعد (أيام، اختياري)', create: 'إنشاء المفتاح',
+    shownOnce: 'انسخ هذا المفتاح الآن، فلن يظهر مرة أخرى:', copy: 'نسخ', copied: 'تم النسخ', revoke: 'إلغاء', noKeys: 'لا توجد مفاتيح بعد.',
+    states: { active: 'يعمل', revoked: 'ملغى', expired: 'منتهي' } as Record<string, string>, requests: 'عدد الطلبات خلال 24 ساعة: {n}', lastUsed: 'آخر استخدام {when}', never: 'لم يُستخدم',
+    scopeNames: { 'conversations:read': 'قراءة المحادثات والرسائل', 'messages:send': 'إرسال الردود', 'contacts:read': 'قراءة جهات الاتصال', 'contacts:write': 'تعديل جهات الاتصال', 'reports:read': 'قراءة التقارير' } as Record<string, string>,
+    webhooks: 'خطافات الويب', newHook: 'خطاف جديد', url: 'العنوان (https)', events: 'الأحداث', add: 'إضافة الخطاف', secretOnce: 'مفتاح التوقيع، يظهر مرة واحدة فقط:',
+    rotate: 'مفتاح توقيع جديد', remove: 'حذف', disable: 'إيقاف', enable: 'تشغيل', deliveries: 'آخر الإرسالات', resend: 'إرسال مرة أخرى', noHooks: 'لا توجد خطافات بعد.',
+    eventNames: { 'message.received': 'وصول رسالة من عميل', 'message.status': 'تغيّر حالة رسالة', 'conversation.resolved': 'حل محادثة', 'customer_request.created': 'طلب من عميل', 'promise.missed': 'فوات موعد وعد' } as Record<string, string>,
+    deliveryStates: { pending: 'بالانتظار', leased: 'قيد الإرسال', delivered: 'وصل', failed: 'فشل' } as Record<string, string>,
+    docs: 'مرجع الواجهة: العنوان الأساسي /api/v1 على خادم الواجهة؛ أرسل «Authorization: Bearer <key>». تتطلب الردود ترويسة «Idempotency-Key» (UUID). التوقيع: HMAC-SHA256 لـ«<t>.<body>» بمفتاح التوقيع في ترويسة ConversaFlow-Signature.',
+    errors: { too_many_keys: 'يمكن للشركة امتلاك 50 مفتاحًا فعالًا كحد أقصى.', too_many_endpoints: 'يمكن للشركة امتلاك 20 خطافًا كحد أقصى.', forbidden: 'لا يمكنك منح مفتاح صلاحية لا تملكها.' } as Record<string, string>,
   },
   ai: {
     title: 'مساعد الذكاء الاصطناعي', intro: 'يكتب الذكاء الاصطناعي المسودات ويجيب اعتمادًا على معرفة شركتك وإعداداتها فقط. لا يؤكد أبدًا حجزًا أو استردادًا أو دفعًا، ويمكن لأي شخص من الفريق التدخل دائمًا.',

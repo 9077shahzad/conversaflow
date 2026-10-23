@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { signBody } from '../src/modules/channels';
 import { withContext } from '@conversaflow/database';
 import { AutomationMetering } from '../src/modules/entitlements.service';
+import { emitEvent } from '../src/modules/public-api';
 import { addMember, asOwner, enableMfa, invite, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -102,6 +103,11 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await owner.post('/v1/me/notifications/devices', { endpoint: `https://push.example.test/${label}`, keys: { p256dh: 'B'.repeat(87), auth: 'A'.repeat(22) } }).expect(201);
   await owner.put('/v1/me/notifications/preferences', { assigned: true, unassigned: true, customerRequests: true }).expect(200);
   await owner.post('/v1/me/notifications/test').expect(201);
+  // Wave 2 (W2.8): an API key used once (request log), a webhook endpoint and a delivery queued for it.
+  const apiKey = (await owner.post('/v1/developers/keys', { name: `Key ${label}`, scopes: ['conversations:read'] }).expect(201)).body.key;
+  await request(t.app.getHttpServer()).get('/api/v1/conversations').set('Authorization', `Bearer ${apiKey}`).expect(200);
+  await owner.post('/v1/developers/webhooks', { url: `https://127.0.0.1:9/${label}`, events: ['conversation.resolved'] }).expect(201);
+  await withContext(t.deps.db, { tenantId, userId: null }, (tx) => emitEvent(tx, tenantId, 'conversation.resolved', { conversationId: conv.id }));
   // Wave 2 (W2.6): a promise.
   await owner.post(`/v1/conversations/${conv.id}/promises`, { description: `Call back ${label}`, dueAt: new Date(Date.now() + 86400e3).toISOString() }).expect(201);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;

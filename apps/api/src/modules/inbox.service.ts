@@ -5,6 +5,7 @@ import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { queueConversationNotice } from './push';
+import { emitEvent } from './public-api';
 import { suggestFromReply } from './promises';
 import { maskLinks } from './customer-links';
 import { consentKeyword, type ParsedEvent, type Provider } from './channels';
@@ -353,6 +354,7 @@ export class InboxService {
         `INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data) VALUES ($1, $2, 'status_changed', $3, $4)`,
         [actor.tenantId, c.id, actor.membershipId, JSON.stringify({ from: c.status, to })]);
       if (to === 'resolved') await stopAutomationRuns(tx, c.id, 'conversation_resolved');
+      if (to === 'resolved') await emitEvent(tx, actor.tenantId, 'conversation.resolved', { conversationId: c.id });
       return { id: c.id, status: to, version: upd.rows[0]!.version };
     });
   }
@@ -428,11 +430,11 @@ export class InboxService {
     template?: { id: string; params: string[]; category: string }, media?: { type: string; fileId: string; mime: string; filename: string }) {
     const msg = (await tx.query<{ id: string; occurred_at: Date }>(
       `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status,
-                             retry_of, template_id, template_params, pricing_category, media_type, media_status, file_id, media_mime, media_filename)
-       VALUES ($1, $2, 'out', $7, $3, $4, $5, clock_timestamp(), 'queued', $6, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id, occurred_at`,
+                             retry_of, template_id, template_params, pricing_category, media_type, media_status, file_id, media_mime, media_filename, api_key_id)
+       VALUES ($1, $2, 'out', $7, $3, $4, $5, clock_timestamp(), 'queued', $6, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id, occurred_at`,
       [actor.tenantId, c.id, text || null, clientMessageId, actor.membershipId, retryOf, template ? 'template' : media ? 'media' : 'text',
         template?.id ?? null, template ? JSON.stringify(template.params) : null, template?.category ?? 'service',
-        media?.type ?? null, media ? 'available' : null, media?.fileId ?? null, media?.mime ?? null, media?.filename ?? null])).rows[0]!;
+        media?.type ?? null, media ? 'available' : null, media?.fileId ?? null, media?.mime ?? null, media?.filename ?? null, actor.apiKeyId ?? null])).rows[0]!;
     const job = (await tx.query<{ id: string }>(
       'INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2) RETURNING id', [actor.tenantId, msg.id])).rows[0]!;
     // A person on the team wrote: automations stop in this conversation (FR-206).
@@ -453,6 +455,11 @@ export class InboxService {
     } catch (err) {
       console.error('immediate send failed; the worker will continue', err instanceof Error ? err.message : err);
     }
+  }
+
+  /** The conversation's activity counter now (public API sends that do not name one). Visibility applies. */
+  async currentActivity(actor: TenantActor, id: string): Promise<number> {
+    return withContext(this.deps.db, actor, async (tx) => Number((await this.loadVisible(tx, actor, id)).activity_seq));
   }
 
   async reply(actor: TenantActor, id: string, input: unknown) {
@@ -770,6 +777,8 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
       });
     }
   }
+  // Outgoing webhooks (W2.8): the company's own systems hear about every customer message, STOP and START included.
+  await emitEvent(tx, tenantId, 'message.received', { conversationId: conv.id, messageId, contactId, text: e.body ?? null, at: e.occurredAt });
   // Notifications on the team's devices (W2.5): queued in this transaction, so exactly once.
   if (!consent) await queueConversationNotice(tx, tenantId, conv.id, 'new_message');
   // Automations: started in this transaction, so exactly once per message. STOP and START never start one.

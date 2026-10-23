@@ -1,3 +1,4 @@
+import { emitEvent } from './public-api';
 import { withContext, type Db, type Tx } from '@conversaflow/database';
 import type { ObjectStorage } from '../core/storage';
 import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type MediaSendInput, type Provider } from './channels';
@@ -441,8 +442,13 @@ export async function applyStatus(
      WHERE provider_message_id = $1 AND direction = 'out'
        AND (CASE status WHEN 'queued' THEN 0 WHEN 'submitting' THEN 0 WHEN 'uncertain' THEN 0 WHEN 'sent' THEN 1
                         WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 WHEN 'failed' THEN 4 END) < $4
-     RETURNING id`, [providerMessageId, status, errorCode, rank]);
-  if (byId.rowCount) return 'applied';
+     RETURNING id, tenant_id, conversation_id`, [providerMessageId, status, errorCode, rank]);
+  if (byId.rowCount) {
+    // Outgoing webhooks (W2.8): only real changes are reported.
+    const r = byId.rows[0] as { id: string; tenant_id: string; conversation_id: string };
+    await emitEvent(tx, r.tenant_id, 'message.status', { messageId: r.id, conversationId: r.conversation_id, status, errorCode: status === 'failed' ? errorCode : null });
+    return 'applied';
+  }
   if (callbackData && /^[0-9a-f-]{36}$/i.test(callbackData)) {
     // A send we did not hear back from (uncertain or still submitting): the callback reference settles it.
     const byRef = await tx.query(
@@ -450,8 +456,10 @@ export async function applyStatus(
               error_code = CASE WHEN $2 = 'failed' THEN coalesce($3, error_code) ELSE NULL END,
               failure_kind = CASE WHEN $2 = 'failed' THEN 'provider_reported' END
        WHERE id = $4::uuid AND direction = 'out' AND provider_message_id IS NULL AND status IN ('submitting', 'uncertain')
-       RETURNING id`, [providerMessageId, status, errorCode, callbackData]);
+       RETURNING id, tenant_id, conversation_id`, [providerMessageId, status, errorCode, callbackData]);
     if (byRef.rowCount) {
+      const r = byRef.rows[0] as { id: string; tenant_id: string; conversation_id: string };
+      await emitEvent(tx, r.tenant_id, 'message.status', { messageId: r.id, conversationId: r.conversation_id, status, errorCode: status === 'failed' ? errorCode : null });
       await tx.query(`UPDATE send_jobs SET state = 'done', lease_until = NULL, updated_at = now() WHERE message_id = $1::uuid AND state <> 'dead'`, [callbackData]);
       // An uncertain reply turned out to be accepted: it answered the customer.
       if (status !== 'failed') {

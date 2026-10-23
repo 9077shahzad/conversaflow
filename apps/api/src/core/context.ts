@@ -44,6 +44,8 @@ export interface AuthSession {
 
 /** A request acting inside one company. Built only after membership has been checked. */
 export interface TenantActor {
+  /** Set when the request came through the public API with this key (W2.8). */
+  apiKeyId?: string;
   tenantId: string;
   userId: string;
   membershipId: string;

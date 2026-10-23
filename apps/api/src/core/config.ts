@@ -59,6 +59,8 @@ const Schema = z.object({
    */
   VAPID_PUBLIC_KEY: z.string().regex(/^[A-Za-z0-9_-]{80,100}$/).optional(),
   VAPID_PRIVATE_KEY: z.string().regex(/^[A-Za-z0-9_-]{40,50}$/).optional(),
+  /** Development and tests only: lets outgoing webhooks reach private addresses (never in production). */
+  WEBHOOKS_ALLOW_PRIVATE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),

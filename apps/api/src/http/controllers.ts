@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
 import { PromisesService } from '../modules/promises';
 import { PushService } from '../modules/push';
 import { CustomerLinksService, CustomerPortalService, LINK_HEADER } from '../modules/customer-links';
@@ -18,7 +19,7 @@ import { AuditService } from '../modules/audit.service';
 import { AuthService, type ClientInfo } from '../modules/auth.service';
 import { EntitlementsService } from '../modules/entitlements.service';
 import { FilesService } from '../modules/files.service';
-import { MembersService } from '../modules/members.service';
+import { isUuid, MembersService } from '../modules/members.service';
 import { PlatformService } from '../modules/platform.service';
 import { SettingsService } from '../modules/settings.service';
 import { TenantsService } from '../modules/tenants.service';
@@ -38,7 +39,7 @@ import type { Deps } from '../core/context';
 import { DEPS } from './tokens';
 import { AppError } from '../core/errors';
 import {
-  AllowPendingMfa, CurrentActor, CurrentSession, Public, RequirePermission, SESSION_COOKIE, SignedWebhook, type CfRequest,
+  ApiKeyAuth, AllowPendingMfa, CurrentActor, CurrentSession, Public, RequirePermission, SESSION_COOKIE, SignedWebhook, type CfRequest,
 } from './guard';
 
 const client = (req: CfRequest): ClientInfo => ({ ip: req.ip ?? 'unknown', userAgent: req.headers['user-agent'] });
@@ -705,6 +706,95 @@ export class PromisesController {
   // Automatic confirmation is a company decision: company settings permission (review of W2.6).
   @RequirePermission('tenant.update') @Put('promises/settings')
   saveSettings(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.promises.saveSettings(actor, body); }
+}
+
+/**
+ * Public API v1 (W2.8), for a company's own systems. Authenticated by API key; every request is logged.
+ * Base path /api/v1 on the API host (not the web app's address).
+ */
+@Controller('api/v1')
+export class PublicApiController {
+  constructor(@Inject(ApiAuth) private readonly auth: ApiAuth, @Inject(PublicApiReads) private readonly reads: PublicApiReads,
+    @Inject(InboxService) private readonly inbox: InboxService, @Inject(ReportsService) private readonly reports: ReportsService,
+    @Inject(DEPS) private readonly deps: Deps) {}
+
+  private async run<T>(req: CfRequest, route: string, fn: (c: ApiCaller) => Promise<T>): Promise<T> {
+    const started = Date.now();
+    let caller: ApiCaller | null = null;
+    try {
+      caller = await this.auth.resolve(req.headers.authorization, req.ip ?? null);
+      const out = await fn(caller);
+      await this.auth.logRequest(caller, req.method, route, req.method === 'POST' ? 201 : 200, started);
+      return out;
+    } catch (err) {
+      await this.auth.logRequest(caller, req.method, route, err instanceof AppError ? err.status : 500, started);
+      throw err;
+    }
+  }
+
+  @ApiKeyAuth() @Get('conversations')
+  conversations(@Req() req: CfRequest, @Query() q: unknown) {
+    return this.run(req, 'GET /conversations', async (c) => { requireScope(c, 'conversations:read'); return this.reads.conversations(c, q); });
+  }
+
+  @ApiKeyAuth() @Get('conversations/:id/messages')
+  messages(@Req() req: CfRequest, @Param('id') id: string, @Query() q: unknown) {
+    return this.run(req, 'GET /conversations/:id/messages', async (c) => { requireScope(c, 'conversations:read'); return this.reads.messages(c, id, q); });
+  }
+
+  /** Sends a reply as the key's member, with every check a person's reply gets. Idempotency-Key (a UUID) is required. */
+  @ApiKeyAuth() @Post('conversations/:id/messages') @HttpCode(201)
+  send(@Req() req: CfRequest, @Param('id') id: string, @Body() body: unknown) {
+    return this.run(req, 'POST /conversations/:id/messages', async (c) => {
+      requireScope(c, 'messages:send');
+      const key = req.headers['idempotency-key'];
+      if (typeof key !== 'string' || !isUuid(key)) throw Errors.badRequest('Send an Idempotency-Key header (a UUID) so a retried request never sends twice.');
+      const b = (body ?? {}) as { text?: unknown; seenActivity?: unknown };
+      const seen = typeof b.seenActivity === 'number' ? b.seenActivity : await this.inbox.currentActivity(c.actor, id);
+      const m = await this.inbox.reply(c.actor, id, { text: b.text, seenActivity: seen, clientMessageId: key });
+      return { id: (m as { id: string }).id, status: (m as { status: string }).status };
+    });
+  }
+
+  @ApiKeyAuth() @Get('contacts')
+  contacts(@Req() req: CfRequest, @Query() q: unknown) {
+    return this.run(req, 'GET /contacts', async (c) => { requireScope(c, 'contacts:read'); return this.reads.contacts(c, q); });
+  }
+
+  @ApiKeyAuth() @Get('reports/ads')
+  ads(@Req() req: CfRequest, @Query() q: unknown) {
+    return this.run(req, 'GET /reports/ads', async (c) => { requireScope(c, 'reports:read'); return this.reports.ads(c.actor, q); });
+  }
+}
+
+/** API keys and outgoing webhooks, managed in the app by owners and admins (api.manage, two-step sign-in). */
+@Controller('v1/developers')
+export class DevelopersController {
+  constructor(@Inject(ApiKeysService) private readonly keys: ApiKeysService, @Inject(WebhookEndpointsService) private readonly hooks: WebhookEndpointsService) {}
+
+  @RequirePermission('api.manage') @Get('keys')
+  listKeys(@CurrentActor() actor: TenantActor) { return this.keys.list(actor); }
+  @RequirePermission('api.manage') @Post('keys') @HttpCode(201)
+  createKey(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.keys.create(actor, body); }
+  @RequirePermission('api.manage') @Post('keys/:id/revoke') @HttpCode(200)
+  revokeKey(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.keys.revoke(actor, id); }
+  @RequirePermission('api.manage') @Get('keys/:id/log')
+  keyLog(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.keys.log(actor, id); }
+
+  @RequirePermission('api.manage') @Get('webhooks')
+  listHooks(@CurrentActor() actor: TenantActor) { return this.hooks.list(actor); }
+  @RequirePermission('api.manage') @Post('webhooks') @HttpCode(201)
+  createHook(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.hooks.create(actor, body); }
+  @RequirePermission('api.manage') @Patch('webhooks/:id')
+  updateHook(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.hooks.update(actor, id, body); }
+  @RequirePermission('api.manage') @Post('webhooks/:id/rotate') @HttpCode(200)
+  rotateHook(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.hooks.rotate(actor, id); }
+  @RequirePermission('api.manage') @Delete('webhooks/:id')
+  deleteHook(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.hooks.remove(actor, id); }
+  @RequirePermission('api.manage') @Get('webhooks/:id/deliveries')
+  deliveries(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.hooks.deliveries(actor, id); }
+  @RequirePermission('api.manage') @Post('deliveries/:id/resend') @HttpCode(201)
+  resend(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.hooks.resend(actor, id); }
 }
 
 @Controller('v1/conversations')

@@ -30,6 +30,7 @@ const ITEMS: Item[] = [
   { href: '/automations', key: 'automations', icon: 'M5 4h5v5H5zm9 11h5v5h-5zM7.5 9v4.5h9V15' },
   { href: '/reports', key: 'reports', icon: 'M5 20V10m7 10V4m7 16v-7' },
   { href: '/promises', key: 'promises', icon: 'M9 12l2 2 4-4M12 3a9 9 0 100 18 9 9 0 000-18z' },
+  { href: '/developers', key: 'developers', icon: 'M8 9l-4 3 4 3m8-6l4 3-4 3M14 5l-4 14' },
   { href: '/notifications', key: 'notifications', icon: 'M6 16V11a6 6 0 0112 0v5l2 2H4zm4 4h4' },
   { href: '/settings/company', key: 'company', icon: 'M4 21V5l8-3 8 3v16M9 21v-5h6v5' },
   { href: '/settings/team', key: 'team', icon: 'M8 11a3 3 0 100-6 3 3 0 000 6zm8 0a3 3 0 100-6 3 3 0 000 6zM2 20a6 6 0 0112 0m-2 0a6 6 0 0110 0' },
