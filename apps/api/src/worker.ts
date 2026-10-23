@@ -131,7 +131,7 @@ process.on('SIGINT', () => (stopping = true));
   // Outgoing webhooks (W2.8).
   void (async () => {
     while (!stopping) {
-      try { while ((await webhooks.dispatchDue(100)) > 0 && !stopping) { /* drain */ } } catch (err) { console.error('webhook error', err instanceof Error ? err.message : err); }
+      try { while ((await webhooks.dispatchDue()) > 0 && !stopping) { /* drain */ } } catch (err) { console.error('webhook error', err instanceof Error ? err.message : err); }
       await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
     }
   })();
