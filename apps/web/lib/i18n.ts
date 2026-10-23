@@ -390,12 +390,12 @@ const en = {
     humanNeeded: 'The AI cannot answer this. Please reply yourself', sources: 'Sources',
     translate: 'Translate', translateFailed: 'Translation unavailable', translation: 'AI translation (original above)', translationSimulated: 'Simulated translation — not a real translation (original above)',
     errors: { ai_off: 'AI features are turned off for this company.', ai_budget_used: 'This month\'s AI budget is used up.', answer_needs_real_ai: 'AI answers to customers need a connected AI service. Use suggest-only mode until then.', ai_unavailable: 'The AI service did not answer. Try again later.' } as Record<string, string>,
-    disclose: 'Add "(Automated reply)" to answers the AI sends to customers (recommended)', answerNeedsReal: 'Available once a real AI service is connected.',
+    disclose: 'Add "(Automated reply)" to answers the AI sends to customers (recommended)', answerNeedsReal: 'Available once a real AI service is connected.', why: 'why?', settingsVersionN: 'settings version {n}',
     reasons: {
       no_answer_in_sources: 'the company\'s knowledge does not answer this', no_valid_citation: 'the answer did not rely on the company\'s knowledge',
       claims_unconfirmed_success: 'the answer claimed something was booked, confirmed, refunded or paid', unsupported_price: 'the answer gave a price not in the company\'s knowledge',
       unsupported_link: 'the answer gave a link not in the company\'s knowledge', unsupported_number: 'the answer gave a number not in the company\'s knowledge',
-      low_confidence: 'the AI was not sure', ai_off: 'AI is turned off', ai_budget_used: 'this month\'s AI budget is used up', ai_unavailable: 'the AI service did not answer', unusual_characters: 'the answer used unusual characters', injection_suspected: 'a customer message looked like an attempt to change the AI\'s rules', simulated_ai: 'the simulated AI may not answer customers by itself',
+      low_confidence: 'the AI was not sure', ai_off: 'AI is turned off', ai_budget_used: 'this month\'s AI budget is used up', ai_unavailable: 'the AI service did not answer', unusual_characters: 'the answer used unusual characters', injection_suspected: 'a customer message looked like an attempt to change the AI\'s rules', simulated_ai: 'the simulated AI may not answer customers by itself', mentions_action: 'answers sent without a person may not mention bookings, payments, refunds or cancellations', changed_during_ai: 'the settings or the conversation changed while the AI was answering',
     } as Record<string, string>,
   },
   automations: {
@@ -849,12 +849,12 @@ const ar: typeof en = {
     humanNeeded: 'لا يستطيع الذكاء الاصطناعي الإجابة عن هذا. يُرجى الرد بنفسك', sources: 'المصادر',
     translate: 'ترجمة', translateFailed: 'الترجمة غير متاحة', translation: 'ترجمة بالذكاء الاصطناعي (الأصل أعلاه)', translationSimulated: 'ترجمة محاكاة — ليست ترجمة حقيقية (الأصل أعلاه)',
     errors: { ai_off: 'ميزات الذكاء الاصطناعي متوقفة لهذه الشركة.', ai_budget_used: 'استُهلكت ميزانية الذكاء الاصطناعي لهذا الشهر.', answer_needs_real_ai: 'تتطلب ردود الذكاء الاصطناعي على العملاء ربط خدمة ذكاء اصطناعي. استخدم وضع الاقتراح فقط حتى ذلك الحين.', ai_unavailable: 'لم تستجب خدمة الذكاء الاصطناعي. حاول لاحقًا.' } as Record<string, string>,
-    disclose: 'إضافة «(رد آلي)» إلى الإجابات التي يرسلها الذكاء الاصطناعي للعملاء (موصى به)', answerNeedsReal: 'متاح بعد ربط خدمة ذكاء اصطناعي حقيقية.',
+    disclose: 'إضافة «(رد آلي)» إلى الإجابات التي يرسلها الذكاء الاصطناعي للعملاء (موصى به)', answerNeedsReal: 'متاح بعد ربط خدمة ذكاء اصطناعي حقيقية.', why: 'لماذا؟', settingsVersionN: 'إصدار الإعدادات {n}',
     reasons: {
       no_answer_in_sources: 'معرفة الشركة لا تجيب عن هذا', no_valid_citation: 'لم تعتمد الإجابة على معرفة الشركة',
       claims_unconfirmed_success: 'زعمت الإجابة أن شيئًا ما حُجز أو أُكد أو استُرد أو دُفع', unsupported_price: 'ذكرت الإجابة سعرًا غير موجود في معرفة الشركة',
       unsupported_link: 'ذكرت الإجابة رابطًا غير موجود في معرفة الشركة', unsupported_number: 'ذكرت الإجابة رقمًا غير موجود في معرفة الشركة',
-      low_confidence: 'لم يكن الذكاء الاصطناعي متأكدًا', ai_off: 'الذكاء الاصطناعي متوقف', ai_budget_used: 'استُهلكت ميزانية الذكاء الاصطناعي لهذا الشهر', ai_unavailable: 'لم تستجب خدمة الذكاء الاصطناعي', unusual_characters: 'استخدمت الإجابة أحرفًا غير معتادة', injection_suspected: 'بدت رسالة العميل محاولة لتغيير قواعد الذكاء الاصطناعي', simulated_ai: 'لا يُسمح للذكاء الاصطناعي المحاكى بالرد على العملاء بنفسه',
+      low_confidence: 'لم يكن الذكاء الاصطناعي متأكدًا', ai_off: 'الذكاء الاصطناعي متوقف', ai_budget_used: 'استُهلكت ميزانية الذكاء الاصطناعي لهذا الشهر', ai_unavailable: 'لم تستجب خدمة الذكاء الاصطناعي', unusual_characters: 'استخدمت الإجابة أحرفًا غير معتادة', injection_suspected: 'بدت رسالة العميل محاولة لتغيير قواعد الذكاء الاصطناعي', simulated_ai: 'لا يُسمح للذكاء الاصطناعي المحاكى بالرد على العملاء بنفسه', mentions_action: 'لا يجوز أن تذكر الإجابات المرسلة دون شخص الحجوزات أو المدفوعات أو الاسترداد أو الإلغاء', changed_during_ai: 'تغيّرت الإعدادات أو المحادثة أثناء إجابة الذكاء الاصطناعي',
     } as Record<string, string>,
   },
   automations: {

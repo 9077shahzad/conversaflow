@@ -263,7 +263,7 @@ describe('review of W2.2/W2.3', () => {
     expect(m[0]!.ai_interaction_id).toBeTruthy();
     const why = (await app((tx) => tx.query<{ settings_version: number; checker_version: string }>('SELECT settings_version, checker_version FROM ai_interactions WHERE id = $1', [m[0]!.ai_interaction_id]))).rows[0]!;
     expect(why.settings_version).toBeGreaterThan(0);
-    expect(why.checker_version).toBe('checks-2');
+    expect(why.checker_version).toBe('checks-3');
   });
 
   it('M1: the AI is not asked when nothing could be sent (opted out, paused, resolved or outside the window)', async () => {
@@ -335,3 +335,67 @@ describe('review of W2.2/W2.3', () => {
     expect(asAgent.every((x: { rejectedText: string | null }) => x.rejectedText === null)).toBe(true);
   });
 });
+
+describe('recheck of the W2.2/W2.3 review fixes', () => {
+  const src = [{ id: 'a', title: 'AC cleaning', text: 'AC cleaning costs SAR 150 per unit, minimum 2 units. Call +966 13 000 0000.' },
+    { id: 'tool:business_hours', title: 'Business hours (from company settings)', text: 'The company is open now. Opening hours (Asia/Riyadh): sun 09:00-17:00.' }];
+
+  it('N1: first-person Arabic claims are caught', () => {
+    for (const claim of ['حجزنا لك موعد', 'اكدنا موعدك', 'حجزت لك', 'موعدك محجوز']) expect(checkAnswer(claim, ['a'], src), claim).toContain('claims_unconfirmed_success');
+  });
+
+  it('N2/N4: a price must be a price in a source; phone digits and quantities are not prices; amounts in words are withheld', () => {
+    expect(checkAnswer('It costs SAR 150 per unit.', ['a'], src)).toEqual([]);
+    for (const bad of ['It costs SAR 13', 'It costs SAR 966', 'It costs SAR 2', 'one hundred and twenty riyals', 'مئه وعشرون ريال']) {
+      expect(checkAnswer(bad, ['a'], src), bad).toContain('unsupported_price');
+    }
+    expect(checkAnswer('The minimum is 2 units.', ['a'], src)).toEqual([]);
+  });
+
+  it('N3: in answer mode, an answer naming a booking, payment, refund or cancellation in any way is withheld', () => {
+    for (const t2 of ['Booked! See you Tuesday', 'Confirmed ✅', 'Your booking: confirmed', 'consider it booked', 'locked in for Tuesday', 'We got you down',
+      'Payment has gone through', 'Your money will be returned', 'All done, the technician is coming', 'موعدك محجوز', 'You can pay by card']) {
+      expect(checkAnswer(t2, ['a'], src, { answerMode: true }), t2).not.toEqual([]);
+    }
+    // In suggest mode a person reads it first, so plain mentions are allowed.
+    expect(checkAnswer('You can pay by card when the technician arrives.', ['a'], src)).toEqual([]);
+  });
+
+  it('L5: an answer citing only the business-hours tool may be used when it repeats the tool', () => {
+    expect(checkAnswer('We are open now, Sunday 09:00-17:00.', ['tool:business_hours'], src)).toEqual([]);
+    expect(checkAnswer('We are open until 22:00.', ['tool:business_hours'], src)).toContain('unsupported_number');
+  });
+
+  it('L3: an outbound message can be translated, and an empty translation is never stored', async () => {
+    await settings({ enabled: true, mode: 'suggest', monthlyBudgetUsd: 20 });
+    const wa = fresh();
+    await say(wa, 'Hello').expect(200);
+    const c = await conv(wa);
+    await owner.post(`/v1/conversations/${c.id}/reply`, { text: 'We will check and reply', seenActivity: Number(c.activity_seq), clientMessageId: randomUUID() }).expect(201);
+    const out = (await app((tx) => tx.query<{ id: string }>(`SELECT id FROM messages WHERE conversation_id = $1 AND direction = 'out' LIMIT 1`, [c.id]))).rows[0]!;
+    const tr = (await owner.post(`/v1/messages/${out.id}/translate`, { to: 'ar' }).expect(200)).body;
+    expect(tr.text).toBe('We will check and reply');                 // simulated: unchanged and labelled
+    expect(tr.simulated).toBe(true);
+  });
+
+  it('N5: if the company turns AI answers off while the AI is answering, nothing is sent', async () => {
+    await work();                                                    // runs left by earlier tests finish first
+    await settings({ enabled: true, mode: 'answer', monthlyBudgetUsd: 20 });
+    const wa = fresh();
+    await say(wa, 'What is the AC cleaning price per split unit?').expect(200);
+    // The AI answers; before the step runs again, the owner switches to suggest-only.
+    const slow = { name: 'simulated' as const, async complete(req: Parameters<typeof t.deps.ai.complete>[0]) {
+      const r = await t.deps.ai.complete(req);
+      await settings({ mode: 'suggest' });
+      return r;
+    } };
+    const r = new AutomationRunner(t.deps.db, new AutomationMetering(t.deps), new AiService(t.deps, slow));
+    while ((await r.dispatchDue(100)) > 0) { /* drain */ }
+    await new Sender(t.deps.db, t.deps.channels).dispatchDue(100);
+    expect(await outbound(wa)).toEqual([]);
+    const c = await conv(wa);
+    const ev = (await app((tx) => tx.query<{ data: { reason?: string } }>(`SELECT data FROM conversation_events WHERE conversation_id = $1 AND kind = 'ai_handoff'`, [c.id]))).rows;
+    expect(ev.map((e) => e.data.reason), JSON.stringify(ev)).toContain('changed_during_ai');
+  });
+});
+

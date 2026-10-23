@@ -611,6 +611,13 @@ export class AutomationRunner {
         const detail = { decision: r.decision, text: r.text, reason: r.reason, citations: r.citations.map((c) => c.title), simulated: r.simulated, interactionId: r.interactionId };
         if (!live) return { next: r.decision === 'answer' ? s.next : s.ifHuman, outcome: 'would_do', detail };
         if (r.decision === 'answer' && r.text) {
+          const now = (await ctx.tx.query<{ enabled: boolean; mode: string; version: number }>('SELECT enabled, mode, version FROM ai_settings')).rows[0];
+          const latest = (await ctx.tx.query<{ id: string }>(`SELECT id FROM messages WHERE conversation_id = $1 AND direction = 'in' ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+            [ctx.run.conversation_id])).rows[0]?.id ?? null;
+          if (!now?.enabled || now.mode !== 'answer' || (r.settingsVersion !== undefined && now.version !== r.settingsVersion) || (r.lastInboundId !== undefined && latest !== r.lastInboundId)) {
+            await this.event(ctx, 'ai_handoff', { reason: 'changed_during_ai', decision: r.decision, interactionId: r.interactionId, automation: ctx.run.workflow_id });
+            return { next: s.ifHuman, outcome: 'blocked', detail: { ...detail, reason: 'changed_during_ai' } };
+          }
           // Customers are told the reply is automated unless the company turned that off (review H4).
           const disclose = (await ctx.tx.query<{ disclose: boolean }>('SELECT disclose FROM ai_settings')).rows[0]?.disclose ?? true;
           const lang = /[\u0600-\u06FF]/.test(r.text) ? 'ar' : 'en';

@@ -61,3 +61,27 @@ export function TranslateButton({ messageId, locale }: { messageId: string; loca
     }}>{error ? d.translateFailed : d.translate}</button>
   );
 }
+
+/** The label on a message the AI wrote, with its explanation on request: sources, decision and checks (CF-EXT-021). */
+export function AiWhy({ conversationId, interactionId, locale, label }: { conversationId: string; interactionId: string; locale: Locale; label: string }) {
+  const d = t(locale).ai;
+  const [why, setWhy] = useState<{ decision: string; reasons: string[]; citations: Array<{ title: string }>; settingsVersion: number | null; checkerVersion: string | null } | null>(null);
+  const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
+  async function toggle() {
+    setOpen(!open);
+    if (why || open) return;
+    try {
+      const all = await api<Array<{ id: string; decision: string; reasons: string[]; citations: Array<{ title: string }>; settingsVersion: number | null; checkerVersion: string | null }>>(`/v1/conversations/${conversationId}/ai`);
+      setWhy(all.find((x) => x.id === interactionId) ?? null);
+    } catch { setFailed(true); }
+  }
+  return (
+    <div className="mb-1 text-xs">
+      <button type="button" className="font-semibold text-violet-800 underline-offset-2 hover:underline" aria-expanded={open} onClick={toggle}>{label} · {d.why}</button>
+      {open && (failed ? <p className="text-red-800">{t(locale).common.error}</p> : why ? (
+        <p className="mt-1 text-slate-700">{d.sources}: {why.citations.map((c) => c.title).join(' · ') || '—'}{why.settingsVersion ? ` · ${d.settingsVersionN.replace('{n}', String(why.settingsVersion))}` : ''}</p>
+      ) : <p className="text-slate-700">{t(locale).common.loading}</p>)}
+    </div>
+  );
+}

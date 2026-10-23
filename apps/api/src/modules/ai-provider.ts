@@ -77,8 +77,8 @@ export class SimulatedAiProvider implements AiProvider {
       text = lines.join('\n') || 'No messages yet.';
       confidence = 'low';
     } else if (req.task === 'translate') {
-      // A simulation cannot translate: it returns the text unchanged, marked so nobody mistakes it for a translation.
-      text = lastCustomer;
+      // A simulation cannot translate: it returns the message unchanged, marked so nobody mistakes it for a translation.
+      text = req.messages.at(-1)?.text ?? '';
       confidence = 'low';
     }
     return { text, citations, confidence, inputTokens: tokens(input), outputTokens: tokens(text), model: 'simulated-1', simulated: true };
@@ -93,7 +93,7 @@ export class AnthropicProvider implements AiProvider {
   async complete(req: AiRequest, signal?: AbortSignal): Promise<AiResponse> {
     const context = req.context.map((c) => `<source id="${c.id}" kind="${c.kind}">\n<title>${esc(c.title)}</title>\n${esc(c.text)}\n</source>`).join('\n');
     const convo = req.messages.map((m) => `<message from="${m.from}">${esc(m.text)}</message>`).join('\n');
-    const task = req.task === 'translate' ? `Translate the last customer message into ${req.targetLanguage === 'ar' ? 'Arabic' : 'English'}. Reply with the translation only.`
+    const task = req.task === 'translate' ? `Translate the message above (whoever wrote it) into ${req.targetLanguage === 'ar' ? 'Arabic' : 'English'}. Reply with the translation only.`
       : req.task === 'summarise' ? 'Summarise this conversation for a colleague in at most four short lines. Mark anything uncertain.'
       : 'Reply with JSON: {"text": string, "citations": string[], "confidence": "high" | "low"}. Use only the sources; cite the ids you used; if the sources do not answer, return an empty text and confidence "low".';
     const res = await fetch(this.endpoint, {
