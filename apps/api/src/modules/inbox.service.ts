@@ -427,20 +427,22 @@ export class InboxService {
 
   /** Records a queued outbound message and its send job, and moves the conversation forward. */
   private async enqueue(tx: Tx, actor: TenantActor, c: ConvRow, text: string, clientMessageId: string, retryOf: string | null,
-    template?: { id: string; params: string[]; category: string }, media?: { type: string; fileId: string; mime: string; filename: string }) {
+    template?: { id: string; params: string[]; category: string }, media?: { type: string; fileId: string; mime: string; filename: string },
+    opts: { opQuoteId?: string } = {}) {
     const msg = (await tx.query<{ id: string; occurred_at: Date }>(
       `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status,
-                             retry_of, template_id, template_params, pricing_category, media_type, media_status, file_id, media_mime, media_filename, api_key_id)
-       VALUES ($1, $2, 'out', $7, $3, $4, $5, clock_timestamp(), 'queued', $6, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id, occurred_at`,
+                             retry_of, template_id, template_params, pricing_category, media_type, media_status, file_id, media_mime, media_filename, api_key_id, op_quote_id)
+       VALUES ($1, $2, 'out', $7, $3, $4, $5, clock_timestamp(), 'queued', $6, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id, occurred_at`,
       [actor.tenantId, c.id, text || null, clientMessageId, actor.membershipId, retryOf, template ? 'template' : media ? 'media' : 'text',
         template?.id ?? null, template ? JSON.stringify(template.params) : null, template?.category ?? 'service',
-        media?.type ?? null, media ? 'available' : null, media?.fileId ?? null, media?.mime ?? null, media?.filename ?? null, actor.apiKeyId ?? null])).rows[0]!;
+        media?.type ?? null, media ? 'available' : null, media?.fileId ?? null, media?.mime ?? null, media?.filename ?? null, actor.apiKeyId ?? null, opts.opQuoteId ?? null])).rows[0]!;
     const job = (await tx.query<{ id: string }>(
       'INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2) RETURNING id', [actor.tenantId, msg.id])).rows[0]!;
     // A person on the team wrote: automations stop in this conversation (FR-206).
     await stopAutomationRuns(tx, c.id, 'person_replied');
     // A commitment with a time in the reply becomes a suggested promise for the writer to confirm (W2.6).
-    if (text && !template) await suggestFromReply(tx, { tenantId: actor.tenantId, userId: actor.userId, membershipId: actor.membershipId, conversationId: c.id, messageId: msg.id, text });
+    // Quote messages are fixed wording, not a person's commitment (review of Operator slice 1, H1).
+    if (text && !template && !opts.opQuoteId) await suggestFromReply(tx, { tenantId: actor.tenantId, userId: actor.userId, membershipId: actor.membershipId, conversationId: c.id, messageId: msg.id, text });
     await tx.query(
       `UPDATE conversations SET assigned_membership_id = $2, last_message_id = $3, last_message_at = $4,
               activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,
@@ -461,10 +463,11 @@ export class InboxService {
    * Queues a reply inside the caller's transaction (Conversa Operator quote messages): every reply check applies, against
    * the conversation as it is now. The caller sends the returned job after its transaction commits (sendQueued).
    */
-  async queueReplyInTx(tx: Tx, actor: TenantActor, conversationId: string, text: string, clientMessageId: string) {
+  async queueReplyInTx(tx: Tx, actor: TenantActor, conversationId: string, text: string, clientMessageId: string, seenActivity: number, opQuoteId: string) {
     const c = await this.loadVisible(tx, actor, conversationId, true);
-    await this.checkCanSend(tx, actor, c, Number(c.activity_seq));
-    return this.enqueue(tx, actor, c, text, clientMessageId, null);
+    // The person must have seen the latest messages (a customer may just have written "cancel"): review M4.
+    await this.checkCanSend(tx, actor, c, seenActivity);
+    return this.enqueue(tx, actor, c, text, clientMessageId, null, undefined, undefined, { opQuoteId });
   }
 
   /** Sends a job queued by queueReplyInTx, after its transaction committed; the worker finishes it otherwise. */
@@ -525,10 +528,10 @@ export class InboxService {
         id: string; conversation_id: string; status: string; body: string | null; direction: string; error_code: string | null;
         failure_kind: string | null; retry_number: number; original_author_membership_id: string | null;
         kind: string; template_id: string | null; template_params: string[] | null; pricing_category: string | null; file_id: string | null;
-        campaign_id: string | null;
+        campaign_id: string | null; op_quote_id: string | null;
       }>(
         `SELECT id, conversation_id, status, body, direction, error_code, failure_kind, retry_number, original_author_membership_id,
-                kind, template_id, template_params, pricing_category, file_id, campaign_id
+                kind, template_id, template_params, pricing_category, file_id, campaign_id, op_quote_id
          FROM messages WHERE id = $1`, [messageId])).rows[0];
       if (!orig || orig.direction !== 'out') throw Errors.notFound('Message');
       // A campaign message is never retried one by one: a retry would be an ordinary message and would skip the
@@ -536,6 +539,8 @@ export class InboxService {
       if (orig.campaign_id) {
         throw Errors.conflict('campaign_message', 'Campaign messages are not retried individually. Start a new campaign if needed.');
       }
+      // A quote message carries a single-use link of one version: it is sent again from the quote, never retried as text.
+      if (orig.op_quote_id) throw Errors.conflict('quote_message', 'Quote messages are not retried. Make a new version of the quote and send it.');
       const c = await this.loadVisible(tx, actor, orig.conversation_id, true);
       if (orig.status !== 'failed' && orig.status !== 'uncertain') {
         throw Errors.conflict('not_retryable', 'Only a failed or uncertain message can be retried.');

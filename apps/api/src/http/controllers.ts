@@ -651,7 +651,8 @@ export class OperatorController {
   send(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.send(actor, id, body); }
   @RequirePermission('operator.quote') @Post('quotes/:id/withdraw') @HttpCode(200)
   withdraw(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.withdraw(actor, id, body); }
-  @RequirePermission('operator.quote') @Post('quotes/:id/record-acceptance') @HttpCode(200)
+  // Recording an acceptance given another way stands in for the customer: approval permission with two-step sign-in (review M2).
+  @RequirePermission('operator.approve') @Post('quotes/:id/record-acceptance') @HttpCode(200)
   recordAcceptance(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.recordAcceptance(actor, id, body); }
 }
 

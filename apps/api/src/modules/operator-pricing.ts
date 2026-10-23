@@ -66,14 +66,17 @@ export type Priced = {
   taxable: number; taxRateBp: number; tax: number; total: number; deposit: number; inspectionOnly: boolean;
   estimatedCost: number | null; estimatedMarginBp: number | null; needsApproval: string[];
 };
-export type PriceRefusal = { ok: false; reason: 'unknown_service' | 'outside_area' | 'quantity' | 'mixed_inspection' | 'discount_too_large' | 'empty'; detail?: string };
+export type PriceRefusal = { ok: false; reason: 'unknown_service' | 'outside_area' | 'quantity' | 'mixed_inspection' | 'discount_too_large' | 'empty' | 'duplicate_line' | 'too_large'; detail?: string };
+/** The largest quote total accepted (minor units): keeps every intermediate amount exact in floating point. */
+export const MAX_TOTAL_MINOR = 10_000_000_000;
 
-/** Half-up rounding of a/b for non-negative integers. */
-const divRound = (a: number, b: number) => Math.floor((a * 2 + b) / (2 * b));
-const pct = (amount: number, bp: number) => divRound(amount * bp, 10_000);
+/** amount × bp / 10 000, rounded half up, in exact integer arithmetic (review of Operator slice 1, L1). */
+const pct = (amount: number, bp: number) => Number((BigInt(amount) * BigInt(bp) * 2n + 10_000n) / 20_000n);
 
 export function priceQuote(card: RateCard, req: PriceRequest): Priced | PriceRefusal {
   if (req.lines.length === 0) return { ok: false, reason: 'empty' };
+  // One line per service (review L2): quantities go on the line, so limits and tiers apply as written.
+  if (new Set(req.lines.map((l) => l.serviceKey)).size !== req.lines.length) return { ok: false, reason: 'duplicate_line' };
   if (!(req.areaKey in card.areas)) return { ok: false, reason: 'outside_area', detail: req.areaKey };
   const byKey = new Map(card.services.map((s) => [s.serviceKey, s]));
   const lines: PricedLine[] = [];
@@ -98,16 +101,18 @@ export function priceQuote(card: RateCard, req: PriceRequest): Priced | PriceRef
   const linesNet = lines.reduce((a, l) => a + l.net, 0);
   const callout = card.calloutCharge;
   const travel = card.areas[req.areaKey]!;
-  const beforeMinimum = linesNet + callout + travel;
-  const minimumTopUp = Math.max(0, card.minimumCharge - beforeMinimum);
-  const beforeDiscount = beforeMinimum + minimumTopUp;
-  // A manual discount applies to the service lines only, never to callout, travel or the minimum charge.
+  // A manual discount applies to the service lines only, never to callout or travel; the minimum charge applies after
+  // it, so a discount never takes the price under the minimum (review M5).
   const manualDiscount = pct(linesNet, manualBp);
-  const taxable = beforeDiscount - manualDiscount;
+  const beforeMinimum = linesNet - manualDiscount + callout + travel;
+  const minimumTopUp = Math.max(0, card.minimumCharge - beforeMinimum);
+  const taxable = beforeMinimum + minimumTopUp;
   const tax = pct(taxable, card.taxRateBp);
   const total = taxable + tax;
+  if (total > MAX_TOTAL_MINOR) return { ok: false, reason: 'too_large' };
   const deposit = pct(total, card.depositBp);
-  const revenue = taxable;
+  // Margin on the service work only: callout and travel have no cost entered, so counting them would overstate it (L3).
+  const revenue = linesNet - manualDiscount;
   const estimatedCost = costKnown ? cost : null;
   const estimatedMarginBp = costKnown && revenue > 0 ? Math.round(((revenue - cost) * 10_000) / revenue) : null;
   const needsApproval: string[] = [];

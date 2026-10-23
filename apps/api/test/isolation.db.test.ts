@@ -127,7 +127,8 @@ async function populate(owner: Client, label: string, tenantId: string) {
     `SELECT c.id FROM conversations c JOIN contact_identifiers ci ON ci.contact_id = c.contact_id WHERE ci.value = $1`, [wa2])).rows[0]!);
   const opCase = (await owner.post(`/v1/operator/conversations/${conv2.id}/cases`).expect(201)).body;
   const q = (await owner.post(`/v1/operator/cases/${opCase.id}/quotes`, { lines: [{ serviceKey: 'ac_service', quantity: 2 }], areaKey: 'khobar' }).expect(201)).body;
-  const sent = await owner.post(`/v1/operator/quotes/${q.id}/send`, { expectedVersion: 0 }).expect(200);
+  const seen2 = (await owner.get(`/v1/conversations/${conv2.id}`).expect(200)).body.activitySeq;
+  const sent = await owner.post(`/v1/operator/quotes/${q.id}/send`, { expectedVersion: 0, seenActivity: seen2 }).expect(200);
   const qmsg = await withContext(t.deps.db, { tenantId, userId: null }, async (tx) =>
     (await tx.query<{ body: string }>('SELECT body FROM messages WHERE id = $1', [sent.body.messageId])).rows[0]!.body);
   await request(t.app.getHttpServer()).post('/v1/quote/accept').set('X-Requested-With', 'conversaflow')

@@ -354,5 +354,5 @@ export class CustomerPortalService {
 
 /** Masks customer page tokens in message text shown back to people, the AI or the API (review of W2.4, M3). */
 export function maskLinks(text: string | null): string | null {
-  return text === null ? null : text.replace(/(\/c#)[A-Za-z0-9_-]{43}/g, '$1••••••');
+  return text === null ? null : text.replace(/(\/[cq]#)[A-Za-z0-9_-]{43}/g, '$1••••••');
 }

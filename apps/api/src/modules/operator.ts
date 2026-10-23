@@ -179,6 +179,7 @@ export class OperatorService {
       const id = (await tx.query<{ id: string }>(`INSERT INTO op_cases (tenant_id, conversation_id, contact_id, facts, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [actor.tenantId, c.id, c.contact_id, JSON.stringify(facts), actor.userId])).rows[0]!.id;
       await caseEvent(tx, actor.tenantId, id, 'case_opened', { membershipId: actor.membershipId, kind: 'person' });
+      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'operator.case_opened', ip: actor.ip, targetType: 'op_case', targetId: id, metadata: { conversationId: c.id } });
       return { id, existing: false };
     });
   }
@@ -231,6 +232,7 @@ export class OperatorService {
       if (!s.terms_en || !s.terms_ar) throw Errors.conflict('operator_not_ready', 'Write the customer terms in English and Arabic first.');
       const k = await this.visibleCase(tx, actor, caseId, true);
       if (k.status === 'closed') throw Errors.conflict('case_closed', 'This case is closed.');
+      await this.ensureHandler(tx, actor, k.conversation_id);
       const rc = (await tx.query<{ id: string; card: unknown }>(`SELECT id, card FROM op_rate_cards WHERE status = 'published'`)).rows[0];
       if (!rc) throw Errors.conflict('no_price_list', 'There is no published price list.');
       const card = parse(RateCard, rc.card);
@@ -238,7 +240,8 @@ export class OperatorService {
       if (!priced.ok) {
         const why: Record<string, string> = { unknown_service: 'This service is not on the price list.', outside_area: 'This area is outside the service area.',
           quantity: 'The quantity is outside what the price list allows.', mixed_inspection: 'A visit that needs an inspection cannot be priced together with fixed-price work.',
-          discount_too_large: 'That discount is not allowed.', empty: 'Add at least one service.' };
+          discount_too_large: 'That discount is not allowed.', empty: 'Add at least one service.', duplicate_line: 'Each service can be listed once; set its quantity instead.',
+          too_large: 'This quote is larger than the system accepts. Split it or contact support.' };
         throw new AppError(400, 'cannot_price', why[priced.reason] ?? 'This cannot be priced.', { reason: priced.reason, detail: priced.detail ?? null });
       }
       const names = Object.fromEntries(card.services.map((x) => [x.serviceKey, { en: x.nameEn, ar: x.nameAr }])) as Names;
@@ -256,7 +259,8 @@ export class OperatorService {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now() + make_interval(hours => $18), $19, $20) RETURNING id`,
         [actor.tenantId, k.id, number, rc.id, status, JSON.stringify(body), JSON.stringify({ ...priced, names }), priced.currency, priced.total, priced.tax, priced.deposit,
           priced.inspectionOnly, scope.en, scope.ar, s.terms_version, s.terms_en, s.terms_ar, card.validityHours, priced.needsApproval, actor.userId])).rows[0]!;
-      if (status === 'pending_approval') await tx.query(`UPDATE op_cases SET status = 'waiting_approval', updated_at = now(), version = version + 1 WHERE id = $1`, [k.id]);
+      // The case follows its open quote (review M6): waiting for approval, or open for the person to send.
+      await tx.query(`UPDATE op_cases SET status = $2, updated_at = now(), version = version + 1 WHERE id = $1`, [k.id, status === 'pending_approval' ? 'waiting_approval' : 'open']);
       await caseEvent(tx, actor.tenantId, k.id, 'quote_created', { membershipId: actor.membershipId, kind: 'person' },
         { quoteId: q.id, number, total: priced.total, currency: priced.currency, needsApproval: priced.needsApproval, supersedes: prev?.id ?? null });
       await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'operator.quote_created', ip: actor.ip, targetType: 'op_quote', targetId: q.id,
@@ -265,13 +269,21 @@ export class OperatorService {
     });
   }
 
+  /** Locks in one order everywhere: the case, then the quote (review M3). */
   private async loadQuote(tx: Tx, actor: TenantActor, id: string): Promise<QuoteRow & { k: CaseRow }> {
     if (!isUuid(id)) throw Errors.notFound('Quote');
+    const ref = (await tx.query<{ case_id: string }>('SELECT case_id FROM op_quotes WHERE id = $1', [id])).rows[0];
+    if (!ref) throw Errors.notFound('Quote');
+    const k = await this.visibleCase(tx, actor, ref.case_id, true);
     const q = (await tx.query<QuoteRow>(`SELECT id, case_id, number, status, needs_approval, created_by, total_minor::text, currency, valid_until, terms_version, version, inspection_only, approved_at
-                                          FROM op_quotes WHERE id = $1 FOR UPDATE`, [id])).rows[0];
-    if (!q) throw Errors.notFound('Quote');
-    const k = await this.visibleCase(tx, actor, q.case_id, true);
+                                          FROM op_quotes WHERE id = $1 FOR UPDATE`, [id])).rows[0]!;
     return { ...q, k };
+  }
+
+  /** Changing a customer's quotes is for the person handling the conversation (or anyone while it is unassigned): review L7. */
+  private async ensureHandler(tx: Tx, actor: TenantActor, conversationId: string) {
+    const a = (await tx.query<{ assigned: string | null }>('SELECT assigned_membership_id AS assigned FROM conversations WHERE id = $1', [conversationId])).rows[0];
+    if (a?.assigned && a.assigned !== actor.membershipId) throw new AppError(409, 'assigned_to_other', 'Another person is handling this conversation.', { assignedMembershipId: a.assigned });
   }
 
   /**
@@ -286,7 +298,11 @@ export class OperatorService {
       if (q.status !== 'pending_approval') throw Errors.conflict('not_pending', 'This quote is not waiting for approval.');
       if (q.created_by === actor.userId) {
         const others = (await tx.query<{ n: number }>(`SELECT count(DISTINCT m.id)::int AS n FROM memberships m JOIN membership_roles mr ON mr.membership_id = m.id
-            JOIN role_permissions rp ON rp.role_id = mr.role_id WHERE m.status = 'active' AND rp.permission_key = 'operator.approve' AND m.user_id <> $1`, [actor.userId])).rows[0]!.n;
+            JOIN role_permissions rp ON rp.role_id = mr.role_id JOIN conversations c ON c.id = $2
+            WHERE m.status = 'active' AND rp.permission_key = 'operator.approve' AND m.user_id <> $1
+              AND (c.assigned_membership_id IS NULL OR c.assigned_membership_id = m.id
+                   OR EXISTS (SELECT 1 FROM membership_roles r2 JOIN role_permissions p2 ON p2.role_id = r2.role_id WHERE r2.membership_id = m.id AND p2.permission_key = 'inbox.read_all'))`,
+          [actor.userId, q.k.conversation_id])).rows[0]!.n;
         if (others > 0) throw Errors.forbidden('Someone other than the person who prepared this quote must approve it.');
       }
       await tx.query(`UPDATE op_quotes SET status = 'approved', approved_by = $2, approved_at = now(), version = version + 1 WHERE id = $1`, [q.id, actor.userId]);
@@ -312,7 +328,7 @@ export class OperatorService {
    * version. The message goes through the ordinary reply path. Validity runs from the moment it is sent.
    */
   async send(actor: TenantActor, id: string, input: unknown) {
-    const body = parse(z.object({ expectedVersion: z.number().int().min(0), locale: z.enum(['en', 'ar']).optional() }).strict(), input);
+    const body = parse(z.object({ expectedVersion: z.number().int().min(0), seenActivity: z.number().int().min(0), locale: z.enum(['en', 'ar']).optional() }).strict(), input);
     let job: string | null = null;
     const out = await withContext(this.deps.db, actor, async (tx) => {
       const q = await this.loadQuote(tx, actor, id);
@@ -334,7 +350,7 @@ export class OperatorService {
       const url = `${this.deps.config.APP_ORIGIN}/${locale}/q#${token}`;
       const { tz } = await companyHours(tx);
       const text = quoteMessage(locale, q.number, priced.priced, validUntil, url, tz);
-      const queued = await this.inbox.queueReplyInTx(tx, actor, q.k.conversation_id, text, randomUUID());
+      const queued = await this.inbox.queueReplyInTx(tx, actor, q.k.conversation_id, text, randomUUID(), body.seenActivity, q.id);
       job = queued.jobId;
       await tx.query(`UPDATE op_quotes SET status = 'sent', sent_at = now(), valid_until = $2, sent_message_id = $3, version = version + 1 WHERE id = $1`, [q.id, validUntil, queued.messageId]);
       await tx.query(`UPDATE op_cases SET status = 'waiting_customer', updated_at = now(), version = version + 1 WHERE id = $1`, [q.case_id]);
@@ -353,6 +369,7 @@ export class OperatorService {
       const q = await this.loadQuote(tx, actor, id);
       if (q.version !== body.expectedVersion) throw new AppError(409, 'quote_changed', 'This quote changed. Reload and try again.');
       if (!OPEN_QUOTE.includes(q.status)) throw Errors.conflict('quote_closed', 'This quote is already closed.');
+      await this.ensureHandler(tx, actor, q.k.conversation_id);
       await tx.query(`UPDATE op_quotes SET status = 'withdrawn', closed_at = now(), close_reason = $2, version = version + 1 WHERE id = $1`, [q.id, body.reason ?? 'withdrawn']);
       await tx.query('UPDATE op_quote_links SET revoked_at = now() WHERE quote_id = $1 AND revoked_at IS NULL', [q.id]);
       await tx.query(`UPDATE op_cases SET status = 'open', updated_at = now(), version = version + 1 WHERE id = $1 AND status IN ('waiting_customer', 'waiting_approval')`, [q.case_id]);
@@ -368,6 +385,8 @@ export class OperatorService {
     return withContext(this.deps.db, actor, async (tx) => {
       const q = await this.loadQuote(tx, actor, id);
       if (q.version !== body.expectedVersion) throw new AppError(409, 'quote_changed', 'This quote changed. Reload and try again.');
+      const s = await settingsOf(tx);
+      if (!s.enabled) throw Errors.conflict('operator_off', 'Conversa Operator is not turned on for this company.');
       await acceptChecks(tx, q);
       await tx.query(`INSERT INTO op_acceptances (tenant_id, quote_id, contact_id, channel, recorded_by, evidence_note, terms_version, total_minor, currency)
                       VALUES ($1, $2, $3, 'staff_recorded', $4, $5, $6, $7, $8)`,
@@ -384,7 +403,7 @@ async function acceptChecks(tx: Tx, q: QuoteRow) {
   if (q.status === 'accepted') throw Errors.conflict('already_accepted', 'This quote has already been accepted.');
   if (q.status === 'superseded') throw Errors.conflict('quote_superseded', 'This quote was replaced by a newer version.');
   if (q.status !== 'sent') throw Errors.conflict('quote_not_open', 'This quote is not open for acceptance.');
-  const live = (await tx.query<{ ok: boolean }>('SELECT $1::timestamptz > now() AS ok', [q.valid_until])).rows[0]!.ok;
+  const live = (await tx.query<{ ok: boolean }>('SELECT $1::timestamptz > clock_timestamp() AS ok', [q.valid_until])).rows[0]!.ok;
   if (!live) throw Errors.conflict('quote_expired', 'This quote has expired. Ask for a new quote.');
 }
 async function markAccepted(tx: Tx, tenantId: string, q: QuoteRow, actor: { membershipId?: string | null; kind: 'person' | 'customer' }, channel: string) {
@@ -443,6 +462,9 @@ export class QuotePortalService {
   async accept(l: QuoteLink, input: unknown) {
     const body = parse(AcceptInput, input);
     return withContext(this.deps.db, { tenantId: l.tenantId, userId: null }, async (tx) => {
+      const ref = (await tx.query<{ case_id: string }>('SELECT case_id FROM op_quotes WHERE id = $1', [l.quoteId])).rows[0];
+      if (!ref) throw Errors.invalidLink();
+      await tx.query('SELECT 1 FROM op_cases WHERE id = $1 FOR UPDATE', [ref.case_id]);
       const link = (await tx.query<{ used_at: Date | null; revoked_at: Date | null; live: boolean }>(
         'SELECT used_at, revoked_at, (expires_at > now()) AS live FROM op_quote_links WHERE id = $1 FOR UPDATE', [l.linkId])).rows[0];
       if (!link || link.revoked_at || !link.live) throw Errors.invalidLink();
@@ -461,6 +483,8 @@ export class QuotePortalService {
       await tx.query(`INSERT INTO op_acceptances (tenant_id, quote_id, contact_id, channel, link_id, terms_version, total_minor, currency)
                       VALUES ($1, $2, $3, 'customer_link', $4, $5, $6, $7)`, [l.tenantId, q.id, l.contactId, l.linkId, q.terms_version, q.total_minor, q.currency]);
       await markAccepted(tx, l.tenantId, q, { kind: 'customer' }, 'customer_link');
+      await AuditService.record(tx, { tenantId: l.tenantId, actorUserId: null, action: 'operator.quote_accepted_by_customer', ip: undefined, targetType: 'op_quote', targetId: q.id,
+        metadata: { number: q.number, total: Number(q.total_minor), currency: q.currency, termsVersion: q.terms_version } });
       return { status: 'accepted', number: q.number };
     });
   }
@@ -477,9 +501,13 @@ export class QuoteExpiryWorker {
     for (const d of due) {
       try {
         n += await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => {
+          const ref = (await tx.query<{ case_id: string }>('SELECT case_id FROM op_quotes WHERE id = $1', [d.quote_id])).rows[0];
+          if (!ref) return 0;
+          await tx.query('SELECT 1 FROM op_cases WHERE id = $1 FOR UPDATE', [ref.case_id]);
           const q = (await tx.query<{ case_id: string }>(`UPDATE op_quotes SET status = 'expired', closed_at = now(), close_reason = 'validity_ended', version = version + 1
                                                           WHERE id = $1 AND status = 'sent' AND valid_until <= now() RETURNING case_id`, [d.quote_id])).rows[0];
           if (!q) return 0;
+          await AuditService.record(tx, { tenantId: d.tenant_id, actorUserId: null, action: 'operator.quote_expired', ip: undefined, targetType: 'op_quote', targetId: d.quote_id, metadata: {} });
           await tx.query(`UPDATE op_cases SET status = 'open', updated_at = now(), version = version + 1 WHERE id = $1 AND status = 'waiting_customer'`, [q.case_id]);
           await caseEvent(tx, d.tenant_id, q.case_id, 'quote_expired', { kind: 'system' }, { quoteId: d.quote_id });
           return 1;

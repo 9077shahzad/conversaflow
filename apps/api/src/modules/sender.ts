@@ -70,10 +70,10 @@ export type FailureKind = 'blocked' | 'rejected' | 'exhausted' | 'provider_repor
 type JobRow = {
   job_id: string; job_state: string; job_attempts: number; message_id: string; status: string; body: string | null;
   sent_by_membership_id: string | null; conversation_id: string; kind: string; template_id: string | null; template_params: string[] | null;
-  file_id: string | null; campaign_id: string | null; automation_run_id: string | null;
+  file_id: string | null; campaign_id: string | null; automation_run_id: string | null; op_quote_id: string | null;
 };
 const JOB_SELECT = `SELECT j.id AS job_id, j.state AS job_state, j.attempts AS job_attempts, m.id AS message_id, m.status, m.body,
-                m.sent_by_membership_id, m.conversation_id, m.kind, m.template_id, m.template_params, m.file_id, m.campaign_id, m.automation_run_id
+                m.sent_by_membership_id, m.conversation_id, m.kind, m.template_id, m.template_params, m.file_id, m.campaign_id, m.automation_run_id, m.op_quote_id
          FROM send_jobs j JOIN messages m ON m.id = j.message_id WHERE j.id = $1 FOR UPDATE OF j, m`;
 
 export class Sender {
@@ -146,6 +146,22 @@ export class Sender {
       if (camp && (camp.status === 'paused' || camp.status === 'scheduled')) {
         await tx.query(`UPDATE send_jobs SET state = 'pending', lease_until = NULL, next_attempt_at = now() + interval '60 seconds', updated_at = now() WHERE id = $1`, [jobId]);
         return { done: 'retry_later' as const };
+      }
+
+      // Conversa Operator quote messages (review of slice 1, M1): the emergency pause holds them; a module turned off or a
+      // quote no longer the open version blocks them. Checked under the quote's lock.
+      if (row.op_quote_id) {
+        const op = (await tx.query<{ status: string; enabled: boolean; paused: boolean }>(
+          `SELECT q.status, coalesce(s.enabled, false) AS enabled, coalesce(s.paused, false) AS paused
+           FROM op_quotes q LEFT JOIN op_settings s ON s.tenant_id = q.tenant_id WHERE q.id = $1 FOR SHARE OF q`, [row.op_quote_id])).rows[0];
+        if (op?.paused && op.enabled && op.status === 'sent') {
+          await tx.query(`UPDATE send_jobs SET state = 'pending', lease_until = NULL, next_attempt_at = now() + interval '60 seconds', updated_at = now() WHERE id = $1`, [jobId]);
+          return { done: 'retry_later' as const };
+        }
+        if (!op || !op.enabled || op.status !== 'sent') {
+          await this.finishFailed(tx, row, 'blocked', !op || !op.enabled ? 'operator_off' : 'quote_closed', 'done');
+          return { done: 'failed' as const };
+        }
       }
 
       // Automation messages: sent only while their run has not been stopped (a person replied or paused replies, the
