@@ -19,6 +19,7 @@ interface ListItem {
 interface Message {
   id: string; direction: 'in' | 'out'; kind: string; body: string | null; providerType: string | null; status: string;
   errorCode: string | null; occurredAt: string; sentByMembershipId: string | null; fromAd: boolean; retryOf: string | null; retriedAs: string | null;
+  byAutomation?: boolean; aiInteractionId?: string | null; aiSimulated?: boolean | null;
   /** Set only on a confirmed failure; null on an uncertain delivery. */
   failureKind: 'blocked' | 'rejected' | 'exhausted' | 'provider_reported' | null;
   originalAuthorMembershipId: string | null; retryNumber: number; retryable: boolean;
@@ -268,6 +269,8 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
             <li key={m.id} className={`flex ${out ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[85%] rounded-2xl px-3.5 py-2 ${out ? 'bg-teal-soft text-slate-900' : 'bg-slate-100 text-slate-900'}`}>
                 {m.fromAd && <p className="mb-1 text-xs font-semibold text-teal">{d.fromAd}</p>}
+                {out && m.aiInteractionId && <p className="mb-1 text-xs font-semibold text-violet-800">{m.aiSimulated ? d.byAiSimulated : d.byAi}</p>}
+                {out && !m.aiInteractionId && m.byAutomation && <p className="mb-1 text-xs font-semibold text-slate-700">{d.byAutomation}</p>}
                 {m.kind === 'template' && <p className="mb-1 text-xs font-semibold text-teal">{fill(d.templateBadge, { category: d.categories[m.pricingCategory ?? ''] ?? '' })}</p>}
                 {m.kind === 'media' && <MediaItem m={m} locale={locale} canOpen={can('files.read')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} />}
                 {(m.body || m.kind !== 'media') && <p className="whitespace-pre-wrap break-words" dir="auto">{m.body ?? `[${m.providerType ?? m.kind}]`}</p>}

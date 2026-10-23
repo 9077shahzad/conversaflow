@@ -9,7 +9,7 @@ import { fill, isLocale, t, type Locale } from '@/lib/i18n';
  * company's settings as facts. Settings need ai.manage (owner, admin, two-step sign-in); articles need knowledge.manage.
  */
 interface Access { permissions: string[] }
-interface Settings { enabled: boolean; mode: 'suggest' | 'answer'; instructions: string; monthlyBudgetUsd: number; version: number; provider: string; simulated: boolean; usedThisMonthUsd: number }
+interface Settings { enabled: boolean; mode: 'suggest' | 'answer'; instructions: string; monthlyBudgetUsd: number; disclose: boolean; version: number; provider: string; simulated: boolean; answerAllowed: boolean; usedThisMonthUsd: number }
 interface Article { id: string; title: string; body: string; language: 'en' | 'ar'; published: boolean }
 
 export default function AiPage() {
@@ -45,9 +45,9 @@ function SettingsForm({ locale }: { locale: Locale }) {
     <form className="mt-5 grid gap-3 rounded-xl border border-slate-200 bg-white p-4" aria-labelledby="ai-settings" onSubmit={async (e) => {
       e.preventDefault(); setNotice(null);
       try {
-        await api('/v1/ai/settings', { method: 'PUT', body: { enabled: s.enabled, mode: s.mode, instructions: s.instructions, monthlyBudgetUsd: s.monthlyBudgetUsd, expectedVersion: s.version } });
+        await api('/v1/ai/settings', { method: 'PUT', body: { enabled: s.enabled, mode: s.mode, instructions: s.instructions, monthlyBudgetUsd: s.monthlyBudgetUsd, disclose: s.disclose, expectedVersion: s.version } });
         setNotice({ ok: true, text: t(locale).common.saved }); await load();
-      } catch { setNotice({ ok: false, text: t(locale).common.error }); await load(); }
+      } catch (err) { setNotice({ ok: false, text: err instanceof ApiError ? (d.errors[err.code] ?? t(locale).common.error) : t(locale).common.error }); await load(); }
     }}>
       <h2 id="ai-settings" className="text-lg font-semibold text-navy">{d.settings}</h2>
       {s.simulated && <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800">{d.simulatedNote}</p>}
@@ -57,8 +57,11 @@ function SettingsForm({ locale }: { locale: Locale }) {
       <fieldset className="grid gap-1 text-sm">
         <legend className="font-medium text-slate-900">{d.mode}</legend>
         <label className="flex items-start gap-2"><input type="radio" name="mode" checked={s.mode === 'suggest'} onChange={() => setS({ ...s, mode: 'suggest' })} /><span>{d.modeSuggest}</span></label>
-        <label className="flex items-start gap-2"><input type="radio" name="mode" checked={s.mode === 'answer'} onChange={() => setS({ ...s, mode: 'answer' })} /><span>{d.modeAnswer}</span></label>
+        <label className="flex items-start gap-2"><input type="radio" name="mode" checked={s.mode === 'answer'} disabled={!s.answerAllowed} onChange={() => setS({ ...s, mode: 'answer' })} /><span>{d.modeAnswer}{!s.answerAllowed && <span className="block text-xs text-amber-900">{d.answerNeedsReal}</span>}</span></label>
       </fieldset>
+      <label className="flex items-start gap-2 text-sm text-slate-900">
+        <input type="checkbox" checked={s.disclose} onChange={(e) => setS({ ...s, disclose: e.target.checked })} /><span>{d.disclose}</span>
+      </label>
       <div>
         <label htmlFor="ai-ins" className="block text-sm font-medium text-slate-900">{d.instructions}</label>
         <textarea id="ai-ins" rows={3} dir="auto" maxLength={2000} value={s.instructions} onChange={(e) => setS({ ...s, instructions: e.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-base" />

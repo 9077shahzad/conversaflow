@@ -19,6 +19,7 @@ documents.
 | 8 | **Legal documents** | Instruct counsel: terms of service, privacy notice, data processing agreement, acceptable use policy, pilot agreement; include AI providers and transfers outside Saudi Arabia (PDPL) | Instruct now | Counsel fees | Pilot contracts |
 | 9 | **People** | Name a second platform owner (two-person sign-in reset), a native Gulf-Arabic business reviewer (about 2 hours), and the pilot companies | Name them when convenient | Reviewer time | Sign-in resets; Arabic sign-off; pilot invitations |
 | 10 | **Domain** | After hosting is approved, point `conversaflow.io` to staging (DNS records will be given to you exactly) | After item 3 | Included in the domain you bought | Real web address for staging and email |
+| 11 | **Telling customers a reply is automated** | Confirm whether AI answers sent to customers must always say they are automated, or whether each company may turn the note off | Keep it on by default and let companies turn it off only after legal advice (item 8); this is how it is built now | None | A settled rule for AI disclosure in the terms and in the product |
 
 Later, only when those waves are reached: Salla and Zid partner accounts (commerce apps), payment merchant accounts
 (Moyasar, Tap or HyperPay), Apple and Google developer accounts (native apps), and Gulf-dialect reviewers. Each will be

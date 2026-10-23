@@ -9,7 +9,7 @@ import { isUuid } from './members.service';
 import { companyHours, isWithinBusinessHours } from './sla';
 import { checkParamValue, renderTemplate } from './templates.service';
 import { AutomationMetering } from './entitlements.service';
-import { AiService } from './ai';
+import { AiService, type AiResult } from './ai';
 
 /**
  * Automations (Wave 2, W2.1: CF-EXT-007 visual flow builder, CF-EXT-019 rehearsal; FR-404–406, FR-206).
@@ -385,7 +385,17 @@ type RunRow = {
   conversation_id: string | null; contact_id: string | null; sample: Record<string, unknown> | null; attempts: number;
   definition: DefinitionT; workflow_status: string; started_at: Date; due: boolean;
 };
-type Ctx = { tenantId: string; run: RunRow; def: DefinitionT; tx: Tx };
+/** An AI decision made for a step, outside the step's transaction (review of W2.2/W2.3, M3). */
+type AiForStep = { stepId: string; result: AiResult };
+type Ctx = { tenantId: string; run: RunRow; def: DefinitionT; tx: Tx; ai?: AiForStep };
+/**
+ * Thrown by the "AI reply" step when it has no AI decision yet. The step's transaction is rolled back (nothing has
+ * been written), the AI is asked with no transaction or lock held, and the step runs again with the decision; all
+ * checks are made again then, under the usual locks.
+ */
+class NeedsAi extends Error {
+  constructor(readonly stepId: string, readonly input: Parameters<AiService['agentDecision']>[1]) { super('needs_ai'); }
+}
 type StepResult = { next: string | null; outcome: 'done' | 'would_do' | 'skipped' | 'blocked' | 'waiting'; detail: Record<string, unknown>; waitMinutes?: number };
 
 export class AutomationRunner {
@@ -405,8 +415,14 @@ export class AutomationRunner {
 
   /** Rehearsal: carries the run to its end at once (waits are recorded, not waited for). */
   async runToEnd(tenantId: string, runId: string) {
-    for (let i = 0; i <= AUTOMATION_LIMITS.maxSteps + 1; i++) {
-      const more = await this.step(tenantId, runId, true);
+    let ai: AiForStep | undefined;
+    for (let i = 0; i <= 2 * AUTOMATION_LIMITS.maxSteps + 2; i++) {
+      let more: boolean;
+      try { more = await this.step(tenantId, runId, true, ai); ai = undefined; } catch (err) {
+        if (!(err instanceof NeedsAi) || ai) throw err;
+        ai = { stepId: err.stepId, result: await this.ai!.agentDecision(tenantId, err.input) };
+        continue;
+      }
       if (!more) return;
     }
   }
@@ -425,9 +441,17 @@ export class AutomationRunner {
         return;
       }
     }
-    for (let i = 0; i <= AUTOMATION_LIMITS.maxSteps + 1; i++) {
+    let ai: AiForStep | undefined;
+    for (let i = 0; i <= 2 * AUTOMATION_LIMITS.maxSteps + 2; i++) {
       let more: boolean;
-      try { more = await this.step(tenantId, runId, false); } catch (err) {
+      try {
+        try { more = await this.step(tenantId, runId, false, ai); ai = undefined; } catch (err) {
+          if (!(err instanceof NeedsAi) || ai) throw err;
+          // Asked with no transaction open: nothing is locked while waiting for the AI.
+          ai = { stepId: err.stepId, result: await this.ai!.agentDecision(tenantId, err.input) };
+          continue;
+        }
+      } catch (err) {
         await this.failedAttempt(tenantId, runId, err);
         return;
       }
@@ -437,7 +461,7 @@ export class AutomationRunner {
   }
 
   /** Runs one step in its own transaction. Returns true when the run should continue now. */
-  private async step(tenantId: string, runId: string, rehearsal: boolean): Promise<boolean> {
+  private async step(tenantId: string, runId: string, rehearsal: boolean, ai?: AiForStep): Promise<boolean> {
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
       // Lock order as everywhere else: the conversation first, then the run (review of W2.1, M2).
       const conv = (await tx.query<{ c: string | null }>('SELECT conversation_id AS c FROM workflow_runs WHERE id = $1', [runId])).rows[0]?.c;
@@ -459,7 +483,7 @@ export class AutomationRunner {
       if (run.steps_taken >= AUTOMATION_LIMITS.maxSteps) return this.finish(tx, run, 'failed', 'step_limit');
       const s = def.steps.find((x) => x.id === stepId);
       if (!s) return this.finish(tx, run, 'failed', 'unknown_step');
-      const res = await this.execute({ tenantId, run, def, tx }, s);
+      const res = await this.execute({ tenantId, run, def, tx, ai }, s);
       await tx.query(`INSERT INTO workflow_run_steps (tenant_id, run_id, seq, step_id, kind, outcome, detail) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [tenantId, run.id, run.steps_taken + 1, s.id, s.kind, res.outcome, JSON.stringify(res.detail)]);
       if (res.waitMinutes && !rehearsal) {
@@ -565,16 +589,27 @@ export class AutomationRunner {
       }
       case 'ai_reply': {
         if (!this.ai) return { next: s.ifHuman, outcome: live ? 'blocked' : 'would_do', detail: { decision: 'human_needed', reason: 'ai_unavailable' } };
+        // The send checks come first: the AI is not asked (and the conversation is not sent to it) when nothing could
+        // be sent anyway — opted out, paused, resolved, outside the 24-hour window (review of W2.2/W2.3, M1).
+        if (live) {
+          const blocked = await this.sendBlocked(ctx, false);
+          if (blocked) return { next: s.ifHuman, outcome: 'blocked', detail: { decision: 'not_asked', reason: blocked } };
+        }
         const sample = ctx.run.sample as { text?: string; language?: 'en' | 'ar' } | null;
-        const r = await this.ai.agentDecision(ctx.tx, ctx.tenantId, live
-          ? { conversationId: ctx.run.conversation_id, runId: ctx.run.id }
-          : { conversationId: null, runId: ctx.run.id, sample: { text: sample?.text ?? '', language: sample?.language ?? 'en' } });
+        if (!ctx.ai || ctx.ai.stepId !== s.id) {
+          throw new NeedsAi(s.id, live
+            ? { conversationId: ctx.run.conversation_id, runId: ctx.run.id, live: true }
+            : { conversationId: null, runId: ctx.run.id, sample: { text: sample?.text ?? '', language: sample?.language ?? 'en' } });
+        }
+        const r = ctx.ai.result;
         const detail = { decision: r.decision, text: r.text, reason: r.reason, citations: r.citations.map((c) => c.title), simulated: r.simulated, interactionId: r.interactionId };
         if (!live) return { next: r.decision === 'answer' ? s.next : s.ifHuman, outcome: 'would_do', detail };
         if (r.decision === 'answer' && r.text) {
-          const blocked = await this.sendBlocked(ctx, false);
-          if (blocked) return { next: s.ifHuman, outcome: 'blocked', detail: { ...detail, reason: blocked } };
-          await this.enqueue(ctx, s.id, { kind: 'text', body: r.text });
+          // Customers are told the reply is automated unless the company turned that off (review H4).
+          const disclose = (await ctx.tx.query<{ disclose: boolean }>('SELECT disclose FROM ai_settings')).rows[0]?.disclose ?? true;
+          const lang = /[\u0600-\u06FF]/.test(r.text) ? 'ar' : 'en';
+          const body = disclose ? `${r.text}\n\n${lang === 'ar' ? '(رد آلي)' : '(Automated reply)'}` : r.text;
+          await this.enqueue(ctx, s.id, { kind: 'text', body, aiInteractionId: r.interactionId });
           return { next: s.next, outcome: 'done', detail };
         }
         // A suggestion or "a person is needed": nothing is sent; the team sees why in the conversation.
@@ -636,12 +671,12 @@ export class AutomationRunner {
     return null;
   }
 
-  private async enqueue(ctx: Ctx, stepId: string, m: { kind: 'text' | 'template'; body: string; templateId?: string; params?: string[]; category?: string }) {
+  private async enqueue(ctx: Ctx, stepId: string, m: { kind: 'text' | 'template'; body: string; templateId?: string; params?: string[]; category?: string; aiInteractionId?: string }) {
     const msg = (await ctx.tx.query<{ id: string; occurred_at: Date }>(
-      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, occurred_at, status, template_id, template_params, pricing_category, automation_run_id, automation_step, client_message_id, automation_run_mode)
-       VALUES ($1, $2, 'out', $3, $4, clock_timestamp(), 'queued', $5, $6, $7, $8, $9, $10, 'live') RETURNING id, occurred_at`,
+      `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, occurred_at, status, template_id, template_params, pricing_category, automation_run_id, automation_step, client_message_id, automation_run_mode, ai_interaction_id)
+       VALUES ($1, $2, 'out', $3, $4, clock_timestamp(), 'queued', $5, $6, $7, $8, $9, $10, 'live', $11) RETURNING id, occurred_at`,
       [ctx.tenantId, ctx.run.conversation_id, m.kind, m.body, m.templateId ?? null, m.params ? JSON.stringify(m.params) : null,
-        m.category ?? 'service', ctx.run.id, stepId, stepUuid(ctx.run.id, stepId)])).rows[0]!;
+        m.category ?? 'service', ctx.run.id, stepId, stepUuid(ctx.run.id, stepId), m.aiInteractionId ?? null])).rows[0]!;
     await ctx.tx.query('INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2)', [ctx.tenantId, msg.id]);
     await ctx.tx.query(`UPDATE conversations SET last_message_id = $2, last_message_at = $3, activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`,
       [ctx.run.conversation_id, msg.id, msg.occurred_at]);

@@ -212,6 +212,8 @@ export class InboxService {
       const messages = (await tx.query(
         `SELECT m.id, m.direction, m.kind, m.body, m.provider_type AS "providerType", m.status, m.error_code AS "errorCode",
                 m.occurred_at AS "occurredAt", m.sent_by_membership_id AS "sentByMembershipId", (m.referral IS NOT NULL) AS "fromAd",
+                (m.automation_run_id IS NOT NULL) AS "byAutomation", m.ai_interaction_id AS "aiInteractionId",
+                (SELECT ai.simulated FROM ai_interactions ai WHERE ai.id = m.ai_interaction_id) AS "aiSimulated",
                 m.failure_kind AS "failureKind", m.original_author_membership_id AS "originalAuthorMembershipId",
                 m.template_id AS "templateId", m.pricing_category AS "pricingCategory",
                 m.media_type AS "mediaType", m.media_status AS "mediaStatus", m.file_id AS "fileId", m.media_filename AS "mediaFilename",

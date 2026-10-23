@@ -82,7 +82,7 @@ const media = new MediaFetcher(appDb, channels, storage, scanner, env.MAX_UPLOAD
 const campaigns = new CampaignRunner(appDb);
 const inbound = new InboundProcessor(appDb);
 // AI for the "AI reply" automation step: the same configuration as the API (simulated unless an AI account is set up).
-const aiService = new AiService({ db: appDb, config: { AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
+const aiService = new AiService({ db: appDb, config: { NODE_ENV: env.NODE_ENV, AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
   env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
 const automations = new AutomationRunner(appDb, new AutomationMetering({ db: appDb }), aiService);
 
