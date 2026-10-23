@@ -75,6 +75,7 @@ export CLAMD_HOST=127.0.0.1
 export CLAMD_PORT="$CLAMD_PORT"
 export REDIS_URL="redis://127.0.0.1:$REDIS_PORT"
 export FILE_URL_SIGNING_KEY="$(openssl rand -base64 32)"
+export WEBHOOK_SECRETS_KEY="${WEBHOOK_SECRETS_KEY:-$(openssl rand -base64 32)}"
 export FILE_STORAGE_DIR="$WORK/storage"
 
 "$@"

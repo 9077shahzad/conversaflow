@@ -1,6 +1,9 @@
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { lookup as lookupCb } from 'node:dns';
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { request as httpsRequest } from 'node:https';
+import { BlockList, isIP } from 'node:net';
+import { decryptSecret, encryptSecret } from '../core/crypto';
 import { withContext, type Db, type Tx } from '@conversaflow/database';
 import { z } from 'zod';
 import type { Deps, TenantActor } from '../core/context';
@@ -23,6 +26,12 @@ import { maskLinks } from './customer-links';
  * - Limits: 600 requests a minute per key; 30 failed key lookups an hour per address.
  * - Every request is logged with method, route, status and duration (never bodies or keys).
  * - Lists use cursor pagination (`?limit=…&cursor=…`, `nextCursor` in the answer).
+ * - A reply may name `seenActivity` (the conversation's activity counter it was written against) to be refused if
+ *   the conversation moved on; without it, the reply is checked against the conversation as it is now.
+ * - An Idempotency-Key belongs to one conversation: reusing it elsewhere is refused (409).
+ * - Webhook subscriptions need the subscriber's own company-wide access to that data (inbox.read_all, and
+ *   contacts.read for events naming a contact), and deliveries stop if the member who set one up loses it.
+ * - Signing secrets are sealed with WEBHOOK_SECRETS_KEY (held outside the database).
  *
  * Outgoing webhooks
  * - https endpoints only; in production an endpoint must not resolve to a private, loopback or link-local address.
@@ -34,6 +43,14 @@ import { maskLinks } from './customer-links';
 export const API_SCOPES = ['conversations:read', 'messages:send', 'contacts:read', 'contacts:write', 'reports:read'] as const;
 export type ApiScope = (typeof API_SCOPES)[number];
 /** What each scope allows, as permissions the key's member must also hold. */
+/** Kept when the member holds them, never required: an owner's key reads every conversation, as the owner does. */
+const SCOPE_OPTIONAL: Partial<Record<ApiScope, string[]>> = { 'conversations:read': ['inbox.read_all'], 'messages:send': ['inbox.read_all'], 'contacts:read': ['inbox.read_all'] };
+/** Events and the access their creator needs, since each carries data from across the company (review of W2.8). */
+const EVENT_PERMISSIONS: Record<string, string[]> = {
+  'message.received': ['inbox.read_all', 'contacts.read'], 'message.status': ['inbox.read_all'], 'conversation.resolved': ['inbox.read_all'],
+  'customer_request.created': ['inbox.read_all', 'contacts.read'], 'promise.missed': ['inbox.read_all'],
+};
+const EVENT_PERMISSIONS_ALL = [...new Set(Object.values(EVENT_PERMISSIONS).flat())];
 const SCOPE_PERMISSIONS: Record<ApiScope, string[]> = {
   'conversations:read': ['inbox.reply'],
   'messages:send': ['inbox.reply'],
@@ -47,6 +64,7 @@ export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 export const API_RATE: Record<string, RateRule> = {
   perKey: { name: 'api:key', limit: 600, windowSeconds: 60 },
   failPerIp: { name: 'api:fail', limit: 30, windowSeconds: 3600 },
+  resend: { name: 'api:resend', limit: 60, windowSeconds: 3600 },
 };
 
 const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest();
@@ -115,6 +133,11 @@ export class ApiKeysService {
 export class ApiAuth {
   constructor(private readonly deps: Deps) {}
 
+  private async hasMfa(userId: string) {
+    return withContext(this.deps.identityDb, { tenantId: null, userId }, async (tx) =>
+      ((await tx.query('SELECT 1 FROM mfa_factors WHERE user_id = $1 AND confirmed_at IS NOT NULL', [userId])).rowCount ?? 0) > 0);
+  }
+
   async resolve(authorization: string | undefined, ip: string | null): Promise<ApiCaller> {
     const subject = ip ?? 'unknown';
     await this.deps.rateLimiter.check(API_RATE.failPerIp!, subject);
@@ -129,15 +152,20 @@ export class ApiAuth {
     const actor = await withContext(this.deps.db, { tenantId: row.tenant_id, userId: null }, async (tx) => {
       const t = (await tx.query<{ status: string }>('SELECT status FROM tenants WHERE id = $1', [row.tenant_id])).rows[0];
       if (!t || t.status === 'suspended' || t.status === 'closed') return null;
-      const r = (await tx.query<{ user_id: string; permissions: string[] | null; roles: string[] | null }>(
-        `SELECT m.user_id, array_agg(DISTINCT rp.permission_key) FILTER (WHERE rp.permission_key IS NOT NULL) AS permissions,
+      // The member must be active in the company and their account active on the platform (review of W2.8).
+      const r = (await tx.query<{ user_id: string; permissions: string[] | null; roles: string[] | null; requires_mfa: boolean }>(
+        `SELECT m.user_id, tenant_requires_mfa() AS requires_mfa,
+                array_agg(DISTINCT rp.permission_key) FILTER (WHERE rp.permission_key IS NOT NULL) AS permissions,
                 array_agg(DISTINCT r.key) FILTER (WHERE r.key IS NOT NULL) AS roles
-         FROM memberships m LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id
+         FROM memberships m JOIN users u ON u.id = m.user_id AND u.status = 'active'
+         LEFT JOIN membership_roles mr ON mr.membership_id = m.id LEFT JOIN roles r ON r.id = mr.role_id
          LEFT JOIN role_permissions rp ON rp.role_id = r.id WHERE m.id = $1 AND m.status = 'active' GROUP BY m.user_id`, [row.membership_id])).rows[0];
       if (!r) return null;
+      // Where the company requires two-step sign-in (pilot), a key works only while its member still has it set up.
+      if (r.requires_mfa && !(await this.hasMfa(r.user_id))) return null;
       await tx.query('UPDATE api_keys SET last_used_at = now() WHERE id = $1', [row.key_id]);
       // Only what both the member and the key's scopes allow.
-      const allowed = new Set(row.scopes.flatMap((s) => SCOPE_PERMISSIONS[s] ?? []));
+      const allowed = new Set(row.scopes.flatMap((s) => [...(SCOPE_PERMISSIONS[s] ?? []), ...(SCOPE_OPTIONAL[s] ?? [])]));
       return { tenantId: row.tenant_id, userId: r.user_id, membershipId: row.membership_id, roles: r.roles ?? [],
         permissions: new Set((r.permissions ?? []).filter((p) => allowed.has(p))), requiresMfa: false, ip: ip ?? undefined, apiKeyId: row.key_id } as TenantActor;
     });
@@ -233,26 +261,77 @@ export class PublicApiReads {
 
 // --- Outgoing webhooks ----------------------------------------------------------------------------------------
 
-/** Private, loopback, link-local and unique-local addresses an endpoint may not point at in production. */
-export function isPrivateAddress(ip: string): boolean {
-  if (isIP(ip) === 4) {
-    const [a, b] = ip.split('.').map(Number) as [number, number];
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
-  }
-  const v = ip.toLowerCase();
-  if (v.startsWith('::ffff:')) return isPrivateAddress(v.slice(7));
-  return v === '::1' || v === '::' || v.startsWith('fc') || v.startsWith('fd') || v.startsWith('fe80');
+/**
+ * Addresses an endpoint may not reach in production: private, loopback, link-local, shared, benchmarking,
+ * documentation, multicast and reserved ranges, and IPv6 forms that carry an IPv4 address (mapped, compatible,
+ * NAT64, 6to4), which are checked as that IPv4 address (review of W2.8).
+ */
+const BLOCKED = (() => {
+  const b = new BlockList();
+  for (const [net, bits] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12],
+    ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 3]] as const) b.addSubnet(net, bits, 'ipv4');
+  for (const [net, bits] of [['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8], ['2001:db8::', 32], ['100::', 64], ['2001::', 23]] as const) b.addSubnet(net, bits, 'ipv6');
+  return b;
+})();
+function embeddedIpv4(v6: string): string | null {
+  // Expand to eight groups.
+  const [head, tail] = v6.toLowerCase().split('::') as [string, string | undefined];
+  const h = head ? head.split(':') : []; const t = tail !== undefined && tail !== '' ? tail.split(':') : [];
+  const last = (t.length ? t : h).at(-1) ?? '';
+  const dotted = isIP(last) === 4 ? last : null;
+  const groups = [...h, ...(tail !== undefined ? Array(8 - h.length - t.length - (dotted ? 1 : 0)).fill('0') : []), ...t];
+  if (dotted) { groups.pop(); const [a, b2, c, d] = dotted.split('.').map(Number) as [number, number, number, number]; groups.push(((a << 8) | b2).toString(16), ((c << 8) | d).toString(16)); }
+  const g = groups.map((x) => parseInt(x || '0', 16));
+  if (g.length !== 8 || g.some((x) => Number.isNaN(x))) return null;
+  const v4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  const zero = (n: number) => g.slice(0, n).every((x) => x === 0);
+  if (zero(5) && g[5] === 0xffff) return v4(g[6]!, g[7]!);                         // ::ffff:a.b.c.d
+  if (zero(6) && (g[6] !== 0 || g[7]! > 1)) return v4(g[6]!, g[7]!);                // ::a.b.c.d (compatible)
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return v4(g[6]!, g[7]!);   // 64:ff9b::/96
+  if (g[0] === 0x2002) return v4(g[1]!, g[2]!);                                   // 6to4
+  return null;
 }
+export function isPrivateAddress(ip: string): boolean {
+  const kind = isIP(ip);
+  if (kind === 4) return BLOCKED.check(ip, 'ipv4');
+  if (kind !== 6) return true;
+  const inner = embeddedIpv4(ip);
+  if (inner) return isPrivateAddress(inner);
+  return BLOCKED.check(ip, 'ipv6');
+}
+/** Ports an endpoint may use in production. */
+const ALLOWED_PORTS = new Set(['', '443', '8443']);
 
 export async function checkEndpointUrl(url: string, allowPrivate: boolean) {
   const u = new URL(url);
   if (u.protocol !== 'https:') throw Errors.badRequest('Webhook addresses must use https.');
   if (u.username || u.password) throw Errors.badRequest('Webhook addresses cannot contain a user name or password.');
   if (allowPrivate) return;
+  if (!ALLOWED_PORTS.has(u.port)) throw Errors.badRequest('Webhook addresses must use port 443 or 8443.');
   const host = u.hostname.replace(/^\[|\]$/g, '');
   const addrs = isIP(host) ? [host] : (await lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
   if (addrs.length === 0) throw Errors.badRequest('This address could not be found.');
   if (addrs.some(isPrivateAddress)) throw Errors.badRequest('Webhook addresses must be on the public internet.');
+}
+
+/**
+ * The real sender: https only, no redirects followed, and the address is checked again at the moment of connecting
+ * (the name is resolved once and that checked address is used), so a name that changes after the first check
+ * cannot point the request inside the network (review of W2.8).
+ */
+export function httpsFetcher(allowPrivate: boolean): Fetcher {
+  return (url, init) => new Promise((resolve, reject) => {
+    const req = httpsRequest(url, {
+      method: init.method, headers: { ...init.headers, 'content-length': String(Buffer.byteLength(init.body)) }, signal: init.signal,
+      lookup: (hostname, options, cb) => lookupCb(hostname, { ...options, all: false }, (err, address, family) => {
+        if (err) return cb(err, '', 0);
+        if (!allowPrivate && isPrivateAddress(String(address))) return cb(Object.assign(new Error('address_not_allowed'), { code: 'EADDRNOTALLOWED' }), '', 0);
+        cb(null, String(address), family as number);
+      }),
+    }, (res) => { res.resume(); res.on('end', () => resolve({ status: res.statusCode ?? 0 })); res.on('error', reject); });
+    req.on('error', reject);
+    req.end(init.body);
+  });
 }
 
 export function sign(secret: string, timestamp: number, body: string): string {
@@ -263,16 +342,25 @@ export class WebhookEndpointsService {
   constructor(private readonly deps: Deps) {}
   private allowPrivate() { return this.deps.config.NODE_ENV !== 'production' && this.deps.config.WEBHOOKS_ALLOW_PRIVATE === true; }
 
+  private seal(secret: string) { return encryptSecret(this.deps.keys.webhookSecrets, secret); }
+  /** Each event carries company-wide data, so its subscriber must be able to see that data in the app. */
+  private checkEvents(actor: TenantActor, events: readonly string[]) {
+    for (const e of events) for (const p of EVENT_PERMISSIONS[e] ?? []) {
+      if (!actor.permissions.has(p)) throw Errors.forbidden(`You cannot subscribe to "${e}": it carries data you cannot see yourself.`);
+    }
+  }
+
   async create(actor: TenantActor, input: unknown) {
     const body = parse(EndpointInput, input);
+    this.checkEvents(actor, body.events);
     await checkEndpointUrl(body.url, this.allowPrivate());
     const secret = `whsec_${randomBytes(32).toString('base64url')}`;
     return withContext(this.deps.db, actor, async (tx) => {
       const n = (await tx.query<{ n: number }>('SELECT count(*)::int AS n FROM webhook_endpoints')).rows[0]!.n;
       if (n >= 20) throw Errors.conflict('too_many_endpoints', 'A company can have up to 20 webhook endpoints.');
       const id = (await tx.query<{ id: string }>(
-        'INSERT INTO webhook_endpoints (tenant_id, url, events, secret, description, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-        [actor.tenantId, body.url, [...new Set(body.events)], secret, body.description ?? null, actor.userId])).rows[0]!.id;
+        'INSERT INTO webhook_endpoints (tenant_id, url, events, secret_sealed, description, created_by, created_by_membership) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+        [actor.tenantId, body.url, [...new Set(body.events)], this.seal(secret), body.description ?? null, actor.userId, actor.membershipId])).rows[0]!.id;
       await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'webhook.created', ip: actor.ip, targetType: 'webhook_endpoint', targetId: id, metadata: { url: body.url, events: body.events } });
       return { id, secret };
     });
@@ -288,7 +376,12 @@ export class WebhookEndpointsService {
   async update(actor: TenantActor, id: string, input: unknown) {
     const body = parse(EndpointUpdate, input);
     if (!isUuid(id)) throw Errors.notFound('Webhook');
+    if (body.events) this.checkEvents(actor, body.events);
     return withContext(this.deps.db, actor, async (tx) => {
+      if (body.enabled) {
+        const e = (await tx.query<{ sealed: boolean }>('SELECT secret_sealed IS NOT NULL AS sealed FROM webhook_endpoints WHERE id = $1', [id])).rows[0];
+        if (e && !e.sealed) throw Errors.conflict('needs_new_secret', 'Give this endpoint a new signing secret before switching it on.');
+      }
       const r = await tx.query(`UPDATE webhook_endpoints SET events = coalesce($2, events), enabled = coalesce($3, enabled), description = coalesce($4, description),
                                   failures = CASE WHEN $3 THEN 0 ELSE failures END WHERE id = $1`,
         [id, body.events ? [...new Set(body.events)] : null, body.enabled ?? null, body.description ?? null]);
@@ -303,7 +396,8 @@ export class WebhookEndpointsService {
     if (!isUuid(id)) throw Errors.notFound('Webhook');
     const secret = `whsec_${randomBytes(32).toString('base64url')}`;
     return withContext(this.deps.db, actor, async (tx) => {
-      const r = await tx.query(`UPDATE webhook_endpoints SET previous_secret = secret, previous_until = now() + interval '24 hours', secret = $2 WHERE id = $1`, [id, secret]);
+      const r = await tx.query(`UPDATE webhook_endpoints SET previous_secret_sealed = secret_sealed,
+                                  previous_until = CASE WHEN secret_sealed IS NULL THEN NULL ELSE now() + interval '24 hours' END, secret_sealed = $2 WHERE id = $1`, [id, this.seal(secret)]);
       if (!r.rowCount) throw Errors.notFound('Webhook');
       await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'webhook.secret_rotated', ip: actor.ip, targetType: 'webhook_endpoint', targetId: id, metadata: {} });
       return { id, secret };
@@ -331,6 +425,7 @@ export class WebhookEndpointsService {
   /** Sends a delivery again (same event and event id), whatever happened to it before. */
   async resend(actor: TenantActor, deliveryId: string) {
     if (!isUuid(deliveryId)) throw Errors.notFound('Delivery');
+    await this.deps.rateLimiter.hit(API_RATE.resend!, actor.tenantId);
     return withContext(this.deps.db, actor, async (tx) => {
       const d = (await tx.query<{ endpoint_id: string; event: string; event_id: string; payload: unknown }>(
         'SELECT endpoint_id, event, event_id, payload FROM webhook_deliveries WHERE id = $1', [deliveryId])).rows[0];
@@ -350,7 +445,7 @@ export class WebhookEndpointsService {
  * only for message.received, because the company's own systems receive it.
  */
 export async function emitEvent(tx: Tx, tenantId: string, event: WebhookEvent, data: Record<string, unknown>) {
-  const eventId = (await tx.query<{ id: string }>('SELECT gen_random_uuid() AS id')).rows[0]!.id;
+  const eventId = randomUUID();
   const payload = { id: eventId, type: event, createdAt: new Date().toISOString(), data };
   await tx.query(
     `INSERT INTO webhook_deliveries (tenant_id, endpoint_id, event, event_id, payload)
@@ -358,14 +453,20 @@ export async function emitEvent(tx: Tx, tenantId: string, event: WebhookEvent, d
     [tenantId, event, eventId, JSON.stringify(payload)]);
 }
 
-export const WEBHOOK_LIMITS = { maxAttempts: 8, timeoutMs: 10_000, leaseSeconds: 60, disableAfterFailures: 50 };
+/** A claimed batch is small enough to finish inside its lease even if every request times out. */
+export const WEBHOOK_LIMITS = { maxAttempts: 8, timeoutMs: 10_000, leaseSeconds: 150, batch: 10, disableAfterFailures: 50 };
 export type Fetcher = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number }>;
 
 /** Worker: delivers due webhooks. Endpoints failing 50 times in a row are switched off (and say so). */
 export class WebhookWorker {
-  constructor(private readonly db: Db, private readonly fetcher: Fetcher = (u, i) => fetch(u, { ...i, redirect: 'manual' }), private readonly allowPrivate = false) {}
+  private readonly fetcher: Fetcher;
+  private readonly allowPrivate: boolean;
+  constructor(private readonly db: Db, private readonly secretsKey: Buffer, opts: { fetcher?: Fetcher; allowPrivate?: boolean } = {}) {
+    this.allowPrivate = opts.allowPrivate ?? false;
+    this.fetcher = opts.fetcher ?? httpsFetcher(this.allowPrivate);
+  }
 
-  async dispatchDue(limit = 100): Promise<number> {
+  async dispatchDue(limit = WEBHOOK_LIMITS.batch): Promise<number> {
     const due = await withContext(this.db, { tenantId: null, userId: null }, async (tx) =>
       (await tx.query<{ delivery_id: string; tenant_id: string }>('SELECT * FROM webhook_claim($1, $2)', [limit, WEBHOOK_LIMITS.leaseSeconds])).rows);
     for (const d of due) await this.one(d.tenant_id, d.delivery_id).catch((err) => console.error('webhook delivery error', d.delivery_id, err instanceof Error ? err.message : err));
@@ -374,21 +475,30 @@ export class WebhookWorker {
 
   private async one(tenantId: string, id: string) {
     const ctx = { tenantId, userId: null };
-    const d = await withContext(this.db, ctx, async (tx) => (await tx.query<{ event: string; event_id: string; payload: unknown; attempts: number; url: string; secret: string;
-      previous_secret: string | null; previous_valid: boolean; enabled: boolean; endpoint_id: string }>(
-      `SELECT d.event, d.event_id, d.payload, d.attempts, e.url, e.secret, e.previous_secret, (e.previous_until > now()) AS previous_valid, e.enabled, e.id AS endpoint_id
-       FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id = d.endpoint_id WHERE d.id = $1 AND d.state = 'leased'`, [id])).rows[0]);
+    const d = await withContext(this.db, ctx, async (tx) => (await tx.query<{ event: string; event_id: string; payload: unknown; attempts: number; url: string; secret: string | null;
+      previous_secret: string | null; previous_valid: boolean; enabled: boolean; endpoint_id: string; lease: string; creator_ok: boolean }>(
+      `SELECT d.event, d.event_id, d.payload, d.attempts, d.lease_until::text AS lease, e.url, e.secret_sealed AS secret, e.previous_secret_sealed AS previous_secret,
+              (e.previous_until > now()) AS previous_valid, e.enabled, e.id AS endpoint_id,
+              -- The member who set the endpoint up must still be active with the access the event needs.
+              EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id AND u.status = 'active'
+                      WHERE m.id = e.created_by_membership AND m.status = 'active'
+                        AND NOT EXISTS (SELECT 1 FROM unnest($2::text[]) need(p) WHERE NOT EXISTS (
+                          SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id WHERE mr.membership_id = m.id AND rp.permission_key = need.p))) AS creator_ok
+       FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id = d.endpoint_id WHERE d.id = $1 AND d.state = 'leased'`,
+      [id, EVENT_PERMISSIONS_ALL])).rows[0]);
     if (!d) return;
     let status = 0; let error: string | null = null;
-    if (!d.enabled) error = 'endpoint_disabled';
+    if (d.attempts >= WEBHOOK_LIMITS.maxAttempts) error = 'gave_up';
+    else if (!d.enabled || !d.secret) error = 'endpoint_disabled';
+    else if (!d.creator_ok) error = 'creator_lost_access';
     else {
       try { await checkEndpointUrl(d.url, this.allowPrivate); } catch { error = 'address_not_allowed'; }
     }
     if (!error) {
       const body = JSON.stringify(d.payload);
       const ts = Math.floor(Date.now() / 1000);
-      const sigs = [`v1=${sign(d.secret, ts, body)}`];
-      if (d.previous_secret && d.previous_valid) sigs.push(`v1=${sign(d.previous_secret, ts, body)}`);
+      const sigs = [`v1=${sign(decryptSecret(this.secretsKey, d.secret!), ts, body)}`];
+      if (d.previous_secret && d.previous_valid) sigs.push(`v1=${sign(decryptSecret(this.secretsKey, d.previous_secret), ts, body)}`);
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), WEBHOOK_LIMITS.timeoutMs);
       try {
@@ -397,21 +507,33 @@ export class WebhookWorker {
           'conversaflow-signature': `t=${ts},${sigs.join(',')}`,
         } })).status;
         if (status < 200 || status >= 300) error = `http_${status}`;
-      } catch (err) { error = (err as Error).name === 'AbortError' ? 'timeout' : 'connection_failed'; } finally { clearTimeout(timer); }
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        error = e.name === 'AbortError' ? 'timeout' : e.code === 'EADDRNOTALLOWED' ? 'address_not_allowed' : 'connection_failed';
+      } finally { clearTimeout(timer); }
     }
     await withContext(this.db, ctx, async (tx) => {
+      // Only the holder of this lease records the result (another worker may have reclaimed an expired one).
       if (!error) {
-        await tx.query(`UPDATE webhook_deliveries SET state = 'delivered', attempts = attempts + 1, last_status = $2, last_error = NULL, delivered_at = now(), lease_until = NULL, updated_at = now() WHERE id = $1`, [id, status]);
+        const r = await tx.query(`UPDATE webhook_deliveries SET state = 'delivered', attempts = attempts + 1, last_status = $2, last_error = NULL, delivered_at = now(), lease_until = NULL, updated_at = now()
+                                  WHERE id = $1 AND state = 'leased' AND lease_until = $3::timestamptz`, [id, status, d.lease]);
+        if (!r.rowCount) return;
         await tx.query('UPDATE webhook_endpoints SET failures = 0 WHERE id = $1', [d.endpoint_id]);
         return;
       }
-      const last = d.attempts + 1 >= WEBHOOK_LIMITS.maxAttempts || error === 'endpoint_disabled';
+      const final = ['endpoint_disabled', 'creator_lost_access', 'gave_up'].includes(error);
+      const last = d.attempts + 1 >= WEBHOOK_LIMITS.maxAttempts || final;
       // 30 s, 2 min, 8 min, 32 min, ~2 h, ~8.5 h, then capped at 12 h.
-      await tx.query(`UPDATE webhook_deliveries SET state = $2, attempts = attempts + 1, last_status = $3, last_error = $4, lease_until = NULL, updated_at = now(),
-                        next_attempt_at = now() + make_interval(secs => least(30 * power(4, attempts), 43200)) WHERE id = $1`,
-        [id, last ? 'failed' : 'pending', status || null, error]);
+      const r = await tx.query(`UPDATE webhook_deliveries SET state = $2, attempts = attempts + CASE WHEN $5 THEN 0 ELSE 1 END, last_status = $3, last_error = $4, lease_until = NULL, updated_at = now(),
+                        next_attempt_at = now() + make_interval(secs => least(30 * power(4, attempts), 43200)) WHERE id = $1 AND state = 'leased' AND lease_until = $6::timestamptz`,
+        [id, last ? 'failed' : 'pending', status || null, error, error === 'gave_up', d.lease]);
+      if (!r.rowCount || final) return;
       const f = (await tx.query<{ failures: number }>('UPDATE webhook_endpoints SET failures = failures + 1 WHERE id = $1 RETURNING failures', [d.endpoint_id])).rows[0];
-      if (f && f.failures >= WEBHOOK_LIMITS.disableAfterFailures) await tx.query('UPDATE webhook_endpoints SET enabled = false WHERE id = $1', [d.endpoint_id]);
+      if (f && f.failures === WEBHOOK_LIMITS.disableAfterFailures) {
+        await tx.query('UPDATE webhook_endpoints SET enabled = false WHERE id = $1', [d.endpoint_id]);
+        await AuditService.record(tx, { tenantId, actorUserId: null, action: 'webhook.auto_disabled', ip: undefined, targetType: 'webhook_endpoint', targetId: d.endpoint_id,
+          metadata: { failures: f.failures } });
+      }
     });
   }
 }

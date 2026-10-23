@@ -22,7 +22,7 @@ export interface Deps {
   mailer: Mailer;
   storage: ObjectStorage;
   scanner: FileScanner;
-  keys: { fileLinks: Buffer; sandboxWebhook: string; sandboxVerifyToken: string };
+  keys: { fileLinks: Buffer; sandboxWebhook: string; sandboxVerifyToken: string; webhookSecrets: Buffer };
   /** Messaging adapters by provider. Only those configured here can send. */
   channels: Partial<Record<Provider, ChannelAdapter>>;
   /** The AI provider (simulated unless an AI account is configured). */

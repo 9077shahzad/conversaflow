@@ -73,6 +73,7 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
         : new SignatureScanner()),
     keys: overrides.keys ?? {
       fileLinks: Buffer.from(config.FILE_URL_SIGNING_KEY, 'base64'),
+      webhookSecrets: Buffer.from(config.WEBHOOK_SECRETS_KEY, 'base64'),
       sandboxWebhook: config.SANDBOX_WEBHOOK_SECRET ?? randomBytes(32).toString('hex'),
       sandboxVerifyToken: config.SANDBOX_VERIFY_TOKEN ?? randomBytes(24).toString('hex'),
     },

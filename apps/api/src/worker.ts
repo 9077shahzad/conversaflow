@@ -58,6 +58,7 @@ const env = z
     VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
     // Outgoing webhooks (W2.8): private and local addresses are refused unless explicitly allowed outside production.
     WEBHOOKS_ALLOW_PRIVATE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+    WEBHOOK_SECRETS_KEY: z.string().refine((v) => Buffer.from(v, 'base64').length === 32, 'WEBHOOK_SECRETS_KEY must be 32 bytes, base64'),
   })
   .parse(process.env);
 
@@ -94,7 +95,7 @@ const inbound = new InboundProcessor(appDb);
 const aiService = new AiService({ db: appDb, config: { NODE_ENV: env.NODE_ENV, AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
   env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
 const promiseWatcher = new PromiseWatcher(appDb);
-const webhooks = new WebhookWorker(appDb, undefined, env.NODE_ENV !== 'production' && env.WEBHOOKS_ALLOW_PRIVATE);
+const webhooks = new WebhookWorker(appDb, Buffer.from(env.WEBHOOK_SECRETS_KEY, 'base64'), { allowPrivate: env.NODE_ENV !== 'production' && env.WEBHOOKS_ALLOW_PRIVATE });
 const pushWorker = new PushWorker(appDb, env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
   ? new WebPushSender({ publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT })
   : new RecordingPushSender());

@@ -7,7 +7,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { signBody } from '../src/modules/channels';
-import { checkEndpointUrl, isPrivateAddress, WebhookWorker, type Fetcher } from '../src/modules/public-api';
+import { checkEndpointUrl, httpsFetcher, isPrivateAddress, WebhookWorker, type Fetcher } from '../src/modules/public-api';
 import { activateSubscription, addMember, enableMfa, newCompany, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -138,7 +138,7 @@ describe('outgoing webhooks', () => {
   const calls: Array<{ url: string; headers: Record<string, string>; body: string }> = [];
   let answer = 200;
   const fetcher: Fetcher = async (url, init) => { calls.push({ url, headers: init.headers, body: init.body }); return { status: answer }; };
-  const deliver = async () => { const w = new WebhookWorker(t.deps.db, fetcher, true); while ((await w.dispatchDue(100)) > 0) { /* drain */ } };
+  const deliver = async () => { const w = new WebhookWorker(t.deps.db, t.deps.keys.webhookSecrets, { fetcher, allowPrivate: true }); while ((await w.dispatchDue(100)) > 0) { /* drain */ } };
 
   it('addresses must be https on the public internet in production', async () => {
     expect(isPrivateAddress('10.1.2.3')).toBe(true);
@@ -196,3 +196,61 @@ describe('outgoing webhooks', () => {
     expect(calls.filter((x) => x.url.endsWith('/rotate')).length).toBe(before);
   });
 });
+
+describe('review of W2.8', () => {
+  it('addresses that hide a private IPv4 address, other reserved ranges and unusual ports are refused', async () => {
+    for (const ip of ['::ffff:127.0.0.1', '::ffff:7f00:1', '::7f00:1', '64:ff9b::a00:1', '2002:a00:1::', 'fe90::1', 'febf::1', 'fec0::1', '198.18.0.1', '0.1.2.3', '::'])
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    for (const ip of ['8.8.8.8', '2606:4700::1111', '::ffff:8.8.8.8', '64:ff9b::808:808']) expect(isPrivateAddress(ip), ip).toBe(false);
+    await expect(checkEndpointUrl('https://[::ffff:127.0.0.1]/hook', false)).rejects.toMatchObject({ status: 400 });
+    await expect(checkEndpointUrl('https://8.8.8.8:22/hook', false)).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('the real sender checks the address when it connects', async () => {
+    const send = httpsFetcher(false);
+    await expect(send('https://localhost:9/x', { method: 'POST', headers: {}, body: '{}', signal: new AbortController().signal })).rejects.toMatchObject({ code: 'EADDRNOTALLOWED' });
+  });
+
+  it('signing secrets are sealed in the database; a member who loses access stops the deliveries', async () => {
+    const hook = (await owner.post('/v1/developers/webhooks', { url: 'https://127.0.0.1:9443/sealed', events: ['message.received'] }).expect(201)).body;
+    const raw = (await withContext(t.deps.db, { tenantId: tenant, userId: null }, (tx) => tx.query<{ s: string }>('SELECT secret_sealed AS s FROM webhook_endpoints WHERE id = $1', [hook.id]))).rows[0]!.s;
+    expect(raw.startsWith('v1.')).toBe(true);
+    expect(raw).not.toContain(hook.secret.slice(6, 20));
+    // A custom role with api.manage but no company-wide inbox access cannot subscribe to message events.
+    const roleKey = `apionly_${randomUUID().slice(0, 6)}`;
+    await owner.post('/v1/roles', { key: roleKey, name: 'API only', permissions: ['tenant.read', 'api.manage'] }).expect(201);
+    const dev = await addMember(t, owner, `api-dev-${randomUUID().slice(0, 4)}`, roleKey);
+    await enableMfa(dev);
+    const refused = await dev.post('/v1/developers/webhooks', { url: 'https://127.0.0.1:9443/x', events: ['message.received'] }).expect(403);
+    expect(JSON.stringify(refused.body)).toContain('message.received');
+  });
+
+  it('a reclaimed lease counts as an attempt, and a delivery that keeps crashing the worker gives up', async () => {
+    const hook = (await owner.post('/v1/developers/webhooks', { url: 'https://127.0.0.1:9443/lease', events: ['message.received'] }).expect(201)).body;
+    await say(fresh(), 'lease test').expect(200);
+    const asOwnerQ = async (q: string, p: unknown[]) => {
+      await t.ownerDb.query('ALTER TABLE webhook_deliveries NO FORCE ROW LEVEL SECURITY');
+      try { return await t.ownerDb.query(q, p); } finally { await t.ownerDb.query('ALTER TABLE webhook_deliveries FORCE ROW LEVEL SECURITY'); }
+    };
+    // Crashed workers: a lease that keeps expiring.
+    await asOwnerQ(`UPDATE webhook_deliveries SET state = 'leased', lease_until = now() - interval '1 second', attempts = 7 WHERE endpoint_id = $1`, [hook.id]);
+    const hits: string[] = [];
+    const w = new WebhookWorker(t.deps.db, t.deps.keys.webhookSecrets, { fetcher: async (u) => { hits.push(u); return { status: 200 }; }, allowPrivate: true });
+    while ((await w.dispatchDue()) > 0) { /* drain */ }
+    expect(hits.filter((u) => u.endsWith('/lease'))).toHaveLength(0);
+    const d = (await owner.get(`/v1/developers/webhooks/${hook.id}/deliveries`).expect(200)).body[0];
+    expect(d).toMatchObject({ state: 'failed', lastError: 'gave_up' });
+  });
+
+  it('a reused Idempotency-Key for another conversation is refused', async () => {
+    const k = (await owner.post('/v1/developers/keys', { name: 'Idem', scopes: ['messages:send', 'conversations:read'] }).expect(201)).body;
+    const a = fresh(); const b = fresh();
+    await say(a, 'one').expect(200); await say(b, 'two').expect(200);
+    const ca = await conv(a); const cb = await conv(b);
+    const key = randomUUID();
+    await api(k.key).post(`/conversations/${ca.id}/messages`, { text: 'Hello A' }, key).expect(201);
+    await api(k.key).post(`/conversations/${cb.id}/messages`, { text: 'Hello B' }, key).expect(409);
+    await clearLimits();
+  });
+});
+

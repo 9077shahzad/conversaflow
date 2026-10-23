@@ -111,7 +111,7 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // cf_dispatch: confirmed promises to warn about or mark missed (migration 0053, W2.6)
   'promises_due(integer)': 'b0c72f0d6bcd05e83c95a377c8606d4e',
   'api_key_route(bytea)': 'ef5323ee2c3d4ec4d1d5224b636c745f',
-  'webhook_claim(integer,integer)': '70063c9fa22e1d21933c959908a835f2',
+  'webhook_claim(integer,integer)': '87d53cac068b2194ef5d5627757cb3f8',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];

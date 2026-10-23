@@ -9,7 +9,7 @@ const SCOPES = ['conversations:read', 'messages:send', 'contacts:read', 'contact
 const EVENTS = ['message.received', 'message.status', 'conversation.resolved', 'customer_request.created', 'promise.missed'] as const;
 type Key = { id: string; name: string; prefix: string; scopes: string[]; state: 'active' | 'revoked' | 'expired'; lastUsedAt: string | null; requests24h: number };
 type Hook = { id: string; url: string; events: string[]; enabled: boolean; failedDeliveries: number };
-type Delivery = { id: string; event: string; state: string; attempts: number; lastStatus: number | null; createdAt: string };
+type Delivery = { id: string; event: string; state: string; attempts: number; lastStatus: number | null; lastError: string | null; createdAt: string };
 
 export default function DevelopersPage() {
   const params = useParams<{ locale: string }>();
@@ -66,7 +66,7 @@ function Keys({ locale }: { locale: Locale }) {
                 <span className="font-semibold" dir="auto">{k.name}</span> · <span className="font-mono text-xs" dir="ltr">cf_live_{k.prefix}…</span> · {d.states[k.state]}
                 <span className="block text-xs text-slate-700">{k.scopes.map((s) => d.scopeNames[s] ?? s).join(' · ')} · {fill(d.requests, { n: k.requests24h })} · {k.lastUsedAt ? fill(d.lastUsed, { when: formatDate(locale, k.lastUsedAt) }) : d.never}</span>
               </span>
-              {k.state === 'active' && <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(() => api(`/v1/developers/keys/${k.id}/revoke`, { method: 'POST' }))}>{d.revoke}</button>}
+              {k.state === 'active' && <button type="button" className="btn-secondary" disabled={busy} onClick={() => { if (window.confirm(d.confirmRevoke)) void run(() => api(`/v1/developers/keys/${k.id}/revoke`, { method: 'POST' })); }}>{d.revoke}</button>}
             </li>
           ))}
         </ul>
@@ -98,6 +98,7 @@ function Hooks({ locale }: { locale: Locale }) {
   const [url, setUrl] = useState('https://');
   const [events, setEvents] = useState<string[]>(['message.received']);
   const [secret, setSecret] = useState<string | null>(null);
+  const [secretFor, setSecretFor] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -123,18 +124,19 @@ function Hooks({ locale }: { locale: Locale }) {
           {hooks.map((h) => (
             <li key={h.id} className="rounded border border-slate-200 p-2">
               <p className="break-all font-mono text-xs" dir="ltr">{h.url}</p>
-              <p className="text-xs text-slate-700">{h.events.map((e) => d.eventNames[e] ?? e).join(' · ')}{h.enabled ? '' : ` · ${d.disable}`}</p>
+              <p className="text-xs text-slate-700">{h.events.map((e) => d.eventNames[e] ?? e).join(' · ')}{h.enabled ? '' : ` · ${d.switchedOff}`}</p>
               <div className="mt-1 flex flex-wrap gap-2">
                 <button type="button" className="btn-secondary" aria-expanded={open === h.id} onClick={() => show(h.id)}>{d.deliveries}</button>
                 <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(() => api(`/v1/developers/webhooks/${h.id}`, { method: 'PATCH', body: { enabled: !h.enabled } }))}>{h.enabled ? d.disable : d.enable}</button>
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(async () => setSecret((await api<{ secret: string }>(`/v1/developers/webhooks/${h.id}/rotate`, { method: 'POST' })).secret))}>{d.rotate}</button>
-                <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(() => api(`/v1/developers/webhooks/${h.id}`, { method: 'DELETE' }))}>{d.remove}</button>
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(async () => { setSecret((await api<{ secret: string }>(`/v1/developers/webhooks/${h.id}/rotate`, { method: 'POST' })).secret); setSecretFor(h.id); })}>{d.rotate}</button>
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => { if (window.confirm(d.confirmRemove)) void run(() => api(`/v1/developers/webhooks/${h.id}`, { method: 'DELETE' })); }}>{d.remove}</button>
               </div>
+              {secret && secretFor === h.id && <Secret label={d.secretOnce} value={secret} locale={locale} />}
               {open === h.id && (
                 <ul className="mt-2 grid gap-1 text-xs">
                   {deliveries.map((x) => (
                     <li key={x.id} className="flex flex-wrap items-center justify-between gap-2">
-                      <span>{d.eventNames[x.event] ?? x.event} · {d.deliveryStates[x.state] ?? x.state}{x.lastStatus ? ` (${x.lastStatus})` : ''} · {formatDate(locale, x.createdAt)}</span>
+                      <span>{d.eventNames[x.event] ?? x.event} · {d.deliveryStates[x.state] ?? x.state}{x.lastStatus ? ` (${x.lastStatus})` : ''}{x.lastError && !x.lastStatus ? ` (${d.deliveryErrors[x.lastError] ?? x.lastError})` : ''} · {formatDate(locale, x.createdAt)}</span>
                       <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(() => api(`/v1/developers/deliveries/${x.id}/resend`, { method: 'POST' }))}>{d.resend}</button>
                     </li>
                   ))}
@@ -146,7 +148,7 @@ function Hooks({ locale }: { locale: Locale }) {
       )}
       <form className="mt-4 grid gap-2" onSubmit={(e) => { e.preventDefault(); void run(async () => {
         const r = await api<{ secret: string }>('/v1/developers/webhooks', { method: 'POST', body: { url: url.trim(), events } });
-        setSecret(r.secret); setUrl('https://');
+        setSecret(r.secret); setSecretFor(null); setUrl('https://');
       }); }}>
         <h3 className="font-semibold text-slate-900">{d.newHook}</h3>
         <label htmlFor="h-url" className="text-sm font-medium text-slate-900">{d.url}</label>
@@ -158,7 +160,7 @@ function Hooks({ locale }: { locale: Locale }) {
         </fieldset>
         <div><button type="submit" className="btn-primary" disabled={busy || !url.startsWith('https://') || events.length === 0}>{d.add}</button></div>
       </form>
-      {secret && <Secret label={d.secretOnce} value={secret} locale={locale} />}
+      {secret && secretFor === null && <Secret label={d.secretOnce} value={secret} locale={locale} />}
     </section>
   );
 }

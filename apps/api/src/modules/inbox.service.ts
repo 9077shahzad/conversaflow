@@ -465,16 +465,24 @@ export class InboxService {
   async reply(actor: TenantActor, id: string, input: unknown) {
     const body = parse(ReplyRequest, input);
     type Prepared = { existing: string } | { existing?: undefined; messageId: string; jobId: string };
-    const prepared = await withContext<Prepared>(this.deps.db, actor, async (tx) => {
+    const attempt = () => withContext<Prepared>(this.deps.db, actor, async (tx) => {
       // A retry of a request we already accepted returns that message, whatever has changed since.
-      const again = await tx.query(`SELECT id FROM messages WHERE client_message_id = $1 AND sent_by_membership_id = $2`,
+      const again = await tx.query<{ id: string; conversation_id: string }>(`SELECT id, conversation_id FROM messages WHERE client_message_id = $1 AND sent_by_membership_id = $2`,
         [body.clientMessageId, actor.membershipId]);
-      if (again.rows[0]) return { existing: again.rows[0].id as string };
+      if (again.rows[0]) {
+        if (again.rows[0].conversation_id !== id) throw Errors.conflict('idempotency_key_reused', 'This request id was already used for another conversation.');
+        return { existing: again.rows[0].id };
+      }
       const c = await this.loadVisible(tx, actor, id, true);
       if (!body.fileId && !body.text) throw Errors.badRequest('Write a reply or attach a file.');
       const media = body.fileId ? await this.attachable(tx, actor, body.fileId) : undefined;
       await this.checkCanSend(tx, actor, c, body.seenActivity, body.takeover);
       return this.enqueue(tx, actor, c, body.text, body.clientMessageId, null, undefined, media);
+    });
+    // Two first-time requests with the same id at once: the second finds the first's message.
+    const prepared = await attempt().catch(async (err: unknown) => {
+      if ((err as { code?: string }).code === '23505') return attempt();
+      throw err;
     });
     if (prepared.existing !== undefined) return this.message(actor, prepared.existing);
     await this.sendNow(actor, prepared.jobId);

@@ -83,6 +83,7 @@ jobs:
       - name: Generate per-run keys
         run: |
           echo "FILE_URL_SIGNING_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "WEBHOOK_SECRETS_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
       - name: Migrations, isolation check and tests
         run: pnpm test
       - name: Record the database roles the tests used (restricted, non-owner)

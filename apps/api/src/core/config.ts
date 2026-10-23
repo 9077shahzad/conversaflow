@@ -15,6 +15,8 @@ const Schema = z.object({
   DATABASE_PLATFORM_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   FILE_URL_SIGNING_KEY: key32,
+  /** Seals outgoing-webhook signing secrets in the database (AES-256-GCM); the API and the worker need the same key. */
+  WEBHOOK_SECRETS_KEY: key32,
   FILE_STORAGE_DIR: z.string().min(1),
   APP_ORIGIN: z.string().url().default('http://localhost:3000'),
   SMTP_URL: z.string().optional(),
