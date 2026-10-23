@@ -7,6 +7,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { signBody } from '../src/modules/channels';
+import { addressKey } from '../src/modules/customer-links';
 import { activateSubscription, addMember, enableMfa, newCompany, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -165,14 +166,14 @@ describe('the customer page', () => {
     await clearLinkLimits();
   });
 
-  it('wrong links are limited per address, and a blocked address cannot use a right link either', async () => {
+  it('wrong links are limited per address, but a right link from the same address still works', async () => {
     const { c } = await newConversation();
     const token = tokenOf((await agentA.post(`/v1/conversations/${c.id}/customer-links`, {}).expect(201)).body.url);
     await clearLinkLimits();
     for (let i = 0; i < 20; i++) await get(randomBytes(32).toString('base64url')).expect(403);
-    expect((await get(token).expect(429)).body.error.code).toBe('rate_limited');
-    await clearLinkLimits();
+    expect((await get(randomBytes(32).toString('base64url')).expect(429)).body.error.code).toBe('rate_limited');
     await get(token).expect(200);
+    await clearLinkLimits();
   });
 
   it('state changes need the usual request header, so another site cannot submit them', async () => {
@@ -270,3 +271,59 @@ describe('boundaries', () => {
     expect(theirs).toBe(0);
   });
 });
+
+describe('review of W2.4', () => {
+  it('M1: a STOP sent in the same second as a page choice still stops messages', async () => {
+    const { wa, c } = await newConversation();
+    const token = tokenOf((await agentA.post(`/v1/conversations/${c.id}/customer-links`, {}).expect(201)).body.url);
+    await post(token, 'consent', { messages: 'start' }).expect(200);
+    await inbound(wa, 'STOP', Math.floor(Date.now() / 1000)).expect(200);
+    expect((await get(token).expect(200)).body.consent.messages).toBe('stopped');
+  });
+
+  it('M2: a link revoked while a request is under way cannot change anything', async () => {
+    const { c } = await newConversation();
+    const link = (await agentA.post(`/v1/conversations/${c.id}/customer-links`, {}).expect(201)).body;
+    const token = tokenOf(link.url);
+    // The team holds the link row (as revoking does) while the customer's change arrives.
+    await t.ownerDb.query('ALTER TABLE customer_links NO FORCE ROW LEVEL SECURITY');
+    const db = await t.ownerDb.connect();
+    try {
+      await db.query('BEGIN');
+      await db.query(`UPDATE customer_links SET revoked_at = now(), revoked_by = NULL, revoke_reason = 'revoked_by_team' WHERE id = $1`, [link.id]);
+      const pending = post(token, 'consent', { messages: 'stop' });
+      await new Promise((r) => setTimeout(r, 300));
+      await db.query('COMMIT');
+      expect((await pending).status).toBe(403);
+    } finally { db.release(); await t.ownerDb.query('ALTER TABLE customer_links FORCE ROW LEVEL SECURITY'); }
+    const v = await withContext(t.deps.db, { tenantId: tenant, userId: null }, async (tx) =>
+      (await tx.query<{ o: Date | null }>('SELECT opted_out_at AS o FROM contacts WHERE id = (SELECT contact_id FROM conversations WHERE id = $1)', [c.id])).rows[0]!.o);
+    expect(v).toBeNull();
+    await clearLinkLimits();
+  });
+
+  it('M3: a page link pasted into a reply is masked when the conversation is read back', async () => {
+    const { c } = await newConversation();
+    const link = (await agentA.post(`/v1/conversations/${c.id}/customer-links`, {}).expect(201)).body;
+    const fresh2 = (await agentA.get(`/v1/conversations/${c.id}`).expect(200)).body;
+    await agentA.post(`/v1/conversations/${c.id}/reply`, { text: `Your page: ${link.url}`, seenActivity: Number(fresh2.activitySeq), clientMessageId: randomUUID() }).expect(201);
+    const after = (await agentA.get(`/v1/conversations/${c.id}`).expect(200)).body;
+    expect(JSON.stringify(after.messages)).not.toContain(tokenOf(link.url));
+    expect(JSON.stringify(after.messages)).toContain('/c#••••••');
+  });
+
+  it('L1/L6: limits hold when requests or links arrive at the same moment', async () => {
+    const { c } = await newConversation();
+    const made = await Promise.all(Array.from({ length: 8 }, () => agentA.post(`/v1/conversations/${c.id}/customer-links`, {})));
+    expect(made.filter((r) => r.status === 201)).toHaveLength(5);
+    const token = tokenOf(made.find((r) => r.status === 201)!.body.url);
+    const reqs = await Promise.all(Array.from({ length: 8 }, () => post(token, 'requests', { kind: 'talk_to_person' })));
+    expect(reqs.filter((r) => r.status === 201)).toHaveLength(5);
+  });
+
+  it('IPv6 addresses are grouped by their /64 for limits', async () => {
+    expect(addressKey('2001:db8:1:2:aaaa::1')).toBe(addressKey('2001:db8:1:2:bbbb::9'));
+    expect(addressKey('::ffff:10.0.0.1')).toBe('10.0.0.1');
+  });
+});
+

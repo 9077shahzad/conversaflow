@@ -31,6 +31,15 @@ function readToken(): string | null {
   try { return sessionStorage.getItem(KEY); } catch { return null; }
 }
 
+/** A link that no longer works is forgotten by this tab. */
+function forget() { try { sessionStorage.removeItem(KEY); } catch { /* storage may be blocked */ } }
+
+/** Text with one name put in, the name isolated so Latin names and numbers keep their order in Arabic. */
+function withName(template: string, key: string, value: string) {
+  const [before, after] = template.split(key);
+  return <>{before}<bdi>{value}</bdi>{after ?? ''}</>;
+}
+
 async function call<T>(token: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/v1/customer/${path}`, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer',
@@ -58,7 +67,7 @@ export default function CustomerPage() {
   const [confirmStop, setConfirmStop] = useState(false);
 
   const fail = useCallback((e: unknown) => {
-    if (e instanceof ApiError && e.code === 'invalid_link') { setState('invalid'); setView(null); return; }
+    if (e instanceof ApiError && e.code === 'invalid_link') { forget(); setState('invalid'); setView(null); return; }
     if (e instanceof ApiError && e.code === 'rate_limited') { setState('limited'); return; }
     if (e instanceof ApiError && (e.code === 'messages_stopped' || e.code === 'too_many_requests')) { setNotice({ kind: 'error', text: d.errors[e.code] }); return; }
     setNotice({ kind: 'error', text: d.errors.generic });
@@ -130,8 +139,8 @@ export default function CustomerPage() {
         {state === 'ready' && view && (
           <>
             <section>
-              <h1 className="text-2xl font-bold text-navy">{view.customer.firstName ? d.hello.replace('{name}', view.customer.firstName) : d.helloNoName}</h1>
-              <p className="mt-1 text-slate-600">{d.intro.replace('{company}', view.company.name)}</p>
+              <h1 className="text-2xl font-bold text-navy">{view.customer.firstName ? withName(d.hello, '{name}', view.customer.firstName) : d.helloNoName}</h1>
+              <p className="mt-1 text-slate-600">{withName(d.intro, '{company}', view.company.name)}</p>
               <p className="mt-1 text-sm text-slate-500">{d.expires.replace('{date}', formatDate(locale, view.linkExpiresAt))}</p>
             </section>
             {notice && <p role={notice.kind === 'error' ? 'alert' : 'status'} className={`rounded-lg border p-3 text-sm ${notice.kind === 'error' ? 'border-red-200 bg-red-50 text-danger' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>{notice.text}</p>}
@@ -175,7 +184,7 @@ export default function CustomerPage() {
 
             <section aria-labelledby="cs-msg" className="rounded-xl border border-slate-200 bg-white p-5">
               <h2 id="cs-msg" className="text-lg font-semibold text-navy">{d.messagesTitle}</h2>
-              <p className="mt-1 text-slate-600">{view.consent.messages === 'allowed' ? d.messagesAllowed.replace('{company}', view.company.name) : d.messagesStopped.replace('{company}', view.company.name)}</p>
+              <p className="mt-1 text-slate-600">{withName(view.consent.messages === 'allowed' ? d.messagesAllowed : d.messagesStopped, '{company}', view.company.name)}</p>
               {view.consent.messages === 'allowed' ? (
                 confirmStop ? (
                   <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
@@ -190,7 +199,7 @@ export default function CustomerPage() {
               <div className="mt-5 flex items-start gap-3">
                 <input id="cs-mkt" type="checkbox" className="mt-1 h-5 w-5" checked={view.consent.marketing} disabled={busy || view.consent.messages === 'stopped'}
                   onChange={(e) => void act('consent', { marketing: e.target.checked }, d.saved)} />
-                <label htmlFor="cs-mkt" className="text-slate-800">{d.marketing.replace('{company}', view.company.name)}
+                <label htmlFor="cs-mkt" className="text-slate-800">{withName(d.marketing, '{company}', view.company.name)}
                   {view.consent.messages === 'stopped' && <span className="block text-sm text-slate-500">{d.marketingNeedsMessages}</span>}
                 </label>
               </div>

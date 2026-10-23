@@ -8,6 +8,7 @@ import { isUuid } from './members.service';
 import { companyHours, isWithinBusinessHours } from './sla';
 import type { AiProvider, AiRequest, AiResponse } from './ai-provider';
 import { CHECKER_VERSION, checkAnswer, looksLikeInjection } from './ai-check';
+import { maskLinks } from './customer-links';
 
 export { checkAnswer } from './ai-check';
 
@@ -428,7 +429,7 @@ async function recentMessages(tx: Tx, conversationId: string, limit = AI_LIMITS.
   const rows = (await tx.query<{ direction: string; body: string | null; sent_by: string | null; auto: string | null }>(
     `SELECT direction, body, sent_by_membership_id AS sent_by, automation_run_id AS auto FROM messages WHERE conversation_id = $1 AND body IS NOT NULL
      ORDER BY occurred_at DESC, created_at DESC, id DESC LIMIT $2`, [conversationId, limit])).rows.reverse();
-  return rows.map((m) => ({ from: m.direction === 'in' ? 'customer' as const : m.auto ? 'automation' as const : 'team' as const, text: m.body! }));
+  return rows.map((m) => ({ from: m.direction === 'in' ? 'customer' as const : m.auto ? 'automation' as const : 'team' as const, text: maskLinks(m.body)! }));
 }
 
 /** The inbox visibility rule: without inbox.read_all, only unassigned conversations and one's own. */

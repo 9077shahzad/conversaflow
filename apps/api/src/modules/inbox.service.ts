@@ -5,6 +5,7 @@ import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { queueConversationNotice } from './push';
+import { maskLinks } from './customer-links';
 import { consentKeyword, type ParsedEvent, type Provider } from './channels';
 import { InboundProcessor, recordWebhook } from './inbound';
 import { Sender } from './sender';
@@ -227,7 +228,7 @@ export class InboxService {
                                             ORDER BY a.created_at), '[]'::json) FROM send_attempts a WHERE a.message_id = m.id)
                 END AS "attemptLog"
          FROM messages m LEFT JOIN messages r ON r.retry_of = m.id LEFT JOIN message_templates t ON t.id = m.template_id
-         WHERE m.conversation_id = $1 ORDER BY m.occurred_at, m.id`, [c.id, MANUAL_RETRY_LIMIT])).rows;
+         WHERE m.conversation_id = $1 ORDER BY m.occurred_at, m.id`, [c.id, MANUAL_RETRY_LIMIT])).rows.map((m) => ({ ...m, body: maskLinks(m.body) }));
       // Why a failed or uncertain message cannot be retried by this person right now (null = it can). An ordinary reply
       // needs the 24-hour window; an approved template does not, but must still be approved (and, for marketing,
       // have recorded consent). The server applies the same checks again when the retry is requested and sent.
@@ -744,7 +745,9 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
     // Applied in the order the customer sent them: an older STOP or START (a retried or delayed event) changes nothing
     // once a newer keyword has been applied (review of AX-3, M1).
     // WhatsApp timestamps are in whole seconds: keywords sent within the same second apply in the order received.
-    const newer = cur.opt_keyword_at === null || e.occurredAt.getTime() >= cur.opt_keyword_at.getTime();
+    // A STOP up to 60 seconds older than the last choice still applies (clocks differ; stopping is the safe side).
+    const newer = cur.opt_keyword_at === null || e.occurredAt.getTime() >= cur.opt_keyword_at.getTime()
+      || (consent === 'opt_out' && e.occurredAt.getTime() >= cur.opt_keyword_at.getTime() - 60_000);
     if (newer) await tx.query('UPDATE contacts SET opt_keyword_at = $2 WHERE id = $1', [contactId, e.occurredAt]);
     if (newer && (consent === 'opt_out') !== (optedOut !== null)) {
       // An opt-out also withdraws any marketing consent; opting back in does not restore it.

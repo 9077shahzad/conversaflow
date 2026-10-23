@@ -9,6 +9,7 @@ import { AuditService } from './audit.service';
 import { stopAutomationRuns } from './automations';
 import { isUuid } from './members.service';
 import { queueConversationNotice } from './push';
+import { startTimerOnInbound } from './sla';
 
 /**
  * Customer control centre, first version (BRD v1.2 Wave 2, W2.4, CF-EXT-020; migration 0051).
@@ -41,6 +42,14 @@ const tokenShape = /^[A-Za-z0-9_-]{43}$/;
 
 export interface LinkContext { linkId: string; tenantId: string; contactId: string; conversationId: string | null; expiresAt: Date; ip: string | null }
 
+/** Rate-limit key for an address: IPv6 addresses by their /64 (one subscriber), IPv4 as they are. */
+export function addressKey(ip: string | null): string {
+  if (!ip) return 'unknown';
+  const v = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+  if (!v.includes(':')) return v;
+  return v.split(':').slice(0, 4).join(':') + '::/64';
+}
+
 /** The customer's lock(s), in ascending order, as incoming messages and imports take them. */
 async function lockCustomer(tx: Tx, l: LinkContext) {
   const phones = (await tx.query<{ value: string }>(
@@ -66,6 +75,7 @@ export class CustomerLinksService {
     const body = parse(IssueInput, input ?? {});
     return withContext(this.deps.db, actor, async (tx) => {
       const c = await this.visibleConversation(tx, actor, conversationId);
+      await tx.query('SELECT 1 FROM contacts WHERE id = $1 FOR UPDATE', [c.contact_id]);
       const live = (await tx.query<{ n: number }>(
         `SELECT count(*)::int AS n FROM customer_links WHERE contact_id = $1 AND revoked_at IS NULL AND expires_at > now()`, [c.contact_id])).rows[0]!.n;
       if (live >= 5) throw Errors.conflict('too_many_links', 'This customer already has 5 links in use. Revoke one first.');
@@ -173,10 +183,11 @@ export class CustomerPortalService {
 
   /** Resolves the header to a live link, or refuses. Never says whether a link existed, expired or was revoked. */
   async open(token: string | undefined, ip: string | null): Promise<LinkContext> {
-    const subject = ip ?? 'unknown';
+    const subject = addressKey(ip);
     await this.deps.rateLimiter.hit(RATE_RULES.customerLinkPerIp, subject);
-    // An address that has tried too many wrong links is refused before any lookup, even with a right one.
-    await this.deps.rateLimiter.check(RATE_RULES.customerLinkFailPerIp, subject);
+    // Wrong links are limited per address; a right link is never refused because others behind the same address
+    // (mobile networks share addresses) tried wrong ones. With 256-bit tokens guessing is not a practical threat.
+    // (Review of W2.4, M4.)
     if (!token || !tokenShape.test(token)) {
       await this.deps.rateLimiter.hit(RATE_RULES.customerLinkFailPerIp, subject);
       throw Errors.invalidLink();
@@ -193,14 +204,23 @@ export class CustomerPortalService {
     const ok = await withContext(this.deps.db, { tenantId: row.tenant_id, userId: null }, async (tx) => {
       const t = (await tx.query<{ status: string }>('SELECT status FROM tenants WHERE id = $1', [row.tenant_id])).rows[0];
       if (!t || t.status === 'suspended' || t.status === 'closed') return false;
-      await tx.query('UPDATE customer_links SET last_used_at = now(), uses = uses + 1 WHERE id = $1 AND revoked_at IS NULL', [row.link_id]);
-      return true;
+      const u = await tx.query('UPDATE customer_links SET last_used_at = now(), uses = uses + 1 WHERE id = $1 AND revoked_at IS NULL AND expires_at > now()', [row.link_id]);
+      return (u.rowCount ?? 0) > 0;
     });
     if (!ok) throw Errors.invalidLink();
     return { linkId: row.link_id, tenantId: row.tenant_id, contactId: row.contact_id, conversationId: row.conversation_id, expiresAt: row.expires_at, ip };
   }
 
   private ctx(l: LinkContext) { return { tenantId: l.tenantId, userId: null }; }
+
+  /**
+   * Inside each action's own transaction: the link is still live, and stays so until the action commits (revoking
+   * takes the row for update, so the two are ordered). Review of W2.4, M2.
+   */
+  private async live(tx: Tx, l: LinkContext) {
+    const ok = (await tx.query('SELECT 1 FROM customer_links WHERE id = $1 AND revoked_at IS NULL AND expires_at > now() FOR SHARE', [l.linkId])).rowCount;
+    if (!ok) throw Errors.invalidLink();
+  }
 
   async view(l: LinkContext) {
     return withContext(this.deps.db, this.ctx(l), async (tx) => {
@@ -228,6 +248,7 @@ export class CustomerPortalService {
   async setPreferences(l: LinkContext, input: unknown) {
     const body = parse(PrefsInput, input);
     return withContext(this.deps.db, this.ctx(l), async (tx) => {
+      await this.live(tx, l);
       await tx.query('UPDATE contacts SET locale = $2, updated_at = now() WHERE id = $1', [l.contactId, body.locale]);
       if (l.conversationId) {
         await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, 'customer_preferences', $3)`,
@@ -242,6 +263,7 @@ export class CustomerPortalService {
   async setConsent(l: LinkContext, input: unknown) {
     const body = parse(ConsentInput, input);
     return withContext(this.deps.db, this.ctx(l), async (tx) => {
+      await this.live(tx, l);
       await lockCustomer(tx, l);
       const cur = (await tx.query<{ opted_out_at: Date | null; marketing_consent_at: Date | null }>(
         'SELECT opted_out_at, marketing_consent_at FROM contacts WHERE id = $1 FOR UPDATE', [l.contactId])).rows[0];
@@ -258,7 +280,9 @@ export class CustomerPortalService {
       };
       if (body.messages) {
         // Moves the keyword clock on: an older STOP or START still in the queue cannot undo the customer's choice.
-        await tx.query('UPDATE contacts SET opt_keyword_at = greatest(coalesce(opt_keyword_at, now()), now()) WHERE id = $1', [l.contactId]);
+        // Whole seconds, as WhatsApp dates messages: a STOP sent in the same second as the page choice still applies
+        // (keywords apply when not older; review of W2.4, M1).
+        await tx.query(`UPDATE contacts SET opt_keyword_at = greatest(coalesce(opt_keyword_at, date_trunc('second', now())), date_trunc('second', now())) WHERE id = $1`, [l.contactId]);
       }
       if (body.messages === 'stop' && !optedOut) {
         await tx.query('UPDATE contacts SET opted_out_at = now(), marketing_consent_at = NULL, updated_at = now() WHERE id = $1', [l.contactId]);
@@ -287,11 +311,13 @@ export class CustomerPortalService {
   async request(l: LinkContext, input: unknown) {
     const body = parse(RequestInput, input);
     return withContext(this.deps.db, this.ctx(l), async (tx) => {
+      await this.live(tx, l);
+      // The customer's lock first (as incoming messages take it), so no new conversation opens while this one reopens,
+      // and two requests at once cannot both pass the limit (review of W2.4, L1).
+      await lockCustomer(tx, l);
       const open = (await tx.query<{ n: number }>(
         `SELECT count(*)::int AS n FROM customer_requests WHERE contact_id = $1 AND handled_at IS NULL`, [l.contactId])).rows[0]!.n;
       if (open >= 5) throw Errors.conflict('too_many_requests', 'You already have 5 requests waiting. The team will reply soon.');
-      // The customer's lock first (as incoming messages take it), so no new conversation opens while this one reopens.
-      await lockCustomer(tx, l);
       // The customer's open conversation if there is one, otherwise the newest.
       const conv = (await tx.query<{ id: string; status: string }>(
         `SELECT id, status FROM conversations WHERE contact_id = $1 ORDER BY (status <> 'resolved') DESC, created_at DESC LIMIT 1 FOR UPDATE`,
@@ -306,6 +332,9 @@ export class CustomerPortalService {
           // Open conversations sort first, so a resolved one here means the customer has none open: reopening it
           // cannot clash with the one-open-conversation rule.
           await tx.query(`UPDATE conversations SET status = 'open', resolved_at = NULL, activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1`, [conv.id]);
+          await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, 'status_changed', $3)`,
+            [l.tenantId, conv.id, JSON.stringify({ from: 'resolved', to: 'open', by: 'customer_page' })]);
+          await startTimerOnInbound(tx, conv.id, new Date());
         } else {
           await tx.query('UPDATE conversations SET activity_seq = activity_seq + 1, version = version + 1 WHERE id = $1', [conv.id]);
         }
@@ -319,4 +348,9 @@ export class CustomerPortalService {
       return { id: row.id, kind: body.kind, createdAt: row.created_at };
     });
   }
+}
+
+/** Masks customer page tokens in message text shown back to people, the AI or the API (review of W2.4, M3). */
+export function maskLinks(text: string | null): string | null {
+  return text === null ? null : text.replace(/(\/c#)[A-Za-z0-9_-]{43}/g, '$1••••••');
 }
