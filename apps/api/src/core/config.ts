@@ -53,6 +53,13 @@ const Schema = z.object({
   AI_MODEL: z.string().min(3).max(100).default('claude-sonnet-5-5'),
   AI_PRICE_INPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
   AI_PRICE_OUTPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
+  /**
+   * Web push (W2.5): the VAPID key pair (base64url) and a contact address for push services. Without them,
+   * notifications are recorded but sent nowhere, and the screen says so.
+   */
+  VAPID_PUBLIC_KEY: z.string().regex(/^[A-Za-z0-9_-]{80,100}$/).optional(),
+  VAPID_PRIVATE_KEY: z.string().regex(/^[A-Za-z0-9_-]{40,50}$/).optional(),
+  VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),
   /** Token echoed during webhook verification (hub.verify_token). Generated per process when not set. */

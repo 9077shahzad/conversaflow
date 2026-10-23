@@ -185,6 +185,20 @@ for (const locale of ['en', 'ar'] as const) {
   }
 }
 
+test('the app can be installed: manifest, service worker and offline page are served with a strict policy', async ({ page, request }) => {
+  const m = await request.get('/manifest.webmanifest');
+  expect(m.status()).toBe(200);
+  expect((await m.json()).short_name).toBe('ConversaFlow');
+  const sw = await request.get('/sw.js');
+  expect(sw.status()).toBe(200);
+  expect(sw.headers()['content-security-policy']).toContain("default-src 'self'");
+  const off = await request.get('/offline.html');
+  expect(off.status()).toBe(200);
+  expect(await off.text()).toContain('You are offline');
+  await page.goto('/en/sign-in');
+  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('/manifest.webmanifest');
+});
+
 test('language switch keeps the page and flips direction', async ({ page }) => {
   await page.goto('/en/sign-in');
   await page.getByRole('link', { name: 'Switch to Arabic' }).click();

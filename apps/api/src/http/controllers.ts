@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { PushService } from '../modules/push';
 import { CustomerLinksService, CustomerPortalService, LINK_HEADER } from '../modules/customer-links';
 import {
   Body, Controller, Delete, Get, HttpCode, Inject, Param, Patch, Post, Put, Query, Req, Res, UploadedFile, UseInterceptors,
@@ -645,6 +646,36 @@ export class CustomerLinksController {
 
   @RequirePermission('inbox.reply') @Post('customer-requests/:id/handled') @HttpCode(200)
   handle(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.links.handle(actor, id); }
+}
+
+/** Notifications on this member's devices (W2.5). Every member manages their own; nothing about anyone else. */
+@Controller('v1/me/notifications')
+export class NotificationsController {
+  constructor(@Inject(PushService) private readonly push: PushService) {}
+
+  @RequirePermission('inbox.reply') @Get('info')
+  info() { return this.push.info(); }
+
+  @RequirePermission('inbox.reply') @Get('preferences')
+  prefs(@CurrentActor() actor: TenantActor) { return this.push.preferences(actor); }
+
+  @RequirePermission('inbox.reply') @Put('preferences')
+  setPrefs(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.push.setPreferences(actor, body); }
+
+  @RequirePermission('inbox.reply') @Get('devices')
+  devices(@CurrentActor() actor: TenantActor) { return this.push.devices(actor); }
+
+  @RequirePermission('inbox.reply') @Post('devices') @HttpCode(201)
+  add(@CurrentActor() actor: TenantActor, @Body() body: unknown, @Req() req: CfRequest) { return this.push.subscribe(actor, body, req.headers['user-agent']); }
+
+  @RequirePermission('inbox.reply') @Post('devices/remove') @HttpCode(200)
+  removeHere(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.push.unsubscribeEndpoint(actor, body); }
+
+  @RequirePermission('inbox.reply') @Delete('devices/:id')
+  remove(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.push.unsubscribe(actor, id); }
+
+  @RequirePermission('inbox.reply') @Post('test') @HttpCode(201)
+  test(@CurrentActor() actor: TenantActor) { return this.push.test(actor); }
 }
 
 @Controller('v1/conversations')

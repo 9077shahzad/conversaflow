@@ -10,7 +10,11 @@ import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { dirOf, isLocale, t } from '@/lib/i18n';
 
-export const metadata: Metadata = { title: 'ConversaFlow by Meronatic', description: 'One Platform. Every Conversation. Every Customer.' };
+export const metadata: Metadata = {
+  title: 'ConversaFlow by Meronatic', description: 'One Platform. Every Conversation. Every Customer.',
+  manifest: '/manifest.webmanifest', icons: { icon: '/icon.svg', apple: '/icon.svg' },
+  appleWebApp: { capable: true, title: 'ConversaFlow', statusBarStyle: 'default' },
+};
 export const viewport: Viewport = { width: 'device-width', initialScale: 1, themeColor: '#0F172A' };
 // Pages render per request so each one carries its own CSP nonce (ADR-028).
 export const dynamic = 'force-dynamic';

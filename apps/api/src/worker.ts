@@ -6,6 +6,7 @@
  * file checked for malware before it is stored). Sending recovers by itself: an expired lease is picked up again, and a
  * message that may already have reached the provider becomes 'uncertain' instead of being sent twice.
  */
+import { PushWorker, RecordingPushSender, WebPushSender } from './modules/push';
 import { createPool } from '@conversaflow/database';
 import { z } from 'zod';
 import { MemoryMailer, SmtpMailer } from './core/mailer';
@@ -49,6 +50,10 @@ const env = z
     AI_MODEL: z.string().min(3).max(100).default('claude-sonnet-5-5'),
     AI_PRICE_INPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
     AI_PRICE_OUTPUT_PER_MTOK_USD: z.coerce.number().min(0).max(1000).optional(),
+    // Web push (W2.5): without keys, notifications are recorded but sent nowhere.
+    VAPID_PUBLIC_KEY: z.string().regex(/^[A-Za-z0-9_-]{80,100}$/).optional(),
+    VAPID_PRIVATE_KEY: z.string().regex(/^[A-Za-z0-9_-]{40,50}$/).optional(),
+    VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
   })
   .parse(process.env);
 
@@ -84,6 +89,9 @@ const inbound = new InboundProcessor(appDb);
 // AI for the "AI reply" automation step: the same configuration as the API (simulated unless an AI account is set up).
 const aiService = new AiService({ db: appDb, config: { NODE_ENV: env.NODE_ENV, AI_PRICE_INPUT_PER_MTOK_USD: env.AI_PRICE_INPUT_PER_MTOK_USD, AI_PRICE_OUTPUT_PER_MTOK_USD: env.AI_PRICE_OUTPUT_PER_MTOK_USD } } as unknown as Deps,
   env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
+const pushWorker = new PushWorker(appDb, env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
+  ? new WebPushSender({ publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT })
+  : new RecordingPushSender());
 const automations = new AutomationRunner(appDb, new AutomationMetering({ db: appDb }), aiService);
 
 let stopping = false;
@@ -109,6 +117,17 @@ process.on('SIGINT', () => (stopping = true));
         while ((await inbound.dispatchDue(200)) > 0 && !stopping) { /* drain */ }
       } catch (err) {
         console.error('inbound error', err instanceof Error ? err.message : err);
+      }
+      await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
+    }
+  })();
+  // Notifications on the team's devices (W2.5).
+  void (async () => {
+    while (!stopping) {
+      try {
+        while ((await pushWorker.dispatchDue(100)) > 0 && !stopping) { /* drain */ }
+      } catch (err) {
+        console.error('push error', err instanceof Error ? err.message : err);
       }
       await new Promise((r) => setTimeout(r, env.INBOUND_POLL_MS));
     }

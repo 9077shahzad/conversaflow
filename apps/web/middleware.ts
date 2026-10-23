@@ -1,9 +1,11 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { buildCsp, FALLBACK_CSP, newNonce } from './lib/csp';
+import { buildCsp, FALLBACK_CSP, newNonce, SHELL_CSP } from './lib/csp';
 import { isLocale } from './lib/i18n';
 
 /** Served without a page nonce: the API proxy and built static files. They still get the strict fallback policy. */
 const isNonPage = (p: string) => p.startsWith('/v1/') || p.startsWith('/_next/static/') || p === '/favicon.ico';
+/** The installable-app files (W2.5): the service worker must be able to fetch our own pages, so 'self' is allowed. */
+const SHELL_FILES = new Set(['/sw.js', '/offline.html', '/offline.css', '/icon.svg', '/manifest.webmanifest']);
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -11,6 +13,12 @@ export function middleware(req: NextRequest) {
     const prefersArabic = (req.headers.get('accept-language') ?? '').toLowerCase().startsWith('ar');
     const res = NextResponse.redirect(new URL(prefersArabic ? '/ar/sign-in' : '/en/sign-in', req.url));
     res.headers.set('content-security-policy', FALLBACK_CSP);
+    return res;
+  }
+  if (SHELL_FILES.has(pathname)) {
+    const res = NextResponse.next();
+    res.headers.set('content-security-policy', SHELL_CSP);
+    if (pathname === '/sw.js') { res.headers.set('cache-control', 'no-cache'); res.headers.set('service-worker-allowed', '/'); }
     return res;
   }
   if (isNonPage(pathname)) {

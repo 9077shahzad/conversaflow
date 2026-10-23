@@ -16,7 +16,7 @@ import {
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
   TemplatesController, ContactsController, CampaignsController, SuppressionsController,
   TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-  CustomerPortalController, CustomerLinksController,
+  CustomerPortalController, CustomerLinksController, NotificationsController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -38,6 +38,7 @@ import { ReportsService } from './modules/reports';
 import { AutomationsService } from './modules/automations';
 import { AnthropicProvider, SimulatedAiProvider } from './modules/ai-provider';
 import { AiService } from './modules/ai';
+import { PushService, RecordingPushSender, WebPushSender } from './modules/push';
 import { CustomerLinksService, CustomerPortalService } from './modules/customer-links';
 import { MembersService } from './modules/members.service';
 import { PlatformService } from './modules/platform.service';
@@ -75,6 +76,9 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
     },
     channels: overrides.channels ?? (config.CHANNEL_SANDBOX_ENABLED ? { sandbox: new SandboxAdapter() } : {}),
     ai: overrides.ai ?? (config.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(config.AI_API_KEY!, config.AI_MODEL) : new SimulatedAiProvider()),
+    push: overrides.push ?? (config.VAPID_PUBLIC_KEY && config.VAPID_PRIVATE_KEY
+      ? new WebPushSender({ publicKey: config.VAPID_PUBLIC_KEY, privateKey: config.VAPID_PRIVATE_KEY, subject: config.VAPID_SUBJECT })
+      : new RecordingPushSender()),
   };
 }
 
@@ -89,13 +93,13 @@ export class AppModule {
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
         InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
         TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-        CustomerPortalController, CustomerLinksController,
+        CustomerPortalController, CustomerLinksController, NotificationsController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
-        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
+        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), { provide: PushService, useFactory: () => new PushService(deps, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

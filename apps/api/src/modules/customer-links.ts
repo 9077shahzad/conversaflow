@@ -8,6 +8,7 @@ import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { stopAutomationRuns } from './automations';
 import { isUuid } from './members.service';
+import { queueConversationNotice } from './push';
 
 /**
  * Customer control centre, first version (BRD v1.2 Wave 2, W2.4, CF-EXT-020; migration 0051).
@@ -311,6 +312,7 @@ export class CustomerPortalService {
         await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, 'customer_request', $3)`,
           [l.tenantId, conv.id, JSON.stringify({ requestId: row.id, kind: body.kind })]);
         if (body.kind === 'talk_to_person' || body.kind === 'complaint') await stopAutomationRuns(tx, conv.id, 'person_requested');
+        await queueConversationNotice(tx, l.tenantId, conv.id, 'customer_request');
       }
       await AuditService.record(tx, { tenantId: l.tenantId, actorUserId: null, action: 'customer_request.created', ip: l.ip ?? undefined,
         targetType: 'customer_request', targetId: row.id, metadata: { kind: body.kind, linkId: l.linkId } });

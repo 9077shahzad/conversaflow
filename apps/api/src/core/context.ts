@@ -4,6 +4,7 @@ import type { Db } from '@conversaflow/database';
 import type { Config } from './config';
 import type { Mailer } from './mailer';
 import type { RateLimiter } from './rate-limit';
+import type { PushSender } from '../modules/push';
 import type { FileScanner, ObjectStorage } from './storage';
 import type { ChannelAdapter, Provider } from '../modules/channels';
 
@@ -26,6 +27,8 @@ export interface Deps {
   channels: Partial<Record<Provider, ChannelAdapter>>;
   /** The AI provider (simulated unless an AI account is configured). */
   ai: AiProvider;
+  /** Web push sender (records only, unless VAPID keys are configured). */
+  push: PushSender;
 }
 
 /** The signed-in session, resolved from the cookie on every request. */

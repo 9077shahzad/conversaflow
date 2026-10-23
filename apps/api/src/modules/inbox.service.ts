@@ -4,6 +4,7 @@ import type { Deps, TenantActor } from '../core/context';
 import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
+import { queueConversationNotice } from './push';
 import { consentKeyword, type ParsedEvent, type Provider } from './channels';
 import { InboundProcessor, recordWebhook } from './inbound';
 import { Sender } from './sender';
@@ -763,6 +764,8 @@ export async function applyInboundMessage(tx: Tx, tenantId: string, connectionId
       });
     }
   }
+  // Notifications on the team's devices (W2.5): queued in this transaction, so exactly once.
+  if (!consent) await queueConversationNotice(tx, tenantId, conv.id, 'new_message');
   // Automations: started in this transaction, so exactly once per message. STOP and START never start one.
   if (!consent) {
     await startAutomationRuns(tx, tenantId, { conversationId: conv.id, contactId, messageId, body: e.body, firstInbound: conv.last_inbound_at === null });

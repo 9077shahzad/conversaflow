@@ -353,6 +353,16 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
   const key = useRef(newKey());
   const replyBlocked = mode === 'reply' && !!blockedReason;
   const tpl = templates?.find((x) => x.id === templateId) ?? null;
+  // A reply or note written without a connection waits here and is sent, with the same key, when the connection is
+  // back (W2.5). Every check is made again then; nothing is stored on the device.
+  const [queued, setQueued] = useState<null | { send: () => Promise<unknown> }>(null);
+  useEffect(() => {
+    if (!queued) return;
+    const retry = () => { if (navigator.onLine) { const q = queued; setQueued(null); void run(q.send); } };
+    window.addEventListener('online', retry);
+    const timer = window.setInterval(retry, 15_000);
+    return () => { window.removeEventListener('online', retry); window.clearInterval(timer); };
+  }, [queued]);
 
   useEffect(() => {
     if (mode === 'template' && templates === null) {
@@ -366,12 +376,14 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
       await fn();
       setText(''); setFile(null); setValues((v) => v.map(() => '')); key.current = newKey();
     } catch (e) {
+      // No connection (the request never reached the server): keep the draft and its key, and send it later.
+      if (!(e instanceof ApiError) && !file && mode !== 'template') { setQueued({ send: fn }); return; }
       const code = e instanceof ApiError ? e.code : 'error';
       setProblem({ code, message: code === 'conversation_changed' ? d.changed : explain(e, d) });
       if (code === 'conversation_changed') key.current = newKey();
     } finally {
       setBusy(false);
-      await onDone();
+      await onDone().catch(() => undefined);
     }
   }
 
@@ -449,6 +461,12 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
         </div>
       ) : (
         <>
+          {queued && (
+            <div role="status" className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <span className="flex-1">{d.queuedOffline}</span>
+              <button type="button" className="btn-secondary" onClick={() => setQueued(null)}>{d.queuedCancel}</button>
+            </div>
+          )}
           {mode === 'reply' && !replyBlocked && aiEnabled && <AiAssist conversationId={conv.id} locale={locale} onUse={(body) => setText(body)} />}
           {mode === 'reply' && !replyBlocked && <SavedReplyPicker conv={conv} locale={locale} onPick={(body) => setText((cur) => (cur ? `${cur}\n${body}` : body))} />}
           <label htmlFor={`compose-${conv.id}`} className="sr-only">{mode === 'reply' ? d.replyLabel : d.noteLabel}</label>
