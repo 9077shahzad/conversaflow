@@ -298,7 +298,7 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
       </ol>
 
       {error && <p role="alert" className="mx-4 mb-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800">{error}</p>}
-      <Composer conv={conv} locale={locale} aiEnabled={!!env?.ai?.enabled} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} blockedReason={
+      <Composer key={conv.id} conv={conv} locale={locale} aiEnabled={!!env?.ai?.enabled} canTakeOver={can('inbox.assign')} canAttach={can('files.write')} maxFileBytes={env?.maxFileBytes ?? 16 * 1024 * 1024} blockedReason={
         pausedForMe ? d.badges.paused : conv.contact.optedOut ? d.badges.optedOut : !conv.windowOpen ? d.badges.windowClosed : null
       } templateBlocked={pausedForMe || conv.contact.optedOut} assignedOther={assignedOther} onDone={onChanged} />
     </div>
@@ -360,10 +360,13 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
   const [queued, setQueued] = useState<null | { send: () => Promise<unknown> }>(null);
   useEffect(() => {
     if (!queued) return;
-    const retry = () => { if (navigator.onLine) { const q = queued; setQueued(null); void run(q.send); } };
+    // Tried when the browser says it is online again, and otherwise after 15 s, 30 s, 1 min … up to 5 minutes.
+    let delay = 15_000; let timer: number;
+    const retry = () => { if (navigator.onLine) { const q = queued; setQueued(null); void run(q.send); } else schedule(); };
+    const schedule = () => { timer = window.setTimeout(retry, delay); delay = Math.min(delay * 2, 300_000); };
     window.addEventListener('online', retry);
-    const timer = window.setInterval(retry, 15_000);
-    return () => { window.removeEventListener('online', retry); window.clearInterval(timer); };
+    schedule();
+    return () => { window.removeEventListener('online', retry); window.clearTimeout(timer); };
   }, [queued]);
 
   useEffect(() => {
@@ -379,7 +382,7 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
       setText(''); setFile(null); setValues((v) => v.map(() => '')); key.current = newKey();
     } catch (e) {
       // No connection (the request never reached the server): keep the draft and its key, and send it later.
-      if (!(e instanceof ApiError) && !file && mode !== 'template') { setQueued({ send: fn }); return; }
+      if (!(e instanceof ApiError) && !file && mode === 'reply') { setQueued({ send: fn }); return; }
       const code = e instanceof ApiError ? e.code : 'error';
       setProblem({ code, message: code === 'conversation_changed' ? d.changed : explain(e, d) });
       if (code === 'conversation_changed') key.current = newKey();
@@ -507,7 +510,7 @@ function Composer({ conv, locale, canTakeOver, canAttach, maxFileBytes, blockedR
       <div className="mt-2 flex justify-end">
         {mode === 'template'
           ? <button type="submit" disabled={busy || !canSendTemplate} className="btn-primary">{busy ? d.sending : d.templateSend}</button>
-          : <button type="submit" disabled={busy || replyBlocked || (!text.trim() && !(mode === 'reply' && file))} className="btn-primary">
+          : <button type="submit" disabled={busy || replyBlocked || !!queued || (!text.trim() && !(mode === 'reply' && file))} className="btn-primary">
               {busy ? d.sending : mode === 'reply' ? d.send : d.addNote}
             </button>}
       </div>

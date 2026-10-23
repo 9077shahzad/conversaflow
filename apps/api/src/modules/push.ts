@@ -61,8 +61,23 @@ export class WebPushSender implements PushSender {
   }
 }
 
+/**
+ * Push services browsers use. A subscription must point at one of them (on the standard https port, by name, never
+ * an address), so the worker can never be made to call anything else (review of W2.5, H1). Development and tests
+ * may also use hosts under example.test.
+ */
+const PUSH_HOSTS = ['fcm.googleapis.com', 'updates.push.services.mozilla.com', 'push.services.mozilla.com', 'notify.windows.com', 'web.push.apple.com'];
+export function isPushServiceUrl(raw: string, allowTestHosts: boolean): boolean {
+  let u: URL;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== 'https:' || (u.port && u.port !== '443') || u.username || u.password) return false;
+  const h = u.hostname.toLowerCase();
+  if (/^[0-9.]+$/.test(h) || h.includes(':') || h.startsWith('[')) return false;
+  if (allowTestHosts && (h === 'example.test' || h.endsWith('.example.test'))) return true;
+  return PUSH_HOSTS.some((p) => h === p || h.endsWith(`.${p}`));
+}
 const SubscribeInput = z.object({
-  endpoint: z.string().url().max(1000).refine((u) => u.startsWith('https://'), 'The push address must use https.'),
+  endpoint: z.string().url().max(1000),
   keys: z.object({ p256dh: z.string().min(40).max(200).regex(/^[A-Za-z0-9_-]+=*$/), auth: z.string().min(16).max(64).regex(/^[A-Za-z0-9_-]+=*$/) }),
 }).strict();
 const PrefsInput = z.object({ assigned: z.boolean(), unassigned: z.boolean(), customerRequests: z.boolean() }).strict();
@@ -75,7 +90,7 @@ const TEXT = {
 } as const;
 
 export class PushService {
-  constructor(private readonly deps: { db: Db; config: { VAPID_PUBLIC_KEY?: string } }, private readonly sender: PushSender) {}
+  constructor(private readonly deps: { db: Db; config: { VAPID_PUBLIC_KEY?: string; NODE_ENV?: string }; rateLimiter?: { hit(rule: { name: string; limit: number; windowSeconds: number }, subject: string): Promise<void> } }, private readonly sender: PushSender) {}
 
   /** What the browser needs to subscribe, and whether notifications really go anywhere. */
   info() {
@@ -84,6 +99,7 @@ export class PushService {
 
   async subscribe(actor: TenantActor, input: unknown, userAgent: string | undefined) {
     const body = parse(SubscribeInput, input);
+    if (!isPushServiceUrl(body.endpoint, this.deps.config.NODE_ENV !== 'production')) throw Errors.badRequest('This is not a browser push service address.');
     return withContext(this.deps.db, actor, async (tx) => {
       const n = (await tx.query<{ n: number }>('SELECT count(*)::int AS n FROM push_subscriptions WHERE membership_id = $1', [actor.membershipId])).rows[0]!.n;
       const existing = (await tx.query<{ id: string; membership_id: string }>('SELECT id, membership_id FROM push_subscriptions WHERE endpoint = $1', [body.endpoint])).rows[0];
@@ -91,6 +107,7 @@ export class PushService {
       if (existing && existing.membership_id !== actor.membershipId) await tx.query('DELETE FROM push_subscriptions WHERE id = $1', [existing.id]);
       if (existing && existing.membership_id === actor.membershipId) {
         await tx.query('UPDATE push_subscriptions SET p256dh = $2, auth = $3, user_agent = $4, failures = 0 WHERE id = $1', [existing.id, body.keys.p256dh, body.keys.auth, userAgent?.slice(0, 300) ?? null]);
+        await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'notifications.device_renewed', ip: actor.ip, targetType: 'push_subscription', targetId: existing.id, metadata: {} });
         return { id: existing.id };
       }
       if (n >= 10) throw Errors.conflict('too_many_devices', 'Notifications are on for 10 devices already. Turn them off on one first.');
@@ -124,7 +141,7 @@ export class PushService {
 
   devices(actor: TenantActor) {
     return withContext(this.deps.db, actor, async (tx) => (await tx.query(
-      `SELECT id, user_agent AS "userAgent", created_at AS "createdAt", last_success_at AS "lastSuccessAt", failures
+      `SELECT id, endpoint, user_agent AS "userAgent", created_at AS "createdAt", last_success_at AS "lastSuccessAt"
        FROM push_subscriptions WHERE membership_id = $1 ORDER BY created_at`, [actor.membershipId])).rows);
   }
 
@@ -148,6 +165,7 @@ export class PushService {
 
   /** A test notification to the member's own devices. */
   async test(actor: TenantActor) {
+    await this.deps.rateLimiter?.hit({ name: 'push:test', limit: 5, windowSeconds: 3600 }, actor.membershipId);
     return withContext(this.deps.db, actor, async (tx) => {
       const r = await tx.query(`INSERT INTO push_jobs (tenant_id, subscription_id, kind) SELECT tenant_id, id, 'test' FROM push_subscriptions WHERE membership_id = $1`, [actor.membershipId]);
       if (!r.rowCount) throw Errors.conflict('no_devices', 'Turn on notifications on this device first.');
@@ -175,8 +193,9 @@ export async function queueConversationNotice(tx: Tx, tenantId: string, conversa
        AND ($5::text IS NULL OR coalesce(p.customer_requests, true))
        AND EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id
                    WHERE mr.membership_id = s.membership_id AND rp.permission_key = 'inbox.reply')
-       -- One waiting alert per device and conversation: a burst of messages is one notification.
-       AND NOT EXISTS (SELECT 1 FROM push_jobs j WHERE j.subscription_id = s.id AND j.conversation_id = $2 AND j.state IN ('pending', 'leased'))`,
+       -- One waiting alert per device and conversation: a burst of messages is one notification (also a unique index).
+       AND NOT EXISTS (SELECT 1 FROM push_jobs j WHERE j.subscription_id = s.id AND j.conversation_id = $2 AND j.state IN ('pending', 'leased'))
+     ON CONFLICT DO NOTHING`,
     [tenantId, conversationId, kind, c.assigned, want]);
 }
 
@@ -196,11 +215,21 @@ export class PushWorker {
   private async one(tenantId: string, jobId: string) {
     const ctx = { tenantId, userId: null };
     const job = await withContext(this.db, ctx, async (tx) => (await tx.query<{ kind: 'new_message' | 'customer_request' | 'test' | 'promise_due_soon' | 'promise_missed'; conversation_id: string | null; attempts: number;
-      sub_id: string; endpoint: string; p256dh: string; auth: string; locale: string }>(
-      `SELECT j.kind, j.conversation_id, j.attempts, s.id AS sub_id, s.endpoint, s.p256dh, s.auth, t.locale
+      sub_id: string; endpoint: string; p256dh: string; auth: string; locale: string; allowed: boolean }>(
+      `SELECT j.kind, j.conversation_id, j.attempts, s.id AS sub_id, s.endpoint, s.p256dh, s.auth, t.locale,
+              (m.status = 'active' AND EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id
+                                               WHERE mr.membership_id = m.id AND rp.permission_key = 'inbox.reply')) AS allowed
        FROM push_jobs j JOIN push_subscriptions s ON s.id = j.subscription_id JOIN tenants t ON t.id = j.tenant_id
+       JOIN memberships m ON m.id = s.membership_id
        WHERE j.id = $1 AND j.state = 'leased'`, [jobId])).rows[0]);
     if (!job) return;
+    // A member suspended or no longer able to reply since the alert was queued is not told (review of W2.5, M1);
+    // an alert whose lease ran out too often is given up.
+    if (!job.allowed || job.attempts >= PUSH_LIMITS.maxAttempts) {
+      await withContext(this.db, ctx, (tx) => tx.query(`UPDATE push_jobs SET state = 'failed', lease_until = NULL, last_error = $2, updated_at = now() WHERE id = $1`,
+        [jobId, job.allowed ? 'too_many_attempts' : 'member_not_allowed']));
+      return;
+    }
     const lang = job.locale === 'ar' ? 'ar' : 'en';
     const [title, body] = TEXT[lang][job.kind];
     const url = job.conversation_id ? `/${lang}/app/inbox?c=${job.conversation_id}` : `/${lang}/app/inbox`;
@@ -216,7 +245,9 @@ export class PushWorker {
         const last = job.attempts + 1 >= PUSH_LIMITS.maxAttempts;
         await tx.query(`UPDATE push_jobs SET state = $2, attempts = attempts + 1, lease_until = NULL, last_error = 'push_service_error',
                           next_attempt_at = now() + make_interval(secs => 30 * (attempts + 1)), updated_at = now() WHERE id = $1`, [jobId, last ? 'failed' : 'pending']);
-        await tx.query('UPDATE push_subscriptions SET failures = failures + 1 WHERE id = $1', [job.sub_id]);
+        const f = (await tx.query<{ failures: number }>('UPDATE push_subscriptions SET failures = failures + 1 WHERE id = $1 RETURNING failures', [job.sub_id])).rows[0];
+        // A device failing again and again is removed (it can be turned on again).
+        if (f && f.failures >= PUSH_LIMITS.removeAfterFailures) await tx.query('DELETE FROM push_subscriptions WHERE id = $1', [job.sub_id]);
       }
     });
   }

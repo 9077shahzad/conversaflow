@@ -1,5 +1,5 @@
 'use client';
-import { PwaRegister } from './Pwa';
+import { forgetPushHere, PwaRegister } from './Pwa';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { createContext, useContext, useEffect, useState } from 'react';
@@ -55,6 +55,8 @@ export function AppShell({ locale, children }: { locale: Locale; children: React
   }, [locale, router]);
 
   async function signOut() {
+    // This device stops getting the member's alerts first (review of W2.5, M1).
+    await forgetPushHere();
     await api('/v1/auth/logout', { method: 'POST' }).catch(() => undefined);
     router.replace(`/${locale}/sign-in`);
   }

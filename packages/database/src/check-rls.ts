@@ -104,8 +104,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'inbound_claim(integer,integer)': '9e7a118f3009f851b1736f0f62dd3658',
   // cf_dispatch: leases automation runs for the worker, at most 20 per company per lease (0045, 0048)
   'automation_claim(integer,integer)': 'e7941674d3d76974a0cf7e67e814cf90',
-  // cf_dispatch: leases notification jobs for the worker (migration 0052, W2.5)
-  'push_claim(integer,integer)': '9135eef6a8f0df65916a960b7cc2f6af',
+  // cf_dispatch: leases notification jobs for the worker; an expired lease counts as an attempt (0052, 0054)
+  'push_claim(integer,integer)': '898c97a677f9d6f55942430a1a013098',
   // cf_dispatch: confirmed promises to warn about or mark missed (migration 0053, W2.6)
   'promises_due(integer)': '9d8420def710517608d3dc040a055351',
 };

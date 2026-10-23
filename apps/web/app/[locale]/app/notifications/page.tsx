@@ -8,7 +8,7 @@ import { formatDate, isLocale, t, type Locale } from '@/lib/i18n';
 /** Notifications on this device and what to be told about (W2.5). */
 type Info = { publicKey: string | null; delivery: 'web_push' | 'recording' };
 type Prefs = { assigned: boolean; unassigned: boolean; customerRequests: boolean };
-type Device = { id: string; userAgent: string | null; createdAt: string; lastSuccessAt: string | null };
+type Device = { id: string; endpoint: string; userAgent: string | null; createdAt: string; lastSuccessAt: string | null };
 
 export default function NotificationsPage() {
   const params = useParams<{ locale: string }>();
@@ -33,7 +33,8 @@ function Notifications({ locale }: { locale: Locale }) {
       if (supported) {
         const reg = await navigator.serviceWorker.getRegistration();
         const sub = await reg?.pushManager.getSubscription();
-        setThisDevice(sub?.endpoint ?? null);
+        // On only if the server has this browser's subscription too.
+        setThisDevice(sub && dv.some((x) => x.endpoint === sub.endpoint) ? sub.endpoint : null);
       }
     } catch { setNotice({ ok: false, text: t(locale).common.error }); }
   }, [locale, supported]);
@@ -52,7 +53,8 @@ function Notifications({ locale }: { locale: Locale }) {
     await navigator.serviceWorker.ready;
     const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToBytes(info.publicKey) });
     const json = sub.toJSON() as { endpoint: string; keys: { p256dh: string; auth: string } };
-    await api('/v1/me/notifications/devices', { method: 'POST', body: { endpoint: json.endpoint, keys: json.keys } });
+    try { await api('/v1/me/notifications/devices', { method: 'POST', body: { endpoint: json.endpoint, keys: json.keys } }); }
+    catch (e) { await sub.unsubscribe().catch(() => undefined); throw e; }
   }, d.on);
   const turnOffHere = () => run(async () => {
     const reg = await navigator.serviceWorker.getRegistration();

@@ -220,7 +220,8 @@ export class PromiseWatcher {
         // The owner's devices are told (W2.5), without the promise's wording.
         if (p.owner) {
           await tx.query(`INSERT INTO push_jobs (tenant_id, subscription_id, kind, conversation_id)
-                          SELECT $1, s.id, $3, $2 FROM push_subscriptions s WHERE s.membership_id = $4`,
+                          SELECT $1, s.id, $3, $2 FROM push_subscriptions s WHERE s.membership_id = $4
+                          ON CONFLICT DO NOTHING`,
             [d.tenant_id, p.conversation_id, missed ? 'promise_missed' : 'promise_due_soon', p.owner]);
         }
         return 1;

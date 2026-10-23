@@ -7,7 +7,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { signBody } from '../src/modules/channels';
-import { PushWorker, RecordingPushSender } from '../src/modules/push';
+import { isPushServiceUrl, PushWorker, RecordingPushSender } from '../src/modules/push';
 import { activateSubscription, addMember, enableMfa, newCompany, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -125,10 +125,10 @@ describe('who is told, and what the alert says', () => {
     sender().gone.add(d.endpoint);
     await say(fresh(), 'Hello').expect(200);
     await send();
-    const left = (await agentB.get('/v1/me/notifications/devices').expect(200)).body.map((x: { id: string }) => x.id);
     const gone = (await app((tx) => tx.query<{ n: number }>('SELECT count(*)::int AS n FROM push_subscriptions WHERE endpoint = $1', [d.endpoint]))).rows[0]!.n;
     expect(gone).toBe(0);
-    expect(left.length).toBeGreaterThanOrEqual(0);
+    const listed = (await agentB.get('/v1/me/notifications/devices').expect(200)).body.map((x: { endpoint: string }) => x.endpoint);
+    expect(listed).not.toContain(d.endpoint);
   });
 
   it('a test alert goes to the member\'s own devices only', async () => {
@@ -148,3 +148,48 @@ describe('who is told, and what the alert says', () => {
     expect(other).toBe(0);
   });
 });
+
+describe('review of W2.5', () => {
+  it('H1: a device must point at a browser push service, by name, on the standard port; tests are limited', async () => {
+    for (const bad of ['https://10.0.0.5:8443/x', 'https://169.254.169.254/latest', 'https://internal.corp/x', 'https://fcm.googleapis.com:8443/x', 'http://fcm.googleapis.com/x', 'https://[::1]/x']) {
+      expect(isPushServiceUrl(bad, false), bad).toBe(false);
+    }
+    expect(isPushServiceUrl('https://fcm.googleapis.com/fcm/send/abc', false)).toBe(true);
+    expect(isPushServiceUrl('https://web.push.apple.com/abc', false)).toBe(true);
+    expect(isPushServiceUrl('https://push.example.test/abc', false)).toBe(false);
+    await agentA.post('/v1/me/notifications/devices', { ...device(), endpoint: 'https://169.254.169.254/latest' }).expect(400);
+    const keys = await t.deps.redis.keys('rl:push:test:*'); if (keys.length) await t.deps.redis.del(...keys);
+    await agentA.post('/v1/me/notifications/devices', device()).expect(201);
+    for (let i = 0; i < 5; i++) await agentA.post('/v1/me/notifications/test').expect(201);
+    expect((await agentA.post('/v1/me/notifications/test')).status).toBe(429);
+    const k2 = await t.deps.redis.keys('rl:push:test:*'); if (k2.length) await t.deps.redis.del(...k2);
+    const listed = (await agentA.get('/v1/me/notifications/devices').expect(200)).body[0];
+    expect(listed).not.toHaveProperty('failures');
+  });
+
+  it('M1: a member suspended after an alert is queued is not told', async () => {
+    const d = device();
+    const c = await addMember(t, owner, `push-s-${randomUUID().slice(0, 4)}`, 'agent');
+    await c.post('/v1/me/notifications/devices', d).expect(201);
+    await c.put('/v1/me/notifications/preferences', { assigned: true, unassigned: true, customerRequests: true }).expect(200);
+    await say(fresh(), 'Hello there').expect(200);
+    const id = (await c.get('/v1/me/access').expect(200)).body.membershipId;
+    await t.ownerDb.query('ALTER TABLE memberships NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE memberships SET status = 'suspended' WHERE id = $1`, [id]); }
+    finally { await t.ownerDb.query('ALTER TABLE memberships FORCE ROW LEVEL SECURITY'); }
+    await send();
+    expect(sentTo(d.endpoint)).toHaveLength(0);
+  });
+
+  it('two messages at the same moment queue one alert per device', async () => {
+    const d = device();
+    await agentB.post('/v1/me/notifications/devices', d).expect(201);
+    const wa = fresh();
+    await Promise.all([say(wa, 'one'), say(wa, 'two'), say(wa, 'three')]);
+    const n = (await app((tx) => tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM push_jobs j JOIN push_subscriptions s ON s.id = j.subscription_id
+      WHERE s.endpoint = $1 AND j.state IN ('pending', 'leased')`, [d.endpoint]))).rows[0]!.n;
+    expect(n).toBeLessThanOrEqual(1);
+    await send();
+  });
+});
+

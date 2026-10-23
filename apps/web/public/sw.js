@@ -4,7 +4,8 @@
  *  - serves a plain offline page when there is no connection and the page cannot load.
  * It never stores API responses, messages or customer data: only the offline page and the icon are cached.
  */
-const CACHE = 'cf-shell-v1';
+// Change the version whenever the offline page or icon changes, so devices fetch them again.
+const CACHE = 'cf-shell-v2';
 const OFFLINE = ['/offline.html', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -26,16 +27,22 @@ self.addEventListener('push', (event) => {
   let data = { title: 'ConversaFlow', body: '', url: '/', tag: 'conversaflow' };
   try { data = { ...data, ...event.data.json() }; } catch (e) { /* keep the default */ }
   // Only our own pages may be opened from a notification.
-  const url = typeof data.url === 'string' && data.url.startsWith('/') && !data.url.startsWith('//') ? data.url : '/';
+  const url = sameOrigin(data.url) ? data.url : '/';
   event.waitUntil(self.registration.showNotification(data.title, { body: data.body, tag: data.tag, renotify: true, icon: '/icon.svg', badge: '/icon.svg', data: { url } }));
 });
 
+function sameOrigin(url) {
+  try { return typeof url === 'string' && new URL(url, self.location.origin).origin === self.location.origin; } catch (e) { return false; }
+}
+
+// An open tab is focused and asked to open the conversation itself, so drafts and waiting replies in it survive.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || '/';
+  const raw = (event.notification.data && event.notification.data.url) || '/';
+  const url = sameOrigin(raw) ? raw : '/';
   event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((wins) => {
     for (const w of wins) {
-      if (new URL(w.url).origin === self.location.origin && 'focus' in w) { w.navigate(url); return w.focus(); }
+      if (new URL(w.url).origin === self.location.origin && 'focus' in w) { w.postMessage({ type: 'open', url }); return w.focus(); }
     }
     return self.clients.openWindow(url);
   }));
