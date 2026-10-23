@@ -47,12 +47,23 @@ const COLS = `p.id, p.conversation_id AS "conversationId", p.description, p.owne
  */
 export async function suggestFromReply(tx: Tx, a: { tenantId: string; userId: string | null; membershipId: string | null; conversationId: string; messageId: string; text: string }) {
   if (!a.text || a.text.length > 4096) return;
+  // Nothing to look up when the reply holds no commitment with a time (most replies).
+  if (!detectPromise(a.text, new Date(), 0)) return;
+  // A problem here must never stop the reply being sent (review of W2.6): its own savepoint.
+  await tx.query('SAVEPOINT promise_detect');
+  try {
+    await suggest(tx, a);
+    await tx.query('RELEASE SAVEPOINT promise_detect');
+  } catch (err) {
+    await tx.query('ROLLBACK TO SAVEPOINT promise_detect');
+    console.error('promise detection failed; the reply goes ahead', err instanceof Error ? err.message : err);
+  }
+}
+
+async function suggest(tx: Tx, a: { tenantId: string; userId: string | null; membershipId: string | null; conversationId: string; messageId: string; text: string }) {
   const { tz } = await companyHours(tx);
-  const auto0 = (await tx.query<{ auto: boolean }>('SELECT promises_auto_confirm AS auto FROM tenant_settings')).rows[0]?.auto ?? false;
-  // The company's current UTC offset in minutes (daylight saving included), from the database's time zone data.
-  const offset = Number((await tx.query<{ m: number }>(`SELECT round(extract(epoch FROM (now() AT TIME ZONE $1) - (now() AT TIME ZONE 'UTC')) / 60)::int AS m`, [tz])).rows[0]!.m);
-  const s = { auto: auto0 };
-  const found = detectPromise(a.text, new Date(), offset);
+  const s = { auto: (await tx.query<{ auto: boolean }>('SELECT promises_auto_confirm AS auto FROM tenant_settings')).rows[0]?.auto ?? false };
+  const found = detectPromise(a.text, new Date(), tz);
   if (!found) return;
   const c = (await tx.query<{ contact_id: string }>('SELECT contact_id FROM conversations WHERE id = $1', [a.conversationId])).rows[0];
   if (!c) return;
@@ -71,6 +82,8 @@ export async function suggestFromReply(tx: Tx, a: { tenantId: string; userId: st
 // --- People -------------------------------------------------------------------------------------------------------
 
 export class PromisesService {
+  /** What the last change did, for its audit record (from and to deadline and owner, outcome and note). */
+  private lastChange: Record<string, unknown> = {};
   constructor(private readonly deps: { db: Db }) {}
 
   private async visible(tx: Tx, actor: TenantActor, conversationId: string) {
@@ -83,11 +96,15 @@ export class PromisesService {
     return c;
   }
 
-  private async member(tx: Tx, id: string | undefined, fallback: string) {
+  /** An owner must be active, able to reply, and able to see the conversation (review of W2.6). */
+  private async member(tx: Tx, id: string | undefined, fallback: string, conversationId: string) {
     const m = id ?? fallback;
-    const ok = (await tx.query(`SELECT 1 FROM memberships m WHERE m.id = $1 AND m.status = 'active'
-      AND EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id WHERE mr.membership_id = m.id AND rp.permission_key = 'inbox.reply')`, [m])).rowCount;
-    if (!ok) throw Errors.badRequest('Choose an active team member who can reply to customers.');
+    const ok = (await tx.query(`SELECT 1 FROM memberships m, conversations c WHERE m.id = $1 AND c.id = $2 AND m.status = 'active'
+      AND EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id WHERE mr.membership_id = m.id AND rp.permission_key = 'inbox.reply')
+      AND (c.assigned_membership_id IS NULL OR c.assigned_membership_id = m.id
+           OR EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id WHERE mr.membership_id = m.id AND rp.permission_key = 'inbox.read_all'))`,
+      [m, conversationId])).rowCount;
+    if (!ok) throw Errors.badRequest('Choose an active team member who can reply to customers and can see this conversation.');
     return m;
   }
 
@@ -107,7 +124,9 @@ export class PromisesService {
         `SELECT ${COLS} FROM promises p JOIN conversations c ON c.id = p.conversation_id
          WHERE p.status = ANY($1::text[])
            AND ($2::boolean OR p.owner_membership_id = $3::uuid OR (p.status = 'suggested' AND (c.assigned_membership_id = $3::uuid OR c.assigned_membership_id IS NULL)))
-         ORDER BY p.due_at LIMIT 200`, [statuses, all, actor.membershipId])).rows;
+           -- Whatever the role in the promise, only conversations the member can see now (review of W2.6).
+           AND ($4::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $3::uuid)
+         ORDER BY CASE WHEN $5::boolean THEN p.due_at END DESC, p.due_at LIMIT 200`, [statuses, all, actor.membershipId, actor.permissions.has('inbox.read_all'), q.status === 'closed'])).rows;
     });
   }
 
@@ -118,7 +137,7 @@ export class PromisesService {
     if (due.getTime() > Date.now() + 365 * DAY) throw Errors.badRequest('Choose a deadline within a year.');
     return withContext(this.deps.db, actor, async (tx) => {
       const c = await this.visible(tx, actor, conversationId);
-      const owner = await this.member(tx, body.ownerMembershipId, actor.membershipId);
+      const owner = await this.member(tx, body.ownerMembershipId, actor.membershipId, c.id);
       const row = (await tx.query<{ id: string }>(
         `INSERT INTO promises (tenant_id, conversation_id, contact_id, description, owner_membership_id, due_at, source, status, created_by, confirmed_at, confirmed_by)
          VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'confirmed', $7, now(), $7) RETURNING id`,
@@ -134,13 +153,16 @@ export class PromisesService {
     return this.change(actor, id, body.expectedVersion, async (tx, p) => {
       if (p.status !== 'suggested' && p.status !== 'confirmed') throw Errors.conflict('promise_closed', 'This promise is no longer open.');
       const due = body.dueAt ? new Date(body.dueAt) : p.due_at;
-      if (due.getTime() <= Date.now() && p.status === 'suggested') throw Errors.badRequest('Choose a deadline in the future.');
-      const owner = await this.member(tx, body.ownerMembershipId, p.owner_membership_id ?? actor.membershipId);
+      if (body.dueAt && due.getTime() < Date.now() + 5 * 60_000) throw Errors.badRequest('Choose a deadline at least five minutes away.');
+      if (!body.dueAt && p.status === 'suggested' && due.getTime() <= Date.now()) throw Errors.badRequest('Choose a deadline in the future.');
+      if (due.getTime() > Date.now() + 365 * DAY) throw Errors.badRequest('Choose a deadline within a year.');
+      const owner = await this.member(tx, body.ownerMembershipId, p.owner_membership_id ?? actor.membershipId, p.conversation_id);
+      this.lastChange = { fromDue: p.due_at, toDue: due, fromOwner: p.owner_membership_id, toOwner: owner };
       await tx.query(`UPDATE promises SET status = 'confirmed', description = coalesce($2, description), due_at = $3, owner_membership_id = $4,
                         confirmed_at = coalesce(confirmed_at, now()), confirmed_by = coalesce(confirmed_by, $5),
                         warned_at = CASE WHEN due_at IS DISTINCT FROM $3 THEN NULL ELSE warned_at END, version = version + 1 WHERE id = $1`,
         [p.id, body.description ?? null, due, owner, actor.userId]);
-      await this.event(tx, actor, p.conversation_id, 'promise_confirmed', { promiseId: p.id, dueAt: due, owner, changed: p.status === 'confirmed' });
+      await this.event(tx, actor, p.conversation_id, 'promise_confirmed', { promiseId: p.id, dueAt: due, owner, changed: p.status === 'confirmed', fromDueAt: p.due_at, fromOwner: p.owner_membership_id });
       return 'promise.confirmed';
     });
   }
@@ -153,6 +175,7 @@ export class PromisesService {
       if (body.outcome === 'recovered' && !body.note) throw Errors.badRequest('Say how the miss was put right.');
       await tx.query(`UPDATE promises SET status = $2, note = coalesce($3, note), closed_at = now(), closed_by = $4, version = version + 1 WHERE id = $1`,
         [p.id, body.outcome, body.note ?? null, actor.userId]);
+      this.lastChange = { outcome: body.outcome, note: body.note ?? null };
       await this.event(tx, actor, p.conversation_id, `promise_${body.outcome}`, { promiseId: p.id });
       return `promise.${body.outcome}`;
     });
@@ -167,8 +190,9 @@ export class PromisesService {
       if (!p) throw Errors.notFound('Promise');
       await this.visible(tx, actor, p.conversation_id);
       if (p.version !== expectedVersion) throw new AppError(409, 'promise_changed', 'Someone else changed this promise. Reload and try again.');
+      this.lastChange = {};
       const action = await fn(tx, p);
-      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action, ip: actor.ip, targetType: 'promise', targetId: p.id, metadata: {} });
+      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action, ip: actor.ip, targetType: 'promise', targetId: p.id, metadata: this.lastChange });
       return { id: p.id, version: p.version + 1 };
     });
   }
@@ -205,28 +229,49 @@ export class PromiseWatcher {
       (await tx.query<{ promise_id: string; tenant_id: string }>('SELECT * FROM promises_due($1)', [limit])).rows);
     let n = 0;
     for (const d of due) {
-      n += await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => {
-        const p = (await tx.query<{ id: string; conversation_id: string; owner: string | null; due_at: Date; warned_at: Date | null; status: string }>(
-          `SELECT id, conversation_id, owner_membership_id AS owner, due_at, warned_at, status FROM promises WHERE id = $1 FOR UPDATE SKIP LOCKED`, [d.promise_id])).rows[0];
-        if (!p || p.status !== 'confirmed') return 0;
-        const missed = p.due_at.getTime() <= Date.now();
-        if (missed) {
-          await tx.query(`UPDATE promises SET status = 'missed', missed_at = now(), version = version + 1 WHERE id = $1`, [p.id]);
-        } else if (!p.warned_at) {
-          await tx.query('UPDATE promises SET warned_at = now() WHERE id = $1', [p.id]);
-        } else return 0;
-        await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, $3, $4)`,
-          [d.tenant_id, p.conversation_id, missed ? 'promise_missed' : 'promise_due_soon', JSON.stringify({ promiseId: p.id, dueAt: p.due_at })]);
-        // The owner's devices are told (W2.5), without the promise's wording.
-        if (p.owner) {
-          await tx.query(`INSERT INTO push_jobs (tenant_id, subscription_id, kind, conversation_id)
-                          SELECT $1, s.id, $3, $2 FROM push_subscriptions s WHERE s.membership_id = $4
-                          ON CONFLICT DO NOTHING`,
-            [d.tenant_id, p.conversation_id, missed ? 'promise_missed' : 'promise_due_soon', p.owner]);
-        }
-        return 1;
-      });
+      try { n += await this.one(d.tenant_id, d.promise_id); } catch (err) {
+        console.error('promise check failed', d.promise_id, err instanceof Error ? err.message : err);
+      }
     }
     return n;
+  }
+
+  private async one(tenantId: string, promiseId: string): Promise<number> {
+    return withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      // Decided under the row lock with the database's clock, so a deadline moved a moment ago is seen.
+      const p = (await tx.query<{ id: string; conversation_id: string; owner: string | null; due_at: Date; warned_at: Date | null; status: string; past: boolean; soon: boolean; owner_sees: boolean }>(
+        `SELECT p.id, p.conversation_id, p.owner_membership_id AS owner, p.due_at, p.warned_at, p.status,
+                (p.due_at <= now()) AS past, (p.due_at <= now() + interval '1 hour') AS soon,
+                (c.assigned_membership_id IS NULL OR c.assigned_membership_id = p.owner_membership_id
+                 OR EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id
+                            WHERE mr.membership_id = p.owner_membership_id AND rp.permission_key = 'inbox.read_all')) AS owner_sees
+         FROM promises p JOIN conversations c ON c.id = p.conversation_id WHERE p.id = $1 FOR UPDATE OF p SKIP LOCKED`, [promiseId])).rows[0];
+      if (!p) return 0;
+      if (p.status === 'suggested') {
+        if (!p.past) return 0;
+        await tx.query(`UPDATE promises SET status = 'dismissed', note = 'Not confirmed before its deadline', closed_at = now(), version = version + 1 WHERE id = $1`, [p.id]);
+        await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, 'promise_dismissed', $3)`,
+          [tenantId, p.conversation_id, JSON.stringify({ promiseId: p.id, lapsed: true })]);
+        return 1;
+      }
+      if (p.status !== 'confirmed') return 0;
+      let kind: 'promise_missed' | 'promise_due_soon';
+      if (p.past) {
+        await tx.query(`UPDATE promises SET status = 'missed', missed_at = now(), version = version + 1 WHERE id = $1`, [p.id]);
+        kind = 'promise_missed';
+      } else if (p.soon && !p.warned_at) {
+        await tx.query('UPDATE promises SET warned_at = now() WHERE id = $1', [p.id]);
+        kind = 'promise_due_soon';
+      } else return 0;
+      await tx.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, data) VALUES ($1, $2, $3, $4)`,
+        [tenantId, p.conversation_id, kind, JSON.stringify({ promiseId: p.id, dueAt: p.due_at })]);
+      // The owner's devices are told, without the promise's wording, if the owner can still see the conversation.
+      if (p.owner && p.owner_sees) {
+        await tx.query(`INSERT INTO push_jobs (tenant_id, subscription_id, kind, conversation_id)
+                        SELECT $1, s.id, $3, $2 FROM push_subscriptions s WHERE s.membership_id = $4
+                        ON CONFLICT DO NOTHING`, [tenantId, p.conversation_id, kind, p.owner]);
+      }
+      return 1;
+    });
   }
 }

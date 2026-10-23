@@ -702,7 +702,8 @@ export class PromisesController {
   @RequirePermission('inbox.assign') @Get('promises/settings')
   settings(@CurrentActor() actor: TenantActor) { return this.promises.settings(actor); }
 
-  @RequirePermission('inbox.assign') @Put('promises/settings')
+  // Automatic confirmation is a company decision: company settings permission (review of W2.6).
+  @RequirePermission('tenant.update') @Put('promises/settings')
   saveSettings(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.promises.saveSettings(actor, body); }
 }
 

@@ -194,7 +194,7 @@ export async function queueConversationNotice(tx: Tx, tenantId: string, conversa
        AND EXISTS (SELECT 1 FROM membership_roles mr JOIN role_permissions rp ON rp.role_id = mr.role_id
                    WHERE mr.membership_id = s.membership_id AND rp.permission_key = 'inbox.reply')
        -- One waiting alert per device and conversation: a burst of messages is one notification (also a unique index).
-       AND NOT EXISTS (SELECT 1 FROM push_jobs j WHERE j.subscription_id = s.id AND j.conversation_id = $2 AND j.state IN ('pending', 'leased'))
+       AND NOT EXISTS (SELECT 1 FROM push_jobs j WHERE j.subscription_id = s.id AND j.conversation_id = $2 AND j.kind = $3 AND j.state IN ('pending', 'leased'))
      ON CONFLICT DO NOTHING`,
     [tenantId, conversationId, kind, c.assigned, want]);
 }

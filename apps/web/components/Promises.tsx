@@ -17,6 +17,7 @@ export function when(locale: Locale, iso: string) {
 }
 /** datetime-local value (the viewer's clock) to ISO with offset. */
 const toIso = (local: string) => new Date(local).toISOString();
+const localInput = (iso: string) => { const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16); };
 const inHours = (h: number) => { const d = new Date(Date.now() + h * 3600_000); d.setSeconds(0, 0); return new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16); };
 
 export function ConversationPromises({ conversationId, locale, canEdit, names }: { conversationId: string; locale: Locale; canEdit: boolean; names: (id: string | null) => string }) {
@@ -28,6 +29,8 @@ export function ConversationPromises({ conversationId, locale, canEdit, names }:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recovering, setRecovering] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [newDue, setNewDue] = useState('');
   const [note, setNote] = useState('');
 
   const load = useCallback(async () => {
@@ -63,6 +66,9 @@ export function ConversationPromises({ conversationId, locale, canEdit, names }:
             {p.note && <p className="mt-1 text-xs text-slate-700" dir="auto">{p.note}</p>}
             {canEdit && (
               <div className="mt-1 flex flex-wrap gap-2">
+                {(p.status === 'suggested' || p.status === 'confirmed') && editing !== p.id && (
+                  <button type="button" className="btn-secondary" disabled={busy} onClick={() => { setEditing(p.id); setNewDue(localInput(p.dueAt)); }}>{d.changeDue}</button>
+                )}
                 {p.status === 'suggested' && <>
                   <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(() => api(`/v1/promises/${p.id}/confirm`, { method: 'POST', body: { expectedVersion: p.version } }))}>{d.confirm}</button>
                   <button type="button" className="btn-secondary" disabled={busy} onClick={() => run(() => api(`/v1/promises/${p.id}/close`, { method: 'POST', body: { outcome: 'dismissed', expectedVersion: p.version } }))}>{d.dismiss}</button>
@@ -75,6 +81,15 @@ export function ConversationPromises({ conversationId, locale, canEdit, names }:
                 )}
                 {p.status === 'missed' && recovering !== p.id && <button type="button" className="btn-secondary" disabled={busy} onClick={() => { setRecovering(p.id); setNote(''); }}>{d.recover}</button>}
               </div>
+            )}
+            {editing === p.id && (
+              <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); void run(() => api(`/v1/promises/${p.id}/confirm`, { method: 'POST', body: { dueAt: toIso(newDue), expectedVersion: p.version } })).then(() => setEditing(null)); }}>
+                <label className="flex flex-col text-xs font-medium text-slate-800">{d.byWhen}
+                  <input type="datetime-local" value={newDue} dir="ltr" onChange={(e) => setNewDue(e.target.value)} className="mt-1 rounded border border-slate-300 px-2 py-1.5 text-sm" />
+                </label>
+                <button type="submit" className="btn-secondary" disabled={busy || !newDue}>{p.status === 'suggested' ? d.confirm : d.save}</button>
+                <button type="button" className="btn-secondary" onClick={() => setEditing(null)}>{d.cancelEdit}</button>
+              </form>
             )}
             {recovering === p.id && (
               <form className="mt-2" onSubmit={(e) => { e.preventDefault(); if (note.trim()) void run(() => api(`/v1/promises/${p.id}/close`, { method: 'POST', body: { outcome: 'recovered', note: note.trim(), expectedVersion: p.version } })).then(() => setRecovering(null)); }}>

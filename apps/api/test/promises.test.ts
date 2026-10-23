@@ -140,6 +140,8 @@ describe('promises in a conversation', () => {
 
   it('with automatic confirmation approved, a detected promise is confirmed for the writer; another agent cannot see a conversation assigned elsewhere', async () => {
     await agentA.put('/v1/promises/settings', { autoConfirm: true }).expect(403);
+    const sup = await addMember(t, owner, `prom-sup-${randomUUID().slice(0, 4)}`, 'supervisor');
+    await sup.put('/v1/promises/settings', { autoConfirm: true }).expect(403);   // a company decision
     await owner.put('/v1/promises/settings', { autoConfirm: true }).expect(200);
     const wa = fresh();
     await say(wa, 'Any news?').expect(200);
@@ -163,3 +165,65 @@ describe('promises in a conversation', () => {
     expect((await promisesOf(agentA, id))[0]!.status).toBe('dismissed');
   });
 });
+
+describe('review of W2.6', () => {
+  const now = new Date('2026-10-25T07:00:00Z');
+  const at = (s2: string) => detectPromise(s2, now, 180)?.dueAt.toISOString() ?? null;
+  it('detection: whole Arabic words, negations, questions, longer words first, clock times, limits', () => {
+    for (const none of ['سنرسل لك فني واحد', 'بنرسل اثنين من الفنيين', 'سنرسل لك المساعدة', 'We will not be able to come tomorrow', 'لن نرسل الفني اليوم',
+      'نرسل لك الفني بكرة؟', 'We will send it within 999 days']) expect(at(none), none).toBeNull();
+    expect(at('سنرسل الفني خلال يومين')).toBe('2026-10-27T07:00:00.000Z');
+    expect(at('We’ll call you tomorrow at 10am')).toBe('2026-10-26T07:00:00.000Z');
+    expect(at('راح اتصل فيك بكرة')).toBe('2026-10-26T15:00:00.000Z');
+    expect(at('We will call you in an hour')).toBe('2026-10-25T08:00:00.000Z');
+    // Across a daylight-saving change: New York, Friday, "on Monday" is 18:00 EST.
+    expect(detectPromise('We will call you on Monday', new Date('2026-10-30T16:00:00Z'), 'America/New_York')?.dueAt.toISOString()).toBe('2026-11-02T23:00:00.000Z');
+  });
+
+  it('the list follows the inbox rule after a conversation is reassigned; owners must be able to see the conversation', async () => {
+    const wa = fresh();
+    await say(wa, 'Quote?').expect(200);
+    const c = await conv(wa);
+    const made = (await agentA.post(`/v1/conversations/${c.id}/promises`, { description: 'Send the quote', dueAt: new Date(Date.now() + 3 * 3600_000).toISOString() }).expect(201)).body;
+    const meB = (await agentB.get('/v1/me/access').expect(200)).body.membershipId;
+    const c2 = await conv(wa);
+    await owner.post(`/v1/conversations/${c.id}/assign`, { membershipId: meB, expectedVersion: c2.version }).expect(200);
+    expect((await agentA.get('/v1/promises').expect(200)).body.map((x: { id: string }) => x.id)).not.toContain(made.id);
+    const meA = (await agentA.get('/v1/me/access').expect(200)).body.membershipId;
+    await agentB.post(`/v1/conversations/${c.id}/promises`, { description: 'Call back', dueAt: new Date(Date.now() + 3 * 3600_000).toISOString(), ownerMembershipId: meA }).expect(400);
+  });
+
+  it('deadlines: confirming checks the range and records from and to; suggestions past their deadline close with a note', async () => {
+    const wa = fresh();
+    await say(wa, 'Hi').expect(200);
+    const c = await conv(wa);
+    const made = (await agentA.post(`/v1/conversations/${c.id}/promises`, { description: 'Visit', dueAt: new Date(Date.now() + 3 * 3600_000).toISOString() }).expect(201)).body;
+    await agentA.post(`/v1/promises/${made.id}/confirm`, { dueAt: new Date(Date.now() + 400 * 86400e3).toISOString(), expectedVersion: 0 }).expect(400);
+    await agentA.post(`/v1/promises/${made.id}/confirm`, { dueAt: new Date(Date.now() - 60_000).toISOString(), expectedVersion: 0 }).expect(400);
+    const to = new Date(Date.now() + 26 * 3600_000).toISOString();
+    await agentA.post(`/v1/promises/${made.id}/confirm`, { dueAt: to, expectedVersion: 0 }).expect(200);
+    const audit = (await t.ownerDb.query<{ metadata: { fromDue?: string; toDue?: string } }>(`SELECT metadata FROM audit_events WHERE tenant_id = $1 AND target_id = $2 AND action = 'promise.confirmed'`, [tenant, made.id])).rows[0];
+    expect(audit?.metadata.toDue).toBeTruthy();
+    expect(audit?.metadata.fromDue).toBeTruthy();
+    // A suggestion whose deadline passes unconfirmed.
+    const id = await reply(agentA, wa, 'I will call you in an hour');
+    const sug = (await promisesOf(agentA, id)).find((x) => x.status === 'suggested')!;
+    await t.ownerDb.query('ALTER TABLE promises NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE promises SET due_at = now() - interval '1 minute' WHERE id = $1`, [sug.id]); }
+    finally { await t.ownerDb.query('ALTER TABLE promises FORCE ROW LEVEL SECURITY'); }
+    await new PromiseWatcher(t.deps.db).dispatchDue();
+    expect((await promisesOf(agentA, id)).find((x) => x.id === sug.id)!.status).toBe('dismissed');
+  });
+
+  it('a closed promise cannot be changed at all', async () => {
+    const wa = fresh();
+    await say(wa, 'Hi').expect(200);
+    const c = await conv(wa);
+    const made = (await agentA.post(`/v1/conversations/${c.id}/promises`, { description: 'Visit', dueAt: new Date(Date.now() + 3600_000 * 3).toISOString() }).expect(201)).body;
+    await agentA.post(`/v1/promises/${made.id}/close`, { outcome: 'kept', expectedVersion: 0 }).expect(200);
+    await t.ownerDb.query('ALTER TABLE promises NO FORCE ROW LEVEL SECURITY');
+    try { await expect(t.ownerDb.query(`UPDATE promises SET note = 'rewritten' WHERE id = $1`, [made.id])).rejects.toThrow(); }
+    finally { await t.ownerDb.query('ALTER TABLE promises FORCE ROW LEVEL SECURITY'); }
+  });
+});
+

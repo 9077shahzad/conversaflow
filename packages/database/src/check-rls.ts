@@ -107,7 +107,7 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // cf_dispatch: leases notification jobs for the worker; an expired lease counts as an attempt (0052, 0054)
   'push_claim(integer,integer)': '898c97a677f9d6f55942430a1a013098',
   // cf_dispatch: confirmed promises to warn about or mark missed (migration 0053, W2.6)
-  'promises_due(integer)': '9d8420def710517608d3dc040a055351',
+  'promises_due(integer)': 'b0c72f0d6bcd05e83c95a377c8606d4e',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
