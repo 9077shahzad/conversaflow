@@ -110,6 +110,28 @@ async function populate(owner: Client, label: string, tenantId: string) {
   await withContext(t.deps.db, { tenantId, userId: null }, (tx) => emitEvent(tx, tenantId, 'conversation.resolved', { conversationId: conv.id }));
   // Wave 2 (W2.6): a promise.
   await owner.post(`/v1/conversations/${conv.id}/promises`, { description: `Call back ${label}`, dueAt: new Date(Date.now() + 86400e3).toISOString() }).expect(201);
+  // Operator slice 1 (0059): settings, a published price list, a case, a sent quote and the customer's acceptance.
+  await owner.put('/v1/operator/settings', { termsEn: 'Terms for the test company.', termsAr: 'شروط شركة الاختبار.' }).expect(200);
+  const rc = (await owner.post('/v1/operator/rate-cards', { card: { currency: 'SAR', taxRateBp: 1500, taxLabel: 'VAT', areas: { khobar: 0 },
+    services: [{ serviceKey: 'ac_service', nameEn: 'AC service', nameAr: 'صيانة مكيف', kind: 'fixed', unitPrice: 15000 }] } }).expect(201)).body;
+  await owner.post(`/v1/operator/rate-cards/${rc.id}/publish`).expect(200);
+  await owner.put('/v1/operator/settings', { enabled: true }).expect(200);
+  // A second customer (the first one opted out), so the quote can be sent.
+  const wa2 = `9665${(Date.now() + 7).toString().slice(-8)}`;
+  const raw2 = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: {
+    metadata: { phone_number_id: number }, contacts: [{ wa_id: wa2, profile: { name: `Second ${label}` } }],
+    messages: [{ from: wa2, id: `wamid.iso.${label}.op`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'AC service please' } }] } }] }] });
+  await request(t.app.getHttpServer()).post('/v1/webhooks/sandbox').set('Content-Type', 'application/json')
+    .set('X-Hub-Signature-256', signBody(t.deps.keys.sandboxWebhook, raw2)).send(raw2).expect(200);
+  const conv2 = await withContext(t.deps.db, { tenantId, userId: null }, async (tx) => (await tx.query<{ id: string }>(
+    `SELECT c.id FROM conversations c JOIN contact_identifiers ci ON ci.contact_id = c.contact_id WHERE ci.value = $1`, [wa2])).rows[0]!);
+  const opCase = (await owner.post(`/v1/operator/conversations/${conv2.id}/cases`).expect(201)).body;
+  const q = (await owner.post(`/v1/operator/cases/${opCase.id}/quotes`, { lines: [{ serviceKey: 'ac_service', quantity: 2 }], areaKey: 'khobar' }).expect(201)).body;
+  const sent = await owner.post(`/v1/operator/quotes/${q.id}/send`, { expectedVersion: 0 }).expect(200);
+  const qmsg = await withContext(t.deps.db, { tenantId, userId: null }, async (tx) =>
+    (await tx.query<{ body: string }>('SELECT body FROM messages WHERE id = $1', [sent.body.messageId])).rows[0]!.body);
+  await request(t.app.getHttpServer()).post('/v1/quote/accept').set('X-Requested-With', 'conversaflow')
+    .set('X-Quote-Link', /#([A-Za-z0-9_-]{43})/.exec(qmsg)![1]!).send({ quoteNumber: 1, agree: true }).expect(200);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;

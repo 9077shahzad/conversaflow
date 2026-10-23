@@ -16,7 +16,7 @@ import {
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
   TemplatesController, ContactsController, CampaignsController, SuppressionsController,
   TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-  CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController,
+  CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController, OperatorController, QuotePortalController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -41,6 +41,7 @@ import { AiService } from './modules/ai';
 import { PushService, RecordingPushSender, WebPushSender } from './modules/push';
 import { PromisesService } from './modules/promises';
 import { SetupService } from './modules/setup';
+import { OperatorService, QuotePortalService } from './modules/operator';
 import { OutcomesService } from './modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, WebhookEndpointsService } from './modules/public-api';
 import { CustomerLinksService, CustomerPortalService } from './modules/customer-links';
@@ -98,13 +99,13 @@ export class AppModule {
         AuditController, FilesController, SettingsController, PlatformController, ChannelsController, WebhooksController,
         InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
         TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-        CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController,
+        CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController, OperatorController, QuotePortalController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
-        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), service(PromisesService), service(SetupService), service(OutcomesService), service(ApiAuth), service(ApiKeysService), service(PublicApiReads), service(WebhookEndpointsService), { provide: PushService, useFactory: () => new PushService({ db: deps.db, config: deps.config, rateLimiter: deps.rateLimiter }, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
+        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), service(PromisesService), service(SetupService), service(OperatorService), service(QuotePortalService), service(OutcomesService), service(ApiAuth), service(ApiKeysService), service(PublicApiReads), service(WebhookEndpointsService), { provide: PushService, useFactory: () => new PushService({ db: deps.db, config: deps.config, rateLimiter: deps.rateLimiter }, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },

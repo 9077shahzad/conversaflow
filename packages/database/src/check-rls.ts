@@ -37,14 +37,14 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
   cf_auth: ['invitations'],
   // customer_links: routing columns of links neither revoked nor expired (migration 0051, W2.4)
   // api_keys: key lookup columns of keys neither revoked nor expired (migration 0056, W2.8)
-  cf_channel: ['channel_connections', 'provider_accounts', 'customer_links', 'api_keys'],
+  cf_channel: ['channel_connections', 'provider_accounts', 'customer_links', 'api_keys', 'op_quote_links'],
   // import_batches: only unimported previews older than a day, so their rows can be emptied (migration 0041)
   // webhook_events: scheduling columns of events not yet applied, so the worker can lease them (migration 0042)
   // workflow_runs: scheduling columns of automation runs under way (migration 0045)
   // push_jobs: scheduling columns of notifications waiting to be sent (migration 0052, W2.5)
   // promises: scheduling columns of confirmed promises, to warn before and mark misses (migration 0053, W2.6)
   // webhook_deliveries: scheduling columns of outgoing webhook deliveries (migration 0056, W2.8)
-  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs', 'promises', 'webhook_deliveries'],
+  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs', 'promises', 'webhook_deliveries', 'op_quotes'],
   cf_identity: ['memberships'],
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
@@ -112,6 +112,9 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'promises_due(integer)': 'b0c72f0d6bcd05e83c95a377c8606d4e',
   'api_key_route(bytea)': 'ef5323ee2c3d4ec4d1d5224b636c745f',
   'webhook_claim(integer,integer)': '87d53cac068b2194ef5d5627757cb3f8',
+  // cf_channel: quote acceptance link lookup; cf_dispatch: sent quotes past their validity (migration 0059, Operator slice 1)
+  'op_quote_link_route(bytea)': 'ed5ff7a18158cc475cfb18105e1f5c38',
+  'op_quotes_expiring(integer)': '03b46d3982a3b02e4094c65aab165cbb',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
@@ -158,6 +161,8 @@ const CHANNEL_ROUTING_COLUMNS: Record<string, string[]> = {
   channel_connections: ['id', 'tenant_id', 'provider', 'provider_number_id', 'status'],
   provider_accounts: ['id', 'tenant_id', 'provider', 'account_id', 'status'],
   customer_links: ['id', 'tenant_id', 'contact_id', 'conversation_id', 'token_hash', 'expires_at', 'revoked_at'],
+  // op_quote_links: single-use quote acceptance links (migration 0059, Operator slice 1)
+  op_quote_links: ['id', 'tenant_id', 'quote_id', 'contact_id', 'token_hash', 'expires_at', 'used_at', 'revoked_at'],
   api_keys: ['id', 'tenant_id', 'membership_id', 'secret_hash', 'scopes', 'expires_at', 'revoked_at'],
 };
 /** The only functions cf_channel may own, pinned to the md5 of their reviewed definitions. */
@@ -166,6 +171,7 @@ const CHANNEL_FUNCTIONS: Record<string, string> = {
   'account_route(text,text)': '771c221d8b88a73a47dee069b8430bd5',
   'customer_link_route(bytea)': 'acd109038d1099b623bb9298abae02ee',
   'api_key_route(bytea)': '545dfed18f49e5b25a7624f641a7398f',
+  'op_quote_link_route(bytea)': '89bed72a51ecb8280bf75bcd83042062',
 };
 
 export async function checkIsolation(ownerUrl: string): Promise<string[]> {

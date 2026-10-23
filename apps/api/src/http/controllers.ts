@@ -1,4 +1,5 @@
 /// <reference types="multer" />
+import { OperatorService, QuotePortalService, QUOTE_LINK_HEADER } from '../modules/operator';
 import { SetupService } from '../modules/setup';
 import { OutcomesService } from '../modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
@@ -608,6 +609,67 @@ export class WebhooksController {
     }
     return this.inbox.ingest('sandbox', body);
   }
+}
+
+/** Conversa Operator, slice 1: settings, price lists, cases and quotes (Operator addendum v1.0). */
+@Controller('v1/operator')
+export class OperatorController {
+  constructor(@Inject(OperatorService) private readonly op: OperatorService) {}
+
+  @RequirePermission('operator.quote') @Get('settings')
+  settings(@CurrentActor() actor: TenantActor) { return this.op.settings(actor); }
+  @RequirePermission('operator.manage') @Put('settings')
+  saveSettings(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.op.saveSettings(actor, body); }
+  @RequirePermission('operator.manage') @Post('pause') @HttpCode(200)
+  pause(@CurrentActor() actor: TenantActor, @Body() body: { reason?: string }) { return this.op.setPause(actor, true, typeof body?.reason === 'string' ? body.reason : undefined); }
+  @RequirePermission('operator.manage') @Post('resume') @HttpCode(200)
+  resume(@CurrentActor() actor: TenantActor) { return this.op.setPause(actor, false); }
+
+  @RequirePermission('operator.quote') @Get('rate-cards')
+  rateCards(@CurrentActor() actor: TenantActor) { return this.op.rateCards(actor); }
+  @RequirePermission('operator.manage') @Post('rate-cards') @HttpCode(201)
+  createRateCard(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.op.createRateCard(actor, body); }
+  @RequirePermission('operator.manage') @Post('rate-cards/:id/publish') @HttpCode(200)
+  publish(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.op.publishRateCard(actor, id); }
+
+  @RequirePermission('operator.quote') @Get('conversations/:id/cases')
+  cases(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.op.casesForConversation(actor, id); }
+  @RequirePermission('operator.quote') @Post('conversations/:id/cases') @HttpCode(201)
+  openCase(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.op.openCase(actor, id); }
+  @RequirePermission('operator.quote') @Get('cases/:id')
+  getCase(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.op.getCase(actor, id); }
+  @RequirePermission('operator.quote') @Patch('cases/:id/facts')
+  facts(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.updateFacts(actor, id, body); }
+  @RequirePermission('operator.quote') @Post('cases/:id/quotes') @HttpCode(201)
+  quote(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.createQuote(actor, id, body); }
+
+  @RequirePermission('operator.approve') @Get('approvals')
+  approvals(@CurrentActor() actor: TenantActor) { return this.op.approvals(actor); }
+  @RequirePermission('operator.approve') @Post('quotes/:id/approve') @HttpCode(200)
+  approve(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.approve(actor, id, body); }
+  @RequirePermission('operator.quote') @Post('quotes/:id/send') @HttpCode(200)
+  send(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.send(actor, id, body); }
+  @RequirePermission('operator.quote') @Post('quotes/:id/withdraw') @HttpCode(200)
+  withdraw(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.withdraw(actor, id, body); }
+  @RequirePermission('operator.quote') @Post('quotes/:id/record-acceptance') @HttpCode(200)
+  recordAcceptance(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: unknown) { return this.op.recordAcceptance(actor, id, body); }
+}
+
+/**
+ * The customer's quote page (Operator slice 1). No sign-in: the single-use link, sent in the X-Quote-Link header, is
+ * looked up again on every request. Opening shows the quote; only an explicit acceptance with the version accepts it.
+ */
+@Controller('v1/quote')
+export class QuotePortalController {
+  constructor(@Inject(QuotePortalService) private readonly portal: QuotePortalService) {}
+  private link(req: CfRequest) {
+    const h = req.headers[QUOTE_LINK_HEADER];
+    return this.portal.open(typeof h === 'string' ? h : undefined, req.ip ?? null);
+  }
+  @Public() @Get()
+  async view(@Req() req: CfRequest) { return this.portal.view(await this.link(req)); }
+  @Public() @Post('accept') @HttpCode(200)
+  async accept(@Req() req: CfRequest, @Body() body: unknown) { return this.portal.accept(await this.link(req), body); }
 }
 
 /**

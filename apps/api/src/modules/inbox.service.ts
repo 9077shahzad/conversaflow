@@ -457,6 +457,19 @@ export class InboxService {
     }
   }
 
+  /**
+   * Queues a reply inside the caller's transaction (Conversa Operator quote messages): every reply check applies, against
+   * the conversation as it is now. The caller sends the returned job after its transaction commits (sendQueued).
+   */
+  async queueReplyInTx(tx: Tx, actor: TenantActor, conversationId: string, text: string, clientMessageId: string) {
+    const c = await this.loadVisible(tx, actor, conversationId, true);
+    await this.checkCanSend(tx, actor, c, Number(c.activity_seq));
+    return this.enqueue(tx, actor, c, text, clientMessageId, null);
+  }
+
+  /** Sends a job queued by queueReplyInTx, after its transaction committed; the worker finishes it otherwise. */
+  sendQueued(actor: TenantActor, jobId: string) { return this.sendNow(actor, jobId); }
+
   /** The conversation's activity counter now (public API sends that do not name one). Visibility applies. */
   async currentActivity(actor: TenantActor, id: string): Promise<number> {
     return withContext(this.deps.db, actor, async (tx) => Number((await this.loadVisible(tx, actor, id)).activity_seq));

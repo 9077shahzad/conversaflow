@@ -5,7 +5,7 @@ export const ALL_PERMISSIONS = [
   'tenant.read', 'tenant.update', 'members.read', 'members.invite', 'members.manage', 'roles.read', 'roles.manage',
   'billing.read', 'billing.manage', 'audit.read', 'files.read', 'files.write', 'contacts.read', 'contacts.write',
   'inbox.read_all', 'inbox.reply', 'reports.read', 'inbox.assign', 'channels.manage', 'inbox.pause', 'templates.manage', 'channels.monitor', 'campaigns.manage', 'automations.manage', 'ai.manage', 'knowledge.manage',
-  'tags.manage', 'saved_replies.manage', 'contacts.import', 'api.manage',
+  'tags.manage', 'saved_replies.manage', 'contacts.import', 'api.manage', 'operator.manage', 'operator.quote', 'operator.approve',
 ] as const;
 export type Permission = (typeof ALL_PERMISSIONS)[number];
 
@@ -17,9 +17,9 @@ export const SYSTEM_ROLES: Record<string, { name: string; permissions: readonly 
     name: 'Supervisor',
     permissions: ['tenant.read', 'members.read', 'roles.read', 'reports.read', 'contacts.read', 'contacts.write',
       'inbox.read_all', 'inbox.reply', 'inbox.assign', 'inbox.pause', 'templates.manage', 'channels.monitor', 'files.read', 'files.write',
-      'tags.manage', 'saved_replies.manage', 'automations.manage', 'knowledge.manage'],
+      'tags.manage', 'saved_replies.manage', 'automations.manage', 'knowledge.manage', 'operator.quote', 'operator.approve'],
   },
-  agent: { name: 'Agent', permissions: ['tenant.read', 'contacts.read', 'contacts.write', 'inbox.reply', 'files.read', 'files.write'] },
+  agent: { name: 'Agent', permissions: ['tenant.read', 'contacts.read', 'contacts.write', 'inbox.reply', 'files.read', 'files.write', 'operator.quote'] },
   analyst: { name: 'Analyst', permissions: ['tenant.read', 'members.read', 'reports.read', 'contacts.read'] },
 };
 
