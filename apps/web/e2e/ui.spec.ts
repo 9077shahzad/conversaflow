@@ -169,6 +169,16 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByText(locale === 'ar' ? /وضع الاختبار/ : /Test mode/)).toBeVisible();
       await checkPage(page, locale, 'notifications', view);
 
+      await page.goto(`/${locale}/app/operator`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText('Conversa Operator');
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'قوائم الأسعار' : 'Price lists' })).toBeVisible();
+      await checkPage(page, locale, 'operator', view);
+
+      // The customer's quote page without a link: a plain explanation, no sign-in.
+      await page.goto(`/${locale}/q`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'هذا الرابط لا يعمل' : 'This link does not work');
+      await checkPage(page, locale, 'quote-invalid', view);
+
       await page.goto(`/${locale}/app/developers`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'الواجهة البرمجية' : 'API and webhooks');
       await checkPage(page, locale, 'developers', view);

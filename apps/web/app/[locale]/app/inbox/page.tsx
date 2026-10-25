@@ -7,6 +7,7 @@ import { AiAssist, AiWhy, TranslateButton } from '@/components/AiAssist';
 import { TagChip, type Tag } from '@/components/TagChip';
 import { CustomerLinks } from '@/components/CustomerLinks';
 import { ConversationPromises } from '@/components/Promises';
+import { OperatorPanel } from '@/components/OperatorPanel';
 
 /**
  * Shared inbox (BRD v1.2 CF-EXT-002, slice 2). Every action here is also enforced by the server; the screen only hides
@@ -210,6 +211,7 @@ function ConversationView({ conv, locale, access, members, can, env, tags, onBac
           <ConversationTags conv={conv} locale={locale} all={tags} canEdit={can('inbox.reply')} onChanged={onChanged} />
           {can('inbox.reply') && <CustomerLinks conversationId={conv.id} locale={locale} canEdit={can('inbox.reply')} />}
           {can('inbox.reply') && <ConversationPromises conversationId={conv.id} locale={locale} canEdit={can('inbox.reply')} names={(id) => name(id)} />}
+          {can('operator.quote') && <OperatorPanel key={conv.id} conversationId={conv.id} activitySeq={conv.activitySeq} locale={locale} canApprove={can('operator.approve')} />}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {!conv.assignedMembershipId && <button type="button" disabled={busy} onClick={() => me && assign(me)} className="btn-secondary">{d.claim}</button>}
