@@ -8,7 +8,8 @@ import { z } from 'zod';
  * metadata, contacts, messages, statuses), so the real Cloud API adapter reuses the same parser. The sandbox adapter
  * is a local test double: it never opens a network connection and is refused in production (config.ts).
  */
-export type Provider = 'sandbox' | 'whatsapp_cloud';
+/** 'dialog360': numbers on the partner route (360dialog, migration 0064). */
+export type Provider = 'sandbox' | 'whatsapp_cloud' | 'dialog360';
 
 export interface SendResult { providerMessageId: string }
 
@@ -23,6 +24,8 @@ export interface SendInput {
   callbackData: string;
   /** Aborted when the sender gives up waiting (SEND_LIMITS.providerTimeoutMs); a real adapter must cancel the request. */
   signal?: AbortSignal;
+  /** The number's sealed API key, for providers that issue one per number (360dialog). Opened only by the adapter. */
+  credential?: string | null;
 }
 
 /** An approved template, sent by name and language with its positional parameters ({{1}}, {{2}} ...). */
@@ -42,6 +45,8 @@ export interface TemplateSubmission {
   bodyText: string;
   footerText: string | null;
   examples: string[];
+  /** Sealed API key of a number in the account, for providers that need one (360dialog). */
+  credential?: string | null;
 }
 
 export type MediaType = 'image' | 'audio' | 'video' | 'document' | 'sticker';
@@ -56,7 +61,7 @@ export interface MediaSendInput extends Omit<SendInput, 'body'> {
 }
 
 /** Downloads a customer's media by the provider's media id (Meta: GET /MEDIA_ID for a fresh URL, then GET the URL). */
-export interface MediaFetchInput { providerNumberId: string; mediaId: string; signal?: AbortSignal }
+export interface MediaFetchInput { providerNumberId: string; mediaId: string; signal?: AbortSignal; credential?: string | null }
 
 export interface ProviderTemplate {
   providerTemplateId: string;
@@ -78,7 +83,7 @@ export interface ChannelAdapter {
   /** Submits a template for review. Returns the provider's id; the decision arrives later by webhook. */
   submitTemplate(input: TemplateSubmission): Promise<{ providerTemplateId: string }>;
   /** Reads the account's templates as the provider currently sees them (recovery if a webhook was missed). */
-  listTemplates(accountId: string): Promise<ProviderTemplate[]>;
+  listTemplates(accountId: string, credential?: string | null): Promise<ProviderTemplate[]>;
   /**
    * Sends a media message. A real adapter uploads the file first (no customer-visible effect, safe to repeat) and then
    * sends; only the send step can be uncertain. Same error contract as sendText.

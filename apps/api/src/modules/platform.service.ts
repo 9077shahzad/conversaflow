@@ -4,6 +4,8 @@ import type { AuthSession } from '../core/context';
 import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { isUuid } from './members.service';
+import { partnerKeySealer } from './dialog360';
+import { partnerFundingCheck } from './credits';
 
 export type StaffRole = 'platform_owner' | 'support_agent';
 export interface StaffActor {
@@ -55,8 +57,29 @@ const PilotRequest = z.object({
  *  - company content: only with an approved, unexpired support grant (two people, max 4 hours),
  *    enforced by row-level security; every read is written to that company's audit trail.
  */
+const RouteRequest = z.object({ route: z.enum(['meta_direct', 'partner_360dialog']), note: z.string().trim().min(5).max(300) }).strict();
+const PartnerChannelRequest = z.object({
+  providerNumberId: z.string().regex(/^[0-9A-Za-z_-]{3,64}$/), displayPhone: z.string().trim().min(3).max(32), label: z.string().trim().min(1).max(80),
+  accountId: z.string().regex(/^[0-9A-Za-z_-]{3,64}$/), apiKey: z.string().min(10).max(500),
+}).strict();
+const ConsentAdd = z.object({ locale: z.enum(['en', 'ar']), text: z.string().trim().min(20).max(2000) }).strict();
+const ConsentSet = z.object({ status: z.enum(['approved', 'retired']), legalReference: z.string().trim().min(3).max(200).optional() }).strict();
+const PartnerRecord = z.discriminatedUnion('what', [
+  z.object({ what: z.literal('balance'), amountMinor: z.number().int(), currency: z.string().regex(/^[A-Z]{3}$/), at: z.string().datetime({ offset: true }).optional() }).strict(),
+  z.object({ what: z.literal('entry'), kind: z.enum(['funding', 'invoice', 'fee', 'adjustment']), amountMinor: z.number().int().refine((v) => v !== 0),
+    currency: z.string().regex(/^[A-Z]{3}$/), reference: z.string().trim().min(2).max(200), at: z.string().datetime({ offset: true }).optional() }).strict(),
+]);
+const PartnerSettings = z.object({
+  fx: z.record(z.string().regex(/^[A-Z]{3}$/), z.number().positive()).optional(), lowBalanceMinor: z.number().int().min(0).optional(),
+  minDaysCover: z.number().positive().max(365).optional(), topupLeadDays: z.number().min(0).max(60).optional(), safetyBp: z.number().int().min(0).max(20000).optional(),
+}).strict();
+
 export class PlatformService {
-  constructor(private readonly db: Db) {}
+  /** Seals partner API keys before they are stored; only the 360dialog adapter can open them. */
+  private readonly sealKey: ((apiKey: string) => string) | null;
+  constructor(private readonly db: Db, serverSecret?: Buffer, private readonly checkDb?: Db) {
+    this.sealKey = serverSecret ? partnerKeySealer(serverSecret).seal : null;
+  }
 
   /**
    * Staff identity is proven to the DATABASE by the session token: every platform function re-derives the caller
@@ -167,6 +190,58 @@ export class PlatformService {
   async revokeSupport(staff: StaffActor, grantId: string) {
     if (!isUuid(grantId)) throw Errors.notFound('Grant');
     await this.run(staff, (tx) => tx.query('SELECT platform_revoke_support($1, $2)', [staff.token, grantId]));
+  }
+
+  // --- Messaging route per company, and the partner (owner instructions of 29 Oct 2026) ---
+  async setRoute(staff: StaffActor, tenantId: string, input: unknown) {
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    const b = parse(RouteRequest, input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_set_messaging_route($1, $2, $3, $4)', [staff.token, tenantId, b.route, b.note]));
+    return { tenantId, route: b.route };
+  }
+  async connectPartnerChannel(staff: StaffActor, tenantId: string, input: unknown) {
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    const b = parse(PartnerChannelRequest, input);
+    if (!this.sealKey) throw Errors.conflict('provider_not_available', 'The partner route is not configured here.');
+    const id = await this.run(staff, async (tx) => (await tx.query<{ id: string }>('SELECT platform_partner_connect_channel($1, $2, $3, $4, $5, $6, $7) AS id',
+      [staff.token, tenantId, b.providerNumberId, b.displayPhone, b.label, b.accountId, this.sealKey!(b.apiKey)])).rows[0]!.id);
+    return { id };
+  }
+  /** The wording versions (platform-wide, not company data; read with the business role after the staff check). */
+  async consentList(_staff: StaffActor) {
+    if (!this.checkDb) return [];
+    return withContext(this.checkDb, { tenantId: null, userId: null }, async (tx) => (await tx.query(
+      `SELECT version, locale, text, status, legal_reference AS "legalReference", approved_at AS "approvedAt" FROM credit_consent_texts ORDER BY locale, version`)).rows);
+  }
+  async consentAdd(staff: StaffActor, input: unknown) {
+    const b = parse(ConsentAdd, input);
+    const version = await this.run(staff, async (tx) => (await tx.query<{ v: number }>('SELECT platform_credit_consent_add($1, $2, $3) AS v', [staff.token, b.locale, b.text])).rows[0]!.v);
+    return { version, locale: b.locale, status: 'awaiting_legal_review' };
+  }
+  async consentSet(staff: StaffActor, version: string, locale: string, input: unknown) {
+    const b = parse(ConsentSet, input);
+    if (!/^\d{1,6}$/.test(version) || !['en', 'ar'].includes(locale)) throw Errors.notFound('Wording');
+    await this.run(staff, (tx) => tx.query('SELECT platform_credit_consent_set($1, $2, $3, $4, $5)', [staff.token, Number(version), locale, b.status, b.legalReference ?? null]));
+    return { version: Number(version), locale, status: b.status };
+  }
+  async partnerRecord(staff: StaffActor, input: unknown) {
+    const b = parse(PartnerRecord, input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_partner_record($1, $2, $3, $4, $5, $6, $7, $8)',
+      [staff.token, '360dialog', b.what, b.what === 'entry' ? b.kind : null, b.amountMinor, b.currency, b.what === 'entry' ? b.reference : null, b.at ?? null]));
+    return { ok: true };
+  }
+  async partnerSettings(staff: StaffActor, input: unknown) {
+    const b = parse(PartnerSettings, input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_partner_settings($1, $2, $3)', [staff.token, '360dialog', JSON.stringify(b)]));
+    return { ok: true };
+  }
+  /** Partner funding: the ledger totals, the monitor's figures (computed now) and open alerts. */
+  async partnerOverview(staff: StaffActor) {
+    const ledger = await this.run(staff, async (tx) => (await tx.query<Record<string, unknown>>('SELECT * FROM platform_partner_overview($1, $2)', [staff.token, '360dialog'])).rows[0]!);
+    const status = this.checkDb ? await partnerFundingCheck(this.checkDb) : null;
+    const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    return { partner: '360dialog', fundedMinor: n(ledger.funded_minor), invoicedMinor: n(ledger.invoiced_minor), feesMinor: n(ledger.fees_minor),
+      adjustmentsMinor: n(ledger.adjustments_minor), alerts: ledger.alerts, monitor: status };
   }
 
   // --- Prepaid message credits (owner decision of 29 Oct 2026) ---

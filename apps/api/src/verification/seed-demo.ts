@@ -179,6 +179,7 @@ async function main() {
     try {
       await c.query('BEGIN');
       await c.query('SET LOCAL ROLE cf_ops');
+      await c.query(`INSERT INTO messaging_routes (tenant_id, route, note) VALUES ($1, 'partner_360dialog', 'Demo company on the partner route (test mode)')`, [tenant.id]);
       await c.query(`INSERT INTO credit_accounts (tenant_id, currency, low_threshold_minor) VALUES ($1, 'SAR', 5000)`, [tenant.id]);
       // Always a fresh, complete demo card: the newest card in force is the one used.
       {

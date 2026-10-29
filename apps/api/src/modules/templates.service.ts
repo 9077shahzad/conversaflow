@@ -78,8 +78,11 @@ export class TemplatesService {
     // Header and footer parameters are not supported yet; refuse them rather than send them unfilled.
     if (/\{\{/.test(body.headerText ?? '') || /\{\{/.test(body.footerText ?? '')) throw Errors.badRequest('Parameters are allowed in the main text only.');
     const account = await withContext(this.deps.db, actor, async (tx) => {
-      const rows = (await tx.query<{ id: string; provider: Provider; account_id: string }>(
-        `SELECT id, provider, account_id FROM provider_accounts WHERE status = 'active' AND ($1::uuid IS NULL OR id = $1::uuid)`,
+      const rows = (await tx.query<{ id: string; provider: Provider; account_id: string; credential: string | null }>(
+        `SELECT id, provider, account_id,
+                (SELECT k.sealed_key FROM partner_channel_keys k JOIN channel_connections c ON c.id = k.connection_id
+                 WHERE c.account_ref = provider_accounts.id AND c.status = 'active' LIMIT 1) AS credential
+         FROM provider_accounts WHERE status = 'active' AND ($1::uuid IS NULL OR id = $1::uuid)`,
         [body.accountRef ?? null])).rows;
       if (rows.length === 0) throw Errors.conflict('no_account', 'Connect a WhatsApp number first.');
       if (rows.length > 1) throw Errors.badRequest('Choose which business account this template belongs to.');
@@ -95,6 +98,7 @@ export class TemplatesService {
       ({ providerTemplateId } = await adapter.submitTemplate({
         accountId: account.account_id, name: body.name, language: body.language, category: body.category,
         headerText: body.headerText ?? null, bodyText: body.bodyText, footerText: body.footerText ?? null, examples: body.examples,
+        credential: account.credential,
       }));
     } catch (err) {
       if (err instanceof ChannelSendError) {
@@ -125,13 +129,16 @@ export class TemplatesService {
    */
   async sync(actor: TenantActor) {
     const accounts = await withContext(this.deps.db, actor, async (tx) =>
-      (await tx.query<{ id: string; provider: Provider; account_id: string }>(
-        `SELECT id, provider, account_id FROM provider_accounts WHERE status = 'active'`)).rows);
+      (await tx.query<{ id: string; provider: Provider; account_id: string; credential: string | null }>(
+        `SELECT id, provider, account_id,
+                (SELECT k.sealed_key FROM partner_channel_keys k JOIN channel_connections c ON c.id = k.connection_id
+                 WHERE c.account_ref = provider_accounts.id AND c.status = 'active' LIMIT 1) AS credential
+         FROM provider_accounts WHERE status = 'active'`)).rows);
     const result = { updated: 0, unchanged: 0, notOnProvider: 0, unknownOnProvider: 0 };
     for (const a of accounts) {
       const adapter = this.deps.channels[a.provider];
       if (!adapter) continue;
-      const remote = await adapter.listTemplates(a.account_id);
+      const remote = await adapter.listTemplates(a.account_id, a.credential);
       await withContext(this.deps.db, actor, async (tx) => {
         const local = (await tx.query<{ id: string; provider_template_id: string | null; status: string; quality: string; category: string }>(
           'SELECT id, provider_template_id, status, quality, category FROM message_templates WHERE account_ref = $1', [a.id])).rows;

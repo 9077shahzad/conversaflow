@@ -13,7 +13,8 @@ type Account =
   | { mode: 'meta_direct' }
   | { mode: 'prepaid'; provider: { name: string; testMode: boolean } | null; currency: string; balanceMinor: number; reservedMinor: number; availableMinor: number;
       lowThresholdMinor: number; marginBp: number; minTopUpMinor: number;
-      auto: { enabled: boolean; thresholdMinor: number | null; amountMinor: number | null; dailyLimitMinor: number | null; methodId: string | null; consentText: string };
+      auto: { enabled: boolean; thresholdMinor: number | null; amountMinor: number | null; dailyLimitMinor: number | null; methodId: string | null;
+        available: boolean; wording: Record<string, { version: number; text: string }>; acceptedVersion: number | null; acceptedLocale: string | null };
       methods: Array<{ id: string; label: string }>; notices: Array<{ id: string; kind: string; data: Record<string, unknown>; createdAt: string; readAt: string | null }> };
 type Entry = { id: string; kind: string; amountMinor: number; reservedDelta: number; balanceAfter: number; market: string | null; category: string | null; note: string | null; createdAt: string };
 type TopUp = { id: string; amountMinor: number; currency: string; kind: string; status: string; failureReason: string | null; refundedMinor: number; reversed: boolean; receiptNo: string | null; createdAt: string };
@@ -142,9 +143,12 @@ export default function CreditsPage() {
               <p className="text-sm text-slate-700">{acct.auto.enabled ? fill(d.autoOn, { t: money(acct.auto.thresholdMinor ?? 0), a: money(acct.auto.amountMinor ?? 0), l: money(acct.auto.dailyLimitMinor ?? 0) }) : d.autoOff}</p>
               {acct.auto.enabled ? (
                 <button type="button" className="btn-secondary mt-2" disabled={busy} onClick={() => run(() => api('/v1/credits/auto-topup', { method: 'PUT', body: { enabled: false } }), d.autoDisabled)}>{d.turnOff}</button>
+              ) : !acct.auto.available || !acct.auto.wording[locale] ? (
+                <p role="note" className="mt-2 rounded border border-slate-300 bg-slate-50 p-2 text-sm">{d.autoAwaitingLegal}</p>
               ) : acct.provider ? (
-                <form className="mt-2 grid gap-2" onSubmit={(e) => { e.preventDefault(); void run(() => api('/v1/credits/auto-topup', { method: 'PUT', body: {
-                  enabled: true, thresholdMinor: minor(auto.threshold), amountMinor: minor(auto.amount), dailyLimitMinor: minor(auto.daily), methodId: auto.methodId, consentText: acct.auto.consentText } }), d.autoEnabled); }}>
+                <form className="mt-2 grid gap-2" onSubmit={(e) => { e.preventDefault(); const w = acct.auto.wording[locale]!; void run(() => api('/v1/credits/auto-topup', { method: 'PUT', body: {
+                  enabled: true, thresholdMinor: minor(auto.threshold), amountMinor: minor(auto.amount), dailyLimitMinor: minor(auto.daily), methodId: auto.methodId,
+                  consentVersion: w.version, consentLocale: locale, consentText: w.text } }), d.autoEnabled); }}>
                   <div className="grid gap-2 sm:grid-cols-4">
                     <label className="flex flex-col text-sm">{d.autoThreshold}<input type="number" min={0} step="0.01" value={auto.threshold} dir="ltr" onChange={(e) => setAuto({ ...auto, threshold: e.target.value })} className={input} /></label>
                     <label className="flex flex-col text-sm">{d.autoAmount}<input type="number" min={0} step="0.01" value={auto.amount} dir="ltr" onChange={(e) => setAuto({ ...auto, amount: e.target.value })} className={input} /></label>
@@ -159,7 +163,7 @@ export default function CreditsPage() {
                     </div>
                   )}
                   <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={auto.agree} onChange={(e) => setAuto({ ...auto, agree: e.target.checked })} />
-                    <span dir="ltr" className="text-start">{acct.auto.consentText}</span></label>
+                    <span dir="auto" className="text-start">{acct.auto.wording[locale]?.text}</span></label>
                   <p className="text-xs text-slate-600">{d.consentNote}</p>
                   <div><button type="submit" className="btn-primary" disabled={busy || !auto.agree || !auto.methodId}>{d.turnOn}</button></div>
                 </form>

@@ -1,6 +1,7 @@
 /// <reference types="multer" />
 import { OperatorService, QuotePortalService, QUOTE_LINK_HEADER } from '../modules/operator';
 import { CreditsService } from '../modules/credits';
+import { webhookTokenOk } from '../modules/dialog360';
 import { SetupService } from '../modules/setup';
 import { OutcomesService } from '../modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
@@ -453,6 +454,40 @@ export class PlatformController {
     return this.platform.supportView(await this.platform.requireStaff(s), id, 'members');
   }
 
+  // Messaging route per company, partner numbers, consent wording and partner funding (migration 0064).
+  @Put('tenants/:id/messaging-route')
+  async setRoute(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.setRoute(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+  @Post('tenants/:id/partner-channels') @HttpCode(201)
+  async partnerChannel(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.connectPartnerChannel(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+  @Get('credits/consent-wording')
+  async consentList(@CurrentSession() s: AuthSession) {
+    return this.platform.consentList(await this.platform.requireStaff(s, 'platform_owner'));
+  }
+  @Post('credits/consent-wording') @HttpCode(201)
+  async consentAdd(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.consentAdd(await this.platform.requireStaff(s, 'platform_owner'), body);
+  }
+  @Put('credits/consent-wording/:version/:locale')
+  async consentSet(@CurrentSession() s: AuthSession, @Param('version') version: string, @Param('locale') locale: string, @Body() body: unknown) {
+    return this.platform.consentSet(await this.platform.requireStaff(s, 'platform_owner'), version, locale, body);
+  }
+  @Get('partner/funding')
+  async partnerOverview(@CurrentSession() s: AuthSession) {
+    return this.platform.partnerOverview(await this.platform.requireStaff(s, 'platform_owner'));
+  }
+  @Post('partner/funding') @HttpCode(201)
+  async partnerRecord(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.partnerRecord(await this.platform.requireStaff(s, 'platform_owner'), body);
+  }
+  @Put('partner/funding/settings')
+  async partnerSettings(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.partnerSettings(await this.platform.requireStaff(s, 'platform_owner'), body);
+  }
+
   // Prepaid message credits (migration 0061): platform owners only, each action bound to the session in the database.
   @Post('tenants/:id/credits/account') @HttpCode(201)
   async creditOpen(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
@@ -518,13 +553,31 @@ export class CreditsController {
   removeMethod(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.credits.removeMethod(actor, id); }
 }
 
+/**
+ * 360dialog webhooks (partner route). Same format as Meta's; authenticated by the secret header set when the webhook
+ * is registered with 360dialog. Only active when the partner route is configured.
+ */
+@Controller('v1/webhooks/dialog360')
+export class Dialog360WebhookController {
+  constructor(@Inject(InboxService) private readonly inbox: InboxService, @Inject(DEPS) private readonly deps: Deps) {}
+  @SignedWebhook() @Post() @HttpCode(200)
+  async receive(@Req() req: CfRequest, @Body() body: unknown) {
+    if (!this.deps.channels.dialog360) throw Errors.notFound('Webhook');
+    const token = req.headers['x-cf-partner-token'];
+    if (!webhookTokenOk(this.deps.config.DIALOG360_WEBHOOK_TOKEN, typeof token === 'string' ? token : undefined)) {
+      throw new AppError(401, 'invalid_signature', 'Webhook token check failed.');
+    }
+    return this.inbox.ingest('dialog360', body);
+  }
+}
+
 /** Payment provider events for credit top-ups: the signature over the exact bytes is checked before anything else. */
 @Controller('v1/webhooks/credits')
 export class CreditPaymentWebhookController {
   constructor(@Inject(CreditsService) private readonly credits: CreditsService) {}
   @SignedWebhook() @Post(':provider') @HttpCode(200)
   async receive(@Param('provider') provider: string, @Req() req: CfRequest & { rawBody?: Buffer }) {
-    const sig = req.headers['x-cf-payment-signature'];
+    const sig = req.headers[this.credits.signatureHeaderFor(provider)];
     const outcome = await this.credits.handleEvent(provider, req.rawBody?.toString('utf8') ?? '', typeof sig === 'string' ? sig : undefined);
     return { outcome };
   }

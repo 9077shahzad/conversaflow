@@ -135,7 +135,10 @@ async function populate(owner: Client, label: string, tenantId: string) {
     .set('X-Quote-Link', /#([A-Za-z0-9_-]{43})/.exec(qmsg)![1]!).send({ quoteNumber: 1, agree: true }).expect(200);
   // Prepaid message credits (0061): an account, a price list, a test top-up (receipt, payment event), a refund, a saved
   // test card, a reservation for a sent message, a low-balance notice and the partner's monthly figure.
+  await staff.put(`/v1/platform/tenants/${tenantId}/messaging-route`, { route: 'partner_360dialog', note: `Isolation ${label}` }).expect(200);
   await staff.post(`/v1/platform/tenants/${tenantId}/credits/account`, { currency: 'SAR', lowThresholdMinor: 100000 }).expect(201);
+  await staff.post(`/v1/platform/tenants/${tenantId}/partner-channels`, { providerNumberId: `iso${label}${Date.now() % 100000}`, displayPhone: '+966500000099', label: `Partner ${label}`,
+    accountId: `isoacct${label}${Date.now() % 100000}`, apiKey: `iso-key-${label}-0123456789` }).expect(201);
   const card = (await staff.post('/v1/platform/credits/rate-cards', { currency: 'SAR', effectiveFrom: new Date(Date.now() + 300).toISOString(), source: `Isolation ${label}`,
     lines: [{ market: 'other', category: 'marketing', unitCostMinor: 50 }, { market: 'other', category: 'utility', unitCostMinor: 10 },
       { market: 'other', category: 'authentication', unitCostMinor: 10 }], markets: [] }).expect(201)).body;
@@ -165,7 +168,8 @@ async function populate(owner: Client, label: string, tenantId: string) {
 }
 
 beforeAll(async () => {
-  t = await startApp();
+  // The partner route is configured so each company can hold a partner number with its sealed key (migration 0064).
+  t = await startApp({ DIALOG360_WEBHOOK_TOKEN: 'isolation-partner-token-' + 'y'.repeat(30) });
   staff = await newStaff(t, 'iso-staff', 'platform_owner');
   approver = await newStaff(t, 'iso-approver', 'platform_owner');
   a = await newUser(t, 'alpha');

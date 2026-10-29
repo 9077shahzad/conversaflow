@@ -16,7 +16,7 @@ import {
   MeController, MembersController, MessagesController, PlatformController, SettingsController, TenantsController, WebhooksController,
   TemplatesController, ContactsController, CampaignsController, SuppressionsController,
   TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
-  CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController, OperatorController, QuotePortalController, CreditsController, CreditPaymentWebhookController,
+  CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController, OperatorController, QuotePortalController, CreditsController, CreditPaymentWebhookController, Dialog360WebhookController,
 } from './http/controllers';
 import { ErrorFilter } from './http/error-filter';
 import { AccessGuard } from './http/guard';
@@ -43,6 +43,7 @@ import { PromisesService } from './modules/promises';
 import { SetupService } from './modules/setup';
 import { OperatorService, QuotePortalService } from './modules/operator';
 import { CreditsService, createPaymentProvider } from './modules/credits';
+import { Dialog360Adapter } from './modules/dialog360';
 import { OutcomesService } from './modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, WebhookEndpointsService } from './modules/public-api';
 import { CustomerLinksService, CustomerPortalService } from './modules/customer-links';
@@ -81,7 +82,11 @@ export function buildDeps(config: Config = loadConfig(), overrides: Partial<Deps
       sandboxWebhook: config.SANDBOX_WEBHOOK_SECRET ?? randomBytes(32).toString('hex'),
       sandboxVerifyToken: config.SANDBOX_VERIFY_TOKEN ?? randomBytes(24).toString('hex'),
     },
-    channels: overrides.channels ?? (config.CHANNEL_SANDBOX_ENABLED ? { sandbox: new SandboxAdapter() } : {}),
+    channels: overrides.channels ?? {
+      ...(config.CHANNEL_SANDBOX_ENABLED ? { sandbox: new SandboxAdapter() } : {}),
+      // The partner route (360dialog), when configured (never in production until approved; config.ts).
+      ...(config.DIALOG360_WEBHOOK_TOKEN ? { dialog360: new Dialog360Adapter(Buffer.from(config.WEBHOOK_SECRETS_KEY, 'base64'), config.DIALOG360_BASE_URL) } : {}),
+    },
     ai: overrides.ai ?? (config.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(config.AI_API_KEY!, config.AI_MODEL) : new SimulatedAiProvider()),
     push: overrides.push ?? (config.VAPID_PUBLIC_KEY && config.VAPID_PRIVATE_KEY
       ? new WebPushSender({ publicKey: config.VAPID_PUBLIC_KEY, privateKey: config.VAPID_PRIVATE_KEY, subject: config.VAPID_SUBJECT })
@@ -101,15 +106,16 @@ export class AppModule {
         InboxController, MessagesController, TemplatesController, ContactsController, CampaignsController, SuppressionsController,
         TagsController, ConversationTagsController, SavedRepliesController, AssignmentController, ReportsController, AutomationsController, AutomationRunsController, AiController, KnowledgeController,
         CustomerPortalController, CustomerLinksController, NotificationsController, PromisesController, PublicApiController, DevelopersController, SetupController, OperatorController, QuotePortalController,
-        CreditsController, CreditPaymentWebhookController,
+        CreditsController, CreditPaymentWebhookController, Dialog360WebhookController,
       ],
       providers: [
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
         service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), service(PromisesService), service(SetupService), service(OperatorService), service(QuotePortalService), service(OutcomesService), service(ApiAuth), service(ApiKeysService), service(PublicApiReads), service(WebhookEndpointsService), { provide: PushService, useFactory: () => new PushService({ db: deps.db, config: deps.config, rateLimiter: deps.rateLimiter }, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
-        { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb) },
-        { provide: CreditsService, useFactory: () => new CreditsService(deps, createPaymentProvider(deps.config.CREDITS_PROVIDER, deps.keys.webhookSecrets, deps.config.APP_ORIGIN)) },
+        { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb, deps.config.DIALOG360_WEBHOOK_TOKEN ? deps.keys.webhookSecrets : undefined, deps.db) },
+        { provide: CreditsService, useFactory: () => new CreditsService(deps, createPaymentProvider(deps.config.CREDITS_PROVIDER, deps.keys.webhookSecrets, deps.config.APP_ORIGIN,
+          { secretKey: deps.config.STRIPE_SECRET_KEY, webhookSecret: deps.config.STRIPE_WEBHOOK_SECRET, apiBase: deps.config.STRIPE_API_BASE })) },
         { provide: APP_GUARD, useClass: AccessGuard },
         { provide: APP_FILTER, useClass: ErrorFilter },
       ],

@@ -9,7 +9,8 @@
 import { WebhookWorker } from './modules/public-api';
 import { PromiseWatcher } from './modules/promises';
 import { QuoteExpiryWorker } from './modules/operator';
-import { CreditWorker, createPaymentProvider } from './modules/credits';
+import { CreditWorker, createPaymentProvider, partnerFundingCheck } from './modules/credits';
+import { Dialog360Adapter } from './modules/dialog360';
 import { PushWorker, RecordingPushSender, WebPushSender } from './modules/push';
 import { createPool } from '@conversaflow/database';
 import { z } from 'zod';
@@ -61,7 +62,12 @@ const env = z
     // Outgoing webhooks (W2.8): private and local addresses are refused unless explicitly allowed outside production.
     WEBHOOKS_ALLOW_PRIVATE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
     // Prepaid message credits: 'test' moves no money and is refused in production.
-    CREDITS_PROVIDER: z.enum(['none', 'test']).optional(),
+    CREDITS_PROVIDER: z.enum(['none', 'test', 'stripe']).optional(),
+    STRIPE_SECRET_KEY: z.string().regex(/^(sk|rk)_test_[A-Za-z0-9]{10,}$/).optional(),
+    STRIPE_WEBHOOK_SECRET: z.string().regex(/^whsec_[A-Za-z0-9]{10,}$/).optional(),
+    STRIPE_API_BASE: z.string().url().default('https://api.stripe.com'),
+    DIALOG360_WEBHOOK_TOKEN: z.string().min(32).optional(),
+    DIALOG360_BASE_URL: z.string().url().default('https://waba-v2.360dialog.io'),
     WEBHOOK_SECRETS_KEY: z.string().refine((v) => Buffer.from(v, 'base64').length === 32, 'WEBHOOK_SECRETS_KEY must be 32 bytes, base64'),
   })
   .parse(process.env);
@@ -70,7 +76,8 @@ if (env.AI_PROVIDER === 'anthropic' && (!env.AI_API_KEY || env.AI_PRICE_INPUT_PE
   throw new Error('AI_PROVIDER=anthropic needs AI_API_KEY and both AI prices.');
 }
 const creditsProvider = env.CREDITS_PROVIDER ?? (env.NODE_ENV === 'test' ? 'test' : 'none');
-if (env.NODE_ENV === 'production' && creditsProvider === 'test') throw new Error('Production refuses CREDITS_PROVIDER=test.');
+if (env.NODE_ENV === 'production' && creditsProvider !== 'none') throw new Error('Production payments for message credits are not approved yet.');
+if (env.NODE_ENV === 'production' && env.DIALOG360_WEBHOOK_TOKEN) throw new Error('The 360dialog partner route is not approved for production yet.');
 if (env.NODE_ENV === 'production' && !env.SMTP_URL) throw new Error('SMTP_URL is required in production.');
 if (env.NODE_ENV === 'production' && (env.SCANNER !== 'clamd' || !env.SCANNER_REQUIRE_OFFICIAL_SIGNATURES)) {
   throw new Error('Production requires SCANNER=clamd with official signatures.');
@@ -84,7 +91,10 @@ const notifier = new Notifier(
 
 const sandboxOn = env.CHANNEL_SANDBOX_ENABLED === undefined ? env.NODE_ENV !== 'production' : env.CHANNEL_SANDBOX_ENABLED === 'true';
 if (env.NODE_ENV === 'production' && sandboxOn) throw new Error('Production requires CHANNEL_SANDBOX_ENABLED=false.');
-const channels: Partial<Record<Provider, ChannelAdapter>> = sandboxOn ? { sandbox: new SandboxAdapter() } : {};
+const channels: Partial<Record<Provider, ChannelAdapter>> = {
+  ...(sandboxOn ? { sandbox: new SandboxAdapter() } : {}),
+  ...(env.DIALOG360_WEBHOOK_TOKEN ? { dialog360: new Dialog360Adapter(Buffer.from(env.WEBHOOK_SECRETS_KEY, 'base64'), env.DIALOG360_BASE_URL) } : {}),
+};
 const appDb = createPool(env.DATABASE_APP_URL, 4);
 const storage = new LocalStorage(env.FILE_STORAGE_DIR);
 const scanner = env.SCANNER === 'clamd'
@@ -102,7 +112,8 @@ const aiService = new AiService({ db: appDb, config: { NODE_ENV: env.NODE_ENV, A
   env.AI_PROVIDER === 'anthropic' ? new AnthropicProvider(env.AI_API_KEY!, env.AI_MODEL) : new SimulatedAiProvider());
 const promiseWatcher = new PromiseWatcher(appDb);
 const quoteExpiry = new QuoteExpiryWorker(appDb);
-const credits = new CreditWorker(appDb, createPaymentProvider(creditsProvider, Buffer.from(env.WEBHOOK_SECRETS_KEY, 'base64'), env.APP_ORIGIN));
+const credits = new CreditWorker(appDb, createPaymentProvider(creditsProvider, Buffer.from(env.WEBHOOK_SECRETS_KEY, 'base64'), env.APP_ORIGIN,
+  { secretKey: env.STRIPE_SECRET_KEY, webhookSecret: env.STRIPE_WEBHOOK_SECRET, apiBase: env.STRIPE_API_BASE }));
 const webhooks = new WebhookWorker(appDb, Buffer.from(env.WEBHOOK_SECRETS_KEY, 'base64'), { allowPrivate: env.NODE_ENV !== 'production' && env.WEBHOOKS_ALLOW_PRIVATE });
 const pushWorker = new PushWorker(appDb, env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY
   ? new WebPushSender({ publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY, subject: env.VAPID_SUBJECT })
@@ -151,6 +162,8 @@ process.on('SIGINT', () => (stopping = true));
       try { await quoteExpiry.dispatchDue(200); } catch (err) { console.error('quote expiry error', err instanceof Error ? err.message : err); }
       // Message credits: reservations never billed are given back; automatic top-ups for companies that turned them on.
       try { await credits.releaseStale(200); await credits.settlePendingRefunds(100); await credits.closeStuckAutoTopUps(100); await credits.autoTopUps(100); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
+      // Partner funding: the partner's balance against what it must cover; alerts are raised or cleared (owner instruction 4).
+      try { const f = await partnerFundingCheck(appDb); if (f?.openAlerts.length) console.warn('partner funding alerts', f.openAlerts.join(', ')); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
       await new Promise((r) => setTimeout(r, 60_000));
     }
   })();

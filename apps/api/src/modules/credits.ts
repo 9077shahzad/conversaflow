@@ -6,6 +6,7 @@ import { AppError, Errors } from '../core/errors';
 import { parse } from '../core/validate';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
+import { StripePaymentProvider } from './stripe';
 
 /**
  * Prepaid WhatsApp message credits (owner decision of 29 Oct 2026; migration 0061).
@@ -29,7 +30,14 @@ import { isUuid } from './members.service';
  */
 export const BILLABLE_CATEGORIES = ['marketing', 'utility', 'authentication'] as const;
 export type Pricing = { billable: boolean | null; category: string | null; type: string | null };
-const WINDOW_MS = 24 * 3600_000;
+/**
+ * Meta's pricing from 1 October 2026 (developers.facebook.com, WhatsApp pricing and non-template messages pages, read
+ * 29 Oct 2026): service messages (free-form replies) are charged per message at the utility rate after 1,000 free
+ * service messages per business number per month; utility templates are charged inside the customer service window
+ * too. Messages in a free entry point window (after a click-to-WhatsApp ad) stay free, and Meta's status webhook says so
+ * (billable false), which releases any hold. The month is taken as the calendar month in UTC (to confirm with Meta).
+ */
+export const SERVICE_FREE_PER_MONTH = 1000;
 const MIN_TOPUP: Record<string, number> = { SAR: 5000, AED: 5000, USD: 1500 };
 const MAX_TOPUP = 10_000_000; // 100,000.00 in a two-decimal currency
 export const AUTO_TOPUP_CONSENT = 'I authorise ConversaFlow to charge the saved card the amount below whenever our available message credit falls under the threshold, up to the daily limit, until I turn this off.';
@@ -70,9 +78,11 @@ async function rateFor(tx: Tx, currency: string, waNumber: string, category: str
   if (!card) return null;
   const prefixes = (await tx.query<{ prefix: string; market: string }>('SELECT prefix, market FROM credit_rate_markets WHERE card_id = $1', [card.id])).rows;
   const market = marketFor(prefixes, waNumber);
+  // Service messages are priced like utility messages (Meta, from 1 Oct 2026) unless the card has its own service lines.
   const line = (await tx.query<{ market: string; unit_cost_minor: string }>(
-    `SELECT market, unit_cost_minor FROM credit_rate_lines WHERE card_id = $1 AND category = $2 AND market IN ($3, 'other')
-     ORDER BY (market = $3) DESC LIMIT 1`, [card.id, category, market])).rows[0];
+    `SELECT market, unit_cost_minor FROM credit_rate_lines
+     WHERE card_id = $1 AND market IN ($3, 'other') AND (category = $2 OR ($2 = 'service' AND category = 'utility'))
+     ORDER BY (market = $3) DESC, (category = $2) DESC LIMIT 1`, [card.id, category, market])).rows[0];
   if (!line) return null;
   return { cardId: card.id, market: line.market, cost: Number(line.unit_cost_minor) };
 }
@@ -109,17 +119,32 @@ async function checkLowBalance(tx: Tx, tenantId: string) {
  * Called by the sender in the transaction that marks a message as being sent. Nothing for companies without an
  * account, and nothing for messages expected to be free.
  */
-export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: string; kind: string; category: string | null; to: string; lastInboundAt: Date | null }):
+/** Service messages already handed to the provider on this number this calendar month (UTC), this one excluded. */
+export async function serviceMessagesThisMonth(tx: Tx, connectionId: string, exceptMessageId: string | null): Promise<number> {
+  return (await tx.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.connection_id = $1 AND m.direction = 'out' AND m.kind <> 'template' AND m.id IS DISTINCT FROM $2::uuid
+       AND m.status IN ('submitting', 'sent', 'delivered', 'read', 'uncertain')
+       AND m.created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, [connectionId, exceptMessageId])).rows[0]!.n;
+}
+
+/** Which price category a message would be charged in, if any. */
+export function paidCategoryOf(kind: string, templateCategory: string | null): (typeof BILLABLE_CATEGORIES)[number] | 'service' | null {
+  if (kind === 'template') return templateCategory && (BILLABLE_CATEGORIES as readonly string[]).includes(templateCategory) ? templateCategory as (typeof BILLABLE_CATEGORIES)[number] : null;
+  return 'service';
+}
+
+export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: string; kind: string; category: string | null; to: string; connectionId: string }):
   Promise<'not_needed' | 'reserved' | 'insufficient_credit' | 'no_rate'> {
-  // Free messages are decided before any lock, so they never wait on the account (review of 0061, M1).
-  if (a.kind !== 'template' || !a.category || !(BILLABLE_CATEGORIES as readonly string[]).includes(a.category)) return 'not_needed';
-  const windowOpen = !!a.lastInboundAt && Date.now() - a.lastInboundAt.getTime() < WINDOW_MS;
-  if (a.category === 'utility' && windowOpen) return 'not_needed';          // utility templates in an open window are free
+  const category = paidCategoryOf(a.kind, a.category);
+  if (!category) return 'not_needed';
+  // Service replies within the number's free monthly allowance are expected to be free: no hold, no lock (M1).
+  if (category === 'service' && await serviceMessagesThisMonth(tx, a.connectionId, a.messageId) < SERVICE_FREE_PER_MONTH) return 'not_needed';
   const acct = await lockAccount(tx);
   if (!acct) return 'not_needed';
   const existing = (await tx.query<{ state: string }>('SELECT state FROM credit_reservations WHERE message_id = $1', [a.messageId])).rows[0];
   if (existing && existing.state !== 'released') return 'reserved';
-  const rate = await rateFor(tx, acct.currency, a.to, a.category);
+  const rate = await rateFor(tx, acct.currency, a.to, category);
   if (!rate) return 'no_rate';
   const margin = await marginOf(tx, acct);
   const amount = price(rate.cost, margin);
@@ -131,14 +156,14 @@ export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: s
     // Sent again after its hold was given back (review M2): held again at today's price, under the same lock.
     await tx.query(`UPDATE credit_reservations SET state = 'held', settled_at = NULL, rate_card_id = $2, market = $3, category = $4, cost_minor = $5,
                       price_minor = $6, margin_bp = $7, created_at = now() WHERE message_id = $1 AND state = 'released'`,
-      [a.messageId, rate.cardId, rate.market, a.category, rate.cost, amount, margin]);
+      [a.messageId, rate.cardId, rate.market, category, rate.cost, amount, margin]);
   } else {
     await tx.query(`INSERT INTO credit_reservations (message_id, tenant_id, rate_card_id, market, category, cost_minor, price_minor, margin_bp)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [a.messageId, a.tenantId, rate.cardId, rate.market, a.category, rate.cost, amount, margin]);
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [a.messageId, a.tenantId, rate.cardId, rate.market, category, rate.cost, amount, margin]);
   }
   if (amount > 0) {
     await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, reserved_delta, message_id, rate_card_id, market, category, cost_minor, margin_bp)
-                    VALUES ($1, 'reserve', 0, $2, $3, $4, $5, $6, $7, $8)`, [a.tenantId, amount, a.messageId, rate.cardId, rate.market, a.category, rate.cost, margin]);
+                    VALUES ($1, 'reserve', 0, $2, $3, $4, $5, $6, $7, $8)`, [a.tenantId, amount, a.messageId, rate.cardId, rate.market, category, rate.cost, margin]);
   }
   await checkLowBalance(tx, a.tenantId);
   return 'reserved';
@@ -180,23 +205,18 @@ export async function settleOnStatus(tx: Tx, tenantId: string, messageId: string
   if (status === 'failed') { await releaseReservation(tx, messageId, 'message_failed'); return; }
   if (!pricing || (status !== 'delivered' && status !== 'read' && status !== 'sent')) return;
   const mapped = categoryOf(pricing.category);
-  if (pricing.billable === false || mapped === 'service' || (pricing.type && pricing.type.startsWith('free'))) {
+  if (pricing.billable === false || (pricing.type && pricing.type.startsWith('free'))) {
     await releaseReservation(tx, messageId, `free:${pricing.type ?? pricing.category ?? 'not_billable'}`);
     return;
   }
   if (pricing.billable !== true || status === 'sent') return;                  // Meta charges on delivery
-  const reserved = (await tx.query('SELECT 1 FROM credit_reservations WHERE message_id = $1', [messageId])).rowCount;
-  if (!reserved) {
-    // Only templates can be paid; a billable report for anything else is logged, never charged (and takes no lock).
-    const kind = (await tx.query<{ kind: string }>('SELECT kind FROM messages WHERE id = $1', [messageId])).rows[0]?.kind;
-    if (kind !== 'template') { console.error('credits: billable status for a non-template message', messageId); return; }
-  }
   const acct = await lockAccount(tx);
   if (!acct) return;
   if ((await tx.query(`SELECT 1 FROM credit_entries WHERE message_id = $1 AND kind = 'charge'`, [messageId])).rowCount) return;
   const res = (await tx.query<{ rate_card_id: string; market: string; category: string; cost_minor: string; price_minor: string; margin_bp: number; state: string }>(
     'SELECT rate_card_id, market, category, cost_minor, price_minor, margin_bp, state FROM credit_reservations WHERE message_id = $1', [messageId])).rows[0];
-  const category = mapped ?? res?.category ?? 'marketing';
+  const kind = res ? null : (await tx.query<{ kind: string }>('SELECT kind FROM messages WHERE id = $1', [messageId])).rows[0]?.kind;
+  const category = mapped ?? res?.category ?? (kind && kind !== 'template' ? 'service' : 'marketing');
   let charge: { cardId: string; market: string; cost: number; price: number; margin: number };
   if (res && res.category === category) {
     charge = { cardId: res.rate_card_id, market: res.market, cost: Number(res.cost_minor), price: Number(res.price_minor), margin: res.margin_bp };
@@ -228,9 +248,16 @@ export interface PaymentProvider {
   readonly testMode: boolean;
   createCheckout(input: { tenantId: string; topupId: string; amountMinor: number; currency: string; returnUrl: string }): Promise<{ providerRef: string; checkoutUrl: string }>;
   /** Merchant-initiated charge of a saved method (automatic top-up). Returns the provider's event for the outcome. */
-  chargeSaved(input: { tenantId: string; topupId: string; methodRef: string; amountMinor: number; currency: string; idempotencyKey: string }): Promise<{ providerRef: string; event: { raw: string; signature: string } }>;
+  /**
+   * Merchant-initiated charge of a saved method (automatic top-up). A provider that answers at once returns the signed
+   * event for the outcome; one that reports later by webhook returns no event.
+   */
+  chargeSaved(input: { tenantId: string; topupId: string; methodRef: string; amountMinor: number; currency: string; idempotencyKey: string }): Promise<{ providerRef: string; event: { raw: string; signature: string } | null }>;
   refund(input: { providerRef: string; amountMinor: number; idempotencyKey: string }): Promise<{ refundRef: string; status: 'succeeded' | 'failed' }>;
-  verifyEvent(raw: string, signature: string | undefined): PaymentEvent;
+  /** Verifies the signature and reads the event; null for events that need no action. May look things up with the provider. */
+  verifyEvent(raw: string, signature: string | undefined): Promise<PaymentEvent | null>;
+  /** The header that carries the signature. */
+  readonly signatureHeader: string;
 }
 
 /**
@@ -265,15 +292,19 @@ export class TestPaymentProvider implements PaymentProvider {
     if (step === 'throw') throw new Error('test provider: no answer');
     return { refundRef: `re_test_${i.idempotencyKey}`, status: step === 'fail' ? 'failed' as const : 'succeeded' as const };
   }
-  verifyEvent(raw: string, signature: string | undefined): PaymentEvent {
+  readonly signatureHeader = 'x-cf-payment-signature';
+  async verifyEvent(raw: string, signature: string | undefined): Promise<PaymentEvent> {
     const want = Buffer.from(this.sign(raw), 'hex');
     const got = Buffer.from(signature ?? '', 'hex');
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new AppError(400, 'invalid_signature', 'The payment event signature is not valid.');
     return EventShape.parse(JSON.parse(raw));
   }
 }
-export function createPaymentProvider(kind: 'none' | 'test', secret: Buffer, appOrigin: string): PaymentProvider | null {
-  return kind === 'test' ? new TestPaymentProvider(secret, appOrigin) : null;
+export function createPaymentProvider(kind: 'none' | 'test' | 'stripe', secret: Buffer, appOrigin: string,
+  stripe?: { secretKey?: string; webhookSecret?: string; apiBase?: string }): PaymentProvider | null {
+  if (kind === 'test') return new TestPaymentProvider(secret, appOrigin);
+  if (kind === 'stripe' && stripe?.secretKey && stripe.webhookSecret) return new StripePaymentProvider(stripe.secretKey, stripe.webhookSecret, appOrigin, stripe.apiBase);
+  return null;
 }
 
 const EventShape = z.object({
@@ -286,7 +317,7 @@ const EventShape = z.object({
  * amount and currency exactly; a dispute may be for part of it. An event that does not match is not recorded, so the
  * provider's retry (once our reference is saved) is applied normally (review M4).
  */
-export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEvent): Promise<string> {
+export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEvent, testMode = true): Promise<string> {
   return withContext(db, { tenantId: e.tenantId, userId: null }, async (tx) => {
     if (!(await lockAccount(tx))) return 'no_account';
     const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed_minor: string }>(
@@ -303,8 +334,8 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
       if (t.status === 'succeeded') return outcome('already_applied');
       // A payment reported failed (or given up on) and then confirmed is credited: the money was taken (review M3).
       await tx.query(`UPDATE credit_topups SET status = 'succeeded', failure_reason = NULL, settled_at = now(),
-                        receipt_no = 'CR-' || CASE WHEN provider = 'test' THEN 'TEST-' ELSE '' END || to_char(now(), 'YYYY') || '-'
-                                     || lpad(nextval('credit_receipt_seq')::text, 6, '0') WHERE id = $1`, [t.id]);
+                        receipt_no = 'CR-' || CASE WHEN $2 THEN 'TEST-' ELSE '' END || to_char(now(), 'YYYY') || '-'
+                                     || lpad(nextval('credit_receipt_seq')::text, 6, '0') WHERE id = $1`, [t.id, testMode]);
       await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, topup_id, note) VALUES ($1, 'topup', $2, $3, $4)`,
         [e.tenantId, e.amountMinor, t.id, t.kind === 'auto' ? 'automatic top-up' : t.status !== 'pending' ? `confirmed after ${t.status}` : null]);
       await checkLowBalance(tx, e.tenantId);
@@ -368,8 +399,8 @@ export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: 
     if (!still) return (await tx.query<{ status: string }>('SELECT status FROM credit_refunds WHERE id = $1', [refundId])).rows[0]!.status;
     if (answer.status === 'succeeded') {
       await tx.query(`UPDATE credit_refunds f SET status = 'succeeded', provider_ref = $2, settled_at = now(),
-                        credit_note_no = 'CN-' || CASE WHEN (SELECT t.provider FROM credit_topups t WHERE t.id = f.topup_id) = 'test' THEN 'TEST-' ELSE '' END
-                                         || to_char(now(), 'YYYY') || '-' || lpad(nextval('credit_note_seq')::text, 6, '0') WHERE f.id = $1`, [refundId, answer.refundRef]);
+                        credit_note_no = 'CN-' || CASE WHEN $3 THEN 'TEST-' ELSE '' END
+                                         || to_char(now(), 'YYYY') || '-' || lpad(nextval('credit_note_seq')::text, 6, '0') WHERE f.id = $1`, [refundId, answer.refundRef, provider.testMode]);
       await AuditService.record(tx, { tenantId, actorUserId: null, action: 'credits.refunded', ip: undefined, targetType: 'credit_refund', targetId: refundId, metadata: { amountMinor: Number(r.amount_minor) } });
       return 'succeeded';
     }
@@ -391,7 +422,8 @@ const SettingsInput = z.object({ lowThresholdMinor: z.number().int().min(0).max(
 const AutoInput = z.discriminatedUnion('enabled', [
   z.object({ enabled: z.literal(false) }).strict(),
   z.object({ enabled: z.literal(true), thresholdMinor: z.number().int().min(0).max(MAX_TOPUP), amountMinor: z.number().int().positive().max(MAX_TOPUP),
-    dailyLimitMinor: z.number().int().positive().max(MAX_TOPUP * 5), methodId: z.string().uuid(), consentText: z.string() }).strict(),
+    dailyLimitMinor: z.number().int().positive().max(MAX_TOPUP * 5), methodId: z.string().uuid(),
+    consentVersion: z.number().int().min(1), consentLocale: z.enum(['en', 'ar']), consentText: z.string() }).strict(),
 ]);
 const RefundInput = z.object({ topupId: z.string().uuid(), amountMinor: z.number().int().positive(), reason: z.string().trim().min(3).max(300) }).strict();
 
@@ -400,18 +432,25 @@ export class CreditsService {
 
   async account(actor: TenantActor) {
     return withContext(this.deps.db, actor, async (tx) => {
-      const a = (await tx.query<Account & { auto_enabled: boolean; auto_threshold_minor: string | null; auto_amount_minor: string | null; auto_daily_limit_minor: string | null; auto_method_id: string | null; opened_at: Date }>(
-        'SELECT * FROM credit_accounts')).rows[0];
-      if (!a) return { mode: 'meta_direct' as const, provider: null };
+      const route = (await tx.query<{ route: string }>('SELECT route FROM messaging_routes')).rows[0]?.route ?? 'meta_direct';
+      const a = (await tx.query<Account & { auto_enabled: boolean; auto_threshold_minor: string | null; auto_amount_minor: string | null; auto_daily_limit_minor: string | null;
+        auto_method_id: string | null; opened_at: Date; auto_consent_version: number | null; auto_consent_locale: string | null }>(
+        `SELECT * FROM credit_accounts WHERE status = 'active'`)).rows[0];
+      if (!a) return { mode: 'meta_direct' as const, route, provider: null };
+      // Automatic top-up wording: only versions approved after legal review can be accepted (owner instruction 6).
+      const consent = (await tx.query<{ version: number; locale: string; text: string }>(
+        `SELECT DISTINCT ON (locale) version, locale, text FROM credit_consent_texts WHERE status = 'approved' ORDER BY locale, version DESC`)).rows;
       const margin = await marginOf(tx, a);
       const methods = (await tx.query('SELECT id, label, created_at AS "createdAt" FROM credit_payment_methods WHERE removed_at IS NULL ORDER BY created_at')).rows;
       const notices = (await tx.query(`SELECT id, kind, data, created_at AS "createdAt", read_at AS "readAt" FROM credit_notices ORDER BY created_at DESC LIMIT 20`)).rows;
       return {
-        mode: 'prepaid' as const, provider: this.provider ? { name: this.provider.name, testMode: this.provider.testMode } : null,
+        mode: 'prepaid' as const, route, provider: this.provider ? { name: this.provider.name, testMode: this.provider.testMode } : null,
         currency: a.currency, balanceMinor: Number(a.balance_minor), reservedMinor: Number(a.reserved_minor), availableMinor: Number(a.balance_minor) - Number(a.reserved_minor),
         lowThresholdMinor: Number(a.low_threshold_minor), marginBp: margin, openedAt: a.opened_at,
         auto: { enabled: a.auto_enabled, thresholdMinor: a.auto_threshold_minor === null ? null : Number(a.auto_threshold_minor), amountMinor: a.auto_amount_minor === null ? null : Number(a.auto_amount_minor),
-          dailyLimitMinor: a.auto_daily_limit_minor === null ? null : Number(a.auto_daily_limit_minor), methodId: a.auto_method_id, consentText: AUTO_TOPUP_CONSENT },
+          dailyLimitMinor: a.auto_daily_limit_minor === null ? null : Number(a.auto_daily_limit_minor), methodId: a.auto_method_id,
+          acceptedVersion: a.auto_consent_version, acceptedLocale: a.auto_consent_locale,
+          available: consent.length > 0, wording: Object.fromEntries(consent.map((c) => [c.locale, { version: c.version, text: c.text }])) },
         methods, notices, minTopUpMinor: MIN_TOPUP[a.currency] ?? 1000,
       };
     });
@@ -467,15 +506,20 @@ export class CreditsService {
     return { outcome: await this.handleEvent(this.provider.name, ev.raw, ev.signature) };
   }
 
+  signatureHeaderFor(providerName: string): string {
+    return this.provider && this.provider.name === providerName ? this.provider.signatureHeader : 'x-cf-payment-signature';
+  }
+
   /** The provider's webhook: signature verified, then applied once. */
   async handleEvent(providerName: string, raw: string, signature: string | undefined) {
     if (!this.provider || this.provider.name !== providerName) throw Errors.notFound('Payment provider');
-    let e: PaymentEvent;
-    try { e = this.provider.verifyEvent(raw, signature); } catch (err) {
+    let e: PaymentEvent | null;
+    try { e = await this.provider.verifyEvent(raw, signature); } catch (err) {
       if (err instanceof AppError) throw err;
       throw new AppError(400, 'invalid_event', 'The payment event could not be read.');
     }
-    return applyPaymentEvent(this.deps.db, this.provider.name, e);
+    if (!e) return 'ignored';
+    return applyPaymentEvent(this.deps.db, this.provider.name, e, this.provider.testMode);
   }
 
   /** Test mode only: a saved test card for automatic top-up (…4242 succeeds, …0002 is always declined). */
@@ -511,17 +555,23 @@ export class CreditsService {
       if (!body.enabled) {
         await tx.query(`UPDATE credit_accounts SET auto_enabled = false`);
       } else {
-        if (body.consentText !== AUTO_TOPUP_CONSENT) throw Errors.badRequest('Agree to the automatic top-up wording exactly as shown.');
+        const wording = (await tx.query<{ text: string; status: string }>('SELECT text, status FROM credit_consent_texts WHERE version = $1 AND locale = $2',
+          [body.consentVersion, body.consentLocale])).rows[0];
+        if (!wording || wording.status !== 'approved') {
+          throw Errors.conflict('consent_not_approved', 'Automatic top-up is not available yet: its wording is awaiting legal review.');
+        }
+        if (body.consentText !== wording.text) throw Errors.badRequest('Agree to the automatic top-up wording exactly as shown.');
         if (body.amountMinor < (MIN_TOPUP[a.currency] ?? 1000)) throw Errors.badRequest('The amount is below the minimum top-up.');
         if (body.dailyLimitMinor < body.amountMinor) throw Errors.badRequest('The daily limit must be at least one top-up.');
         const m = (await tx.query(`SELECT 1 FROM credit_payment_methods WHERE id = $1 AND removed_at IS NULL`, [body.methodId])).rowCount;
         if (!m) throw Errors.badRequest('Choose a saved card.');
         await tx.query(`UPDATE credit_accounts SET auto_enabled = true, auto_threshold_minor = $1, auto_amount_minor = $2, auto_daily_limit_minor = $3, auto_method_id = $4,
-                          auto_consent_at = now(), auto_consent_by = $5, auto_consent_text = $6`,
-          [body.thresholdMinor, body.amountMinor, body.dailyLimitMinor, body.methodId, actor.userId, body.consentText]);
+                          auto_consent_at = now(), auto_consent_by = $5, auto_consent_text = $6, auto_consent_version = $7, auto_consent_locale = $8`,
+          [body.thresholdMinor, body.amountMinor, body.dailyLimitMinor, body.methodId, actor.userId, body.consentText, body.consentVersion, body.consentLocale]);
       }
       await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: body.enabled ? 'credits.auto_topup_enabled' : 'credits.auto_topup_disabled', ip: actor.ip,
-        targetType: 'tenant', targetId: actor.tenantId, metadata: body.enabled ? { thresholdMinor: body.thresholdMinor, amountMinor: body.amountMinor, dailyLimitMinor: body.dailyLimitMinor } : {} });
+        targetType: 'tenant', targetId: actor.tenantId, metadata: body.enabled ? { thresholdMinor: body.thresholdMinor, amountMinor: body.amountMinor, dailyLimitMinor: body.dailyLimitMinor,
+          consentVersion: body.consentVersion, consentLocale: body.consentLocale } : {} });
       return { enabled: body.enabled };
     });
   }
@@ -628,6 +678,24 @@ export class CreditsService {
   }
 }
 
+// --- Partner funding monitor (owner instruction 4) -----------------------------------------------------------------
+
+/**
+ * The partner's prepaid balance against what it must cover: Meta's cost per day of what prepaid companies send (the
+ * higher of the 7- and 30-day averages), days of cover left, the buffer required (cover until a new top-up lands, with
+ * a safety margin) and customers' unspent prepaid credit. Raises or clears platform alerts. Amounts are in the
+ * partner's currency, minor units.
+ */
+export async function partnerFundingCheck(db: Db, partner = '360dialog') {
+  const r = (await withContext(db, { tenantId: null, userId: null }, async (tx) =>
+    (await tx.query<Record<string, unknown>>('SELECT * FROM partner_funding_check($1)', [partner])).rows[0]));
+  if (!r) return null;
+  const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+  return { partner: String(r.partner), currency: String(r.currency), balanceMinor: n(r.balance_minor), balanceObservedAt: r.balance_observed_at as Date | null,
+    dailyCostMinor: n(r.daily_cost_minor), daysCover: n(r.days_cover), requiredBufferMinor: n(r.required_buffer_minor),
+    customerLiabilityMinor: n(r.customer_liability_minor), openAlerts: (r.open_alerts as string[]) ?? [] };
+}
+
 // --- Worker: stale reservations and automatic top-ups ------------------------------------------------------------
 
 export class CreditWorker {
@@ -681,7 +749,10 @@ export class CreditWorker {
         if (!t) continue;
         const r = await this.provider.chargeSaved({ tenantId: d.tenant_id, topupId: t.id, methodRef: t.ref, amountMinor: t.amount, currency: t.currency, idempotencyKey: t.id });
         await withContext(this.db, { tenantId: d.tenant_id, userId: null }, (tx) => tx.query('UPDATE credit_topups SET provider_ref = $2 WHERE id = $1 AND provider_ref IS NULL', [t.id, r.providerRef]));
-        await applyPaymentEvent(this.db, this.provider.name, this.provider.verifyEvent(r.event.raw, r.event.signature));
+        if (r.event) {
+          const e = await this.provider.verifyEvent(r.event.raw, r.event.signature);
+          if (e) await applyPaymentEvent(this.db, this.provider.name, e, this.provider.testMode);
+        }
         n++;
       } catch (err) { console.error('automatic top-up failed', d.tenant_id, err instanceof Error ? err.message : err); }
     }

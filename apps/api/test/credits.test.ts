@@ -123,6 +123,15 @@ beforeAll(async () => {
   await enableMfa(otherOwner);
 });
 afterAll(() => t?.close());
+let wordingApproved = false;
+/** A platform owner records the legal approval of wording version 1 (both languages), once. */
+async function approveWording() {
+  if (wordingApproved) return;
+  for (const locale of ['en', 'ar']) {
+    await staff.put(`/v1/platform/credits/consent-wording/1/${locale}`, { status: 'approved', legalReference: 'Test: counsel memo' }).expect(200);
+  }
+  wordingApproved = true;
+}
 
 describe('companies that pay Meta directly are unchanged', () => {
   it('no credit account: templates send as before, nothing is reserved or charged', async () => {
@@ -143,6 +152,9 @@ describe('platform set-up: accounts, versioned rates, margins', () => {
     await owner.post(`/v1/platform/tenants/${tenant}/credits/account`, { currency: 'SAR' }).expect(403);
     const support = await newStaff(t, 'cr-support', 'support_agent');
     await support.post(`/v1/platform/tenants/${tenant}/credits/account`, { currency: 'SAR' }).expect(403);
+    // Prepaid credit only on the partner route; the company is put on it first (owner instruction 3).
+    expect((await staff.post(`/v1/platform/tenants/${tenant}/credits/account`, { currency: 'SAR', lowThresholdMinor: 2000 })).status).toBe(409);
+    await staff.put(`/v1/platform/tenants/${tenant}/messaging-route`, { route: 'partner_360dialog', note: 'Test: partner route' }).expect(200);
     await staff.post(`/v1/platform/tenants/${tenant}/credits/account`, { currency: 'SAR', lowThresholdMinor: 2000 }).expect(201);
     await staff.post(`/v1/platform/tenants/${tenant}/credits/account`, { currency: 'SAR' }).expect(409);
     await staff.post('/v1/platform/credits/rate-cards', RATES(new Date(Date.now() - 60_000))).expect(409);
@@ -240,14 +252,16 @@ describe('charging paid messages', () => {
     expect(await account()).toMatchObject({ balanceMinor: 9970, reservedMinor: 0 });
   });
 
-  it('free messages use no paid credit: replies and utility templates in the window, and anything Meta marks not billable', async () => {
+  it('Meta pricing from 1 Oct 2026: replies within the free monthly allowance hold nothing; utility templates in the window are paid; anything Meta marks not billable is released', async () => {
     await setAvailable(5000);
     const open = await customer(saudi(), true);
     const util = await queueTemplate(open, utility);
     const conv = (await owner.get(`/v1/conversations/${open}`).expect(200)).body;
-    await owner.post(`/v1/conversations/${open}/reply`, { text: 'Thanks, see you soon', seenActivity: conv.activitySeq, clientMessageId: randomUUID() }).expect(201);
+    const reply = (await owner.post(`/v1/conversations/${open}/reply`, { text: 'Thanks, see you soon', seenActivity: conv.activitySeq, clientMessageId: randomUUID() }).expect(201)).body.id;
     await send();
-    expect(await reservation(util)).toBeNull();
+    expect(await reservation(reply)).toBeNull();
+    expect(await reservation(util)).toMatchObject({ state: 'held', price_minor: '6' });   // utility is paid in the window too
+    await status((await msg(util)).provider_message_id!, 'failed').expect(200);
     expect((await account()).reservedMinor).toBe(0);
     // A paid-looking send that Meta then reports as free is released, never charged.
     const id = await queueTemplate(await customer(saudi()), marketing);
@@ -420,7 +434,10 @@ describe('automatic top-up is opt-in', () => {
     await worker.autoTopUps(500);
     expect((await account()).availableMinor).toBe(100);
     const card = (await owner.post('/v1/credits/test/methods', { last4: '4242' }).expect(201)).body;
-    const on = { enabled: true, thresholdMinor: 1000, amountMinor: 5000, dailyLimitMinor: 10000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT };
+    const on = { enabled: true, thresholdMinor: 1000, amountMinor: 5000, dailyLimitMinor: 10000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT, consentVersion: 1, consentLocale: 'en' };
+    // The wording is awaiting legal review: automatic top-up cannot be turned on (owner instruction 6).
+    expect((await owner.put('/v1/credits/auto-topup', on).expect(409)).body.error.code).toBe('consent_not_approved');
+    await approveWording();
     await owner.put('/v1/credits/auto-topup', { ...on, consentText: 'ok' }).expect(400);
     await owner.put('/v1/credits/auto-topup', { ...on, methodId: randomUUID() }).expect(400);
     await owner.put('/v1/credits/auto-topup', { ...on, dailyLimitMinor: 4000 }).expect(400);
@@ -447,9 +464,10 @@ describe('automatic top-up is opt-in', () => {
     const tid = await newCompany(c, 'crauto', 'business');
     await activateSubscription(t, tid);
     await enableMfa(c);
+    await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'partner_360dialog', note: 'Test: partner route' }).expect(200);
     await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
     const card = (await c.post('/v1/credits/test/methods', { last4: '0002' }).expect(201)).body;
-    await c.put('/v1/credits/auto-topup', { enabled: true, thresholdMinor: 1000, amountMinor: 5000, dailyLimitMinor: 20000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT }).expect(200);
+    await c.put('/v1/credits/auto-topup', { enabled: true, thresholdMinor: 1000, amountMinor: 5000, dailyLimitMinor: 20000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT, consentVersion: 1, consentLocale: 'en' }).expect(200);
     const worker = new CreditWorker(t.deps.db, provider);
     await worker.autoTopUps(500);
     await worker.autoTopUps(500);
@@ -650,7 +668,7 @@ describe('review fixes (0062)', () => {
 
   it('removing the saved card turns automatic top-up off (L9)', async () => {
     const card = (await owner.post('/v1/credits/test/methods', { last4: '4242' }).expect(201)).body;
-    await owner.put('/v1/credits/auto-topup', { enabled: true, thresholdMinor: 100, amountMinor: 5000, dailyLimitMinor: 5000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT }).expect(200);
+    await owner.put('/v1/credits/auto-topup', { enabled: true, thresholdMinor: 100, amountMinor: 5000, dailyLimitMinor: 5000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT, consentVersion: 1, consentLocale: 'en' }).expect(200);
     await owner.delete(`/v1/credits/methods/${card.id}`).expect(200);
     expect((await owner.get('/v1/credits').expect(200)).body.auto.enabled).toBe(false);
     await otherOwner.delete(`/v1/credits/methods/${card.id}`).expect(404);
@@ -661,6 +679,7 @@ describe('review fixes (0062)', () => {
     const tid = await newCompany(c, 'crstuck', 'business');
     await activateSubscription(t, tid);
     await enableMfa(c);
+    await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'partner_360dialog', note: 'Test: partner route' }).expect(200);
     await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
     const id = await withContext(t.deps.db, { tenantId: tid, userId: null }, async (tx) => (await tx.query<{ id: string }>(
       `INSERT INTO credit_topups (tenant_id, amount_minor, currency, kind, provider, created_at) VALUES ($1, 5000, 'SAR', 'auto', 'test', now() - interval '1 hour') RETURNING id`, [tid])).rows[0]!.id);

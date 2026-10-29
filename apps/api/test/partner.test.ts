@@ -1,0 +1,347 @@
+/**
+ * Partner route (360dialog), per-company routing, Stripe in test mode, partner funding, versioned consent wording and
+ * the remaining low findings (migration 0064). 360dialog and Stripe are local stand-ins (test/fakes.ts): nothing
+ * leaves the machine and no money moves.
+ */
+import { randomUUID } from 'node:crypto';
+import request from 'supertest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { withContext } from '@conversaflow/database';
+import { loadConfig } from '../src/core/config';
+import { Dialog360Adapter, partnerKeySealer } from '../src/modules/dialog360';
+import { Sender } from '../src/modules/sender';
+import { SERVICE_FREE_PER_MONTH, partnerFundingCheck } from '../src/modules/credits';
+import { stripeSignature } from '../src/modules/stripe';
+import { Fake360dialog, FakeStripe } from './fakes';
+import { activateSubscription, enableMfa, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
+
+const TOKEN = 'partner-webhook-token-' + 'x'.repeat(30);
+const STRIPE_KEY = 'sk_test_' + 'a'.repeat(24);
+const STRIPE_WHSEC = 'whsec_' + 'b'.repeat(24);
+let t: TestApp;
+let d360: Fake360dialog;
+let stripe: FakeStripe;
+let staff: Client;
+let owner: Client;
+let tenant: string;
+let direct: Client;
+let directTenant: string;
+let connection: string;
+const NUMBER = `${Date.now()}`.slice(-9) + '01';
+const ACCOUNT = `waba${randomUUID().slice(0, 8)}`;
+const API_KEY = `d360key_${randomUUID()}`;
+let seq = 0;
+const saudi = () => `96656${String(Math.floor(Math.random() * 1e6) + ++seq).padStart(7, '0')}`;
+const http = () => request(t.app.getHttpServer());
+const app = <T>(fn: Parameters<typeof withContext<T>>[2], tid = tenant) => withContext<T>(t.deps.db, { tenantId: tid, userId: null }, fn);
+const hook = (payload: unknown, token = TOKEN) => http().post('/v1/webhooks/dialog360').set('Content-Type', 'application/json').set('X-CF-Partner-Token', token).send(JSON.stringify(payload));
+const inbound = (wa: string, text: string) => hook({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: NUMBER },
+  contacts: [{ wa_id: wa, profile: { name: 'Partner Customer' } }],
+  messages: [{ from: wa, id: `wamid.in.${randomUUID()}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: text } }] } }] }] });
+const statusHook = (wamid: string, status: string, pricing?: Record<string, unknown>) => hook({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: {
+  metadata: { phone_number_id: NUMBER }, statuses: [{ id: wamid, status, timestamp: String(Math.floor(Date.now() / 1000)), recipient_id: '1', ...(pricing ? { pricing } : {}),
+    ...(status === 'failed' ? { errors: [{ code: 131026 }] } : {}) }] } }] }] });
+const stripeHook = (event: Record<string, unknown>, opts: { secret?: string; at?: number } = {}) => {
+  const raw = JSON.stringify(event);
+  const sig = stripeSignature(opts.secret ?? STRIPE_WHSEC, opts.at ?? Math.floor(Date.now() / 1000), raw);
+  return http().post('/v1/webhooks/credits/stripe').set('Content-Type', 'application/json').set('Stripe-Signature', sig).send(raw);
+};
+const account = async () => (await owner.get('/v1/credits').expect(200)).body;
+const conv = async (wa: string) => (await app(async (tx) => (await tx.query<{ id: string }>(
+  `SELECT c.id FROM conversations c JOIN contact_identifiers ci ON ci.contact_id = c.contact_id WHERE ci.value = $1 ORDER BY c.created_at DESC LIMIT 1`, [wa])).rows[0]!)).id;
+const msg = (id: string) => app(async (tx) => (await tx.query<{ status: string; error_code: string | null; provider_message_id: string | null }>(
+  'SELECT status, error_code, provider_message_id FROM messages WHERE id = $1', [id])).rows[0]!);
+const reservation = (id: string) => app(async (tx) => (await tx.query<{ state: string; price_minor: string; category: string }>(
+  'SELECT state, price_minor, category FROM credit_reservations WHERE message_id = $1', [id])).rows[0] ?? null);
+/** Owner-role insert for set-up (the route table is readable to it only with row security relaxed, as for the table itself). */
+const asOwnerQ = async (table: string, sql: string, params: unknown[]) => {
+  await t.ownerDb.query(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
+  await t.ownerDb.query('ALTER TABLE messaging_routes NO FORCE ROW LEVEL SECURITY');
+  try { return await t.ownerDb.query(sql, params); } finally {
+    await t.ownerDb.query(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
+    await t.ownerDb.query('ALTER TABLE messaging_routes FORCE ROW LEVEL SECURITY');
+  }
+};
+async function reply(convId: string, text: string) {
+  const c = (await owner.get(`/v1/conversations/${convId}`).expect(200)).body;
+  return (await owner.post(`/v1/conversations/${convId}/reply`, { text, seenActivity: c.activitySeq, clientMessageId: randomUUID() }).expect(201)).body.id as string;
+}
+
+beforeAll(async () => {
+  d360 = await new Fake360dialog().start();
+  d360.keys.set(API_KEY, NUMBER);
+  stripe = await new FakeStripe(STRIPE_KEY).start();
+  t = await startApp({ DIALOG360_WEBHOOK_TOKEN: TOKEN, DIALOG360_BASE_URL: d360.url, CREDITS_PROVIDER: 'stripe', STRIPE_SECRET_KEY: STRIPE_KEY,
+    STRIPE_WEBHOOK_SECRET: STRIPE_WHSEC, STRIPE_API_BASE: stripe.url });
+  staff = await newStaff(t, 'pt-staff', 'platform_owner');
+  owner = await newUser(t, 'pt-owner');
+  tenant = await newCompany(owner, 'pt', 'business');
+  await activateSubscription(t, tenant);
+  await enableMfa(owner);
+  direct = await newUser(t, 'pt-direct');
+  directTenant = await newCompany(direct, 'ptdirect', 'business');
+  await activateSubscription(t, directTenant);
+  await enableMfa(direct);
+});
+afterAll(async () => { await t?.close(); await d360?.stop(); await stripe?.stop(); });
+
+describe('one messaging and billing route per company', () => {
+  it('existing companies stay on the direct route: no credit account, no partner number', async () => {
+    expect((await direct.get('/v1/credits').expect(200)).body).toMatchObject({ mode: 'meta_direct', route: 'meta_direct' });
+    expect((await staff.post(`/v1/platform/tenants/${directTenant}/credits/account`, { currency: 'SAR' })).status).toBe(409);
+    expect((await staff.post(`/v1/platform/tenants/${directTenant}/partner-channels`, { providerNumberId: `${NUMBER}9`, displayPhone: '+966500000001', label: 'x',
+      accountId: `${ACCOUNT}x`, apiKey: 'some-key-123' })).status).toBe(409);
+    await owner.put(`/v1/platform/tenants/${tenant}/messaging-route`, { route: 'partner_360dialog', note: 'not staff' }).expect(403);
+  });
+
+  it('a company is put on the partner route, its number connected with a sealed key, and its credit opened', async () => {
+    await staff.put(`/v1/platform/tenants/${tenant}/messaging-route`, { route: 'partner_360dialog', note: 'Pilot on the partner route' }).expect(200);
+    connection = (await staff.post(`/v1/platform/tenants/${tenant}/partner-channels`, { providerNumberId: NUMBER, displayPhone: '+966500000077', label: 'Partner',
+      accountId: ACCOUNT, apiKey: API_KEY }).expect(201)).body.id;
+    const sealed = (await app(async (tx) => (await tx.query<{ sealed_key: string }>('SELECT sealed_key FROM partner_channel_keys WHERE connection_id = $1', [connection])).rows[0]!)).sealed_key;
+    expect(sealed.startsWith('v1.')).toBe(true);
+    expect(sealed).not.toContain(API_KEY);
+    expect(partnerKeySealer(t.deps.keys.webhookSecrets).open(sealed)).toBe(API_KEY);
+    await staff.post(`/v1/platform/tenants/${tenant}/credits/account`, { currency: 'SAR', lowThresholdMinor: 1000 }).expect(201);
+    await staff.post('/v1/platform/credits/rate-cards', { currency: 'SAR', effectiveFrom: new Date(Date.now() + 500).toISOString(), source: 'Test fixture (not Meta prices)',
+      markets: [{ prefix: '966', market: 'saudi_arabia' }],
+      lines: [{ market: 'saudi_arabia', category: 'marketing', unitCostMinor: 25 }, { market: 'saudi_arabia', category: 'utility', unitCostMinor: 5 },
+        { market: 'saudi_arabia', category: 'authentication', unitCostMinor: 5 }, { market: 'other', category: 'marketing', unitCostMinor: 50 },
+        { market: 'other', category: 'utility', unitCostMinor: 10 }, { market: 'other', category: 'authentication', unitCostMinor: 10 }] }).expect(201);
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await account()).toMatchObject({ mode: 'prepaid', route: 'partner_360dialog', provider: { name: 'stripe', testMode: true } });
+  });
+
+  it('the database refuses mixed routing: the same number twice, a direct number on the partner route, a partner number on the direct route', async () => {
+    // Another partner company cannot take the same number.
+    const other = await newUser(t, 'pt-other');
+    const otherTenant = await newCompany(other, 'ptother', 'business');
+    await staff.put(`/v1/platform/tenants/${otherTenant}/messaging-route`, { route: 'partner_360dialog', note: 'Second partner company' }).expect(200);
+    expect((await staff.post(`/v1/platform/tenants/${otherTenant}/partner-channels`, { providerNumberId: NUMBER, displayPhone: '+966500000078', label: 'Dup',
+      accountId: `${ACCOUNT}2`, apiKey: 'another-key-123' })).status).toBe(409);
+    // A direct (Meta) connection on the partner route, or a partner connection on the direct route, is refused by the database.
+    await expect(asOwnerQ('channel_connections', `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, ownership_verified_at, ownership_method)
+      VALUES ($1, 'whatsapp_cloud', $2, '+1', 'x', now(), 'embedded_signup_v4')`, [tenant, `${NUMBER}7`])).rejects.toThrow(/messaging route/);
+    await expect(asOwnerQ('channel_connections', `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, ownership_verified_at, ownership_method)
+      VALUES ($1, 'dialog360', $2, '+1', 'x', now(), 'partner_embedded_signup')`, [directTenant, `${NUMBER}8`])).rejects.toThrow(/messaging route/);
+    // The same number live on both routes: refused.
+    const acct = (await asOwnerQ('provider_accounts', `INSERT INTO provider_accounts (tenant_id, provider, account_id) VALUES ($1, 'whatsapp_cloud', $2) RETURNING id`,
+      [directTenant, `waba-direct-${seq}`])).rows[0].id;
+    await expect(asOwnerQ('channel_connections', `INSERT INTO channel_connections (tenant_id, provider, provider_number_id, display_phone, label, ownership_verified_at, ownership_method, account_ref)
+      VALUES ($1, 'whatsapp_cloud', $2, '+1000', 'x', now(), 'embedded_signup_v4', $3)`, [directTenant, NUMBER, acct])).rejects.toThrow(/one_live_route|duplicate/);
+    // Switching back while the partner number is live, or while credit remains: refused.
+    expect((await staff.put(`/v1/platform/tenants/${tenant}/messaging-route`, { route: 'meta_direct', note: 'Try to switch back' })).status).toBe(409);
+  });
+});
+
+describe('sending and receiving through 360dialog (stand-in)', () => {
+  let wa: string;
+  it('webhooks need the secret header; inbound messages arrive in Meta format', async () => {
+    wa = saudi();
+    await inbound(wa, 'Hello').set('X-CF-Partner-Token', 'wrong').expect(401);
+    await hook({ object: 'whatsapp_business_account', entry: [] }, 'nope').expect(401);
+    await inbound(wa, 'Hello').expect(200);
+    expect(await conv(wa)).toBeTruthy();
+  });
+
+  it('a reply goes to 360dialog with the number\'s key, Cloud API body and our callback reference; free within the monthly allowance', async () => {
+    await topUp(10000);
+    const id = await reply(await conv(wa), 'Thanks for your message');
+    expect((await msg(id)).status).toBe('sent');
+    const last = d360.sent().at(-1)!;
+    expect(last.headers['d360-api-key']).toBe(API_KEY);
+    expect(last.json).toMatchObject({ messaging_product: 'whatsapp', to: wa, type: 'text', text: { body: 'Thanks for your message' }, biz_opaque_callback_data: id });
+    expect(await reservation(id)).toBeNull();
+    // Meta reports it free (inside the 1,000 a month): nothing charged.
+    await statusHook((await msg(id)).provider_message_id!, 'delivered', { billable: false, pricing_model: 'PMP', type: 'free_customer_service', category: 'service' }).expect(200);
+    expect(await account()).toMatchObject({ reservedMinor: 0, balanceMinor: 10000 });
+  });
+
+  it('beyond the free monthly allowance a reply holds the utility price and is charged when Meta bills it', async () => {
+    const c = await conv(wa);
+    await app(async (tx) => {
+      await tx.query(`INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, occurred_at, status)
+                      SELECT $1, $2, 'out', 'text', 'earlier', gen_random_uuid(), now(), 'delivered' FROM generate_series(1, $3)`, [tenant, c, SERVICE_FREE_PER_MONTH]);
+    });
+    const id = await reply(c, 'Your technician is on the way');
+    expect(await reservation(id)).toMatchObject({ state: 'held', price_minor: '6', category: 'service' });
+    await statusHook((await msg(id)).provider_message_id!, 'delivered', { billable: true, pricing_model: 'PMP', type: 'regular', category: 'service' }).expect(200);
+    expect(await reservation(id)).toMatchObject({ state: 'charged' });
+    expect((await account()).balanceMinor).toBe(10000 - 6);
+    await app((tx) => tx.query(`DELETE FROM messages WHERE conversation_id = $1 AND body = 'earlier'`, [c]).catch(() => undefined));
+  });
+
+  it('templates are submitted through 360dialog and sent with their parameters; failures are classified for safe retry', async () => {
+    const tpl = (await owner.post('/v1/templates', { name: 'partner_offer', language: 'en', category: 'marketing', bodyText: 'Hi {{1}}, our offer is open.', examples: ['Sara'] }).expect(201)).body;
+    expect(d360.templates.at(-1)).toMatchObject({ name: 'partner_offer', category: 'MARKETING', language: 'en' });
+    await hook({ object: 'whatsapp_business_account', entry: [{ id: ACCOUNT, time: Math.floor(Date.now() / 1000), changes: [{ field: 'message_template_status_update',
+      value: { event: 'APPROVED', message_template_id: Number(tpl.providerTemplateId), message_template_name: 'partner_offer', message_template_language: 'en', reason: null } }] }] }).expect(200);
+    const c = await conv(wa);
+    await app(async (tx) => {
+      await tx.query(`UPDATE conversations SET last_inbound_at = now() - interval '30 hours' WHERE id = $1`, [c]);
+      await tx.query('UPDATE contacts SET marketing_consent_at = now() WHERE id = (SELECT contact_id FROM conversations WHERE id = $1)', [c]);
+    });
+    const send = async () => {
+      const cv = (await owner.get(`/v1/conversations/${c}`).expect(200)).body;
+      return (await owner.post(`/v1/conversations/${c}/template`, { templateId: tpl.id, params: ['Sara'], seenActivity: cv.activitySeq, clientMessageId: randomUUID() }).expect(201)).body.id as string;
+    };
+    const ok = await send();
+    expect(d360.sent().at(-1)!.json).toMatchObject({ type: 'template', template: { name: 'partner_offer', language: { code: 'en' }, components: [{ type: 'body', parameters: [{ type: 'text', text: 'Sara' }] }] } });
+    expect(await reservation(ok)).toMatchObject({ state: 'held', price_minor: '30' });
+    // Rejected (400): failed, hold given back. Busy (503): kept for retry. No answer after sending: uncertain, never resent.
+    d360.script.push({ status: 400, error: { code: 131026, message: 'Recipient not on WhatsApp' } });
+    const rejected = await send();
+    expect(await msg(rejected)).toMatchObject({ status: 'failed', error_code: 'd360_400_131026' });
+    expect(await reservation(rejected)).toMatchObject({ state: 'released' });
+    d360.script.push({ status: 503 });
+    const busy = await send();
+    expect((await msg(busy)).status).toBe('queued');
+    expect(await reservation(busy)).toMatchObject({ state: 'held' });
+    d360.script.push('drop');
+    await app((tx) => tx.query(`UPDATE send_jobs SET next_attempt_at = now() WHERE message_id = $1`, [busy]));
+    await new Sender(t.deps.db, t.deps.channels).dispatchDue(10);
+    expect((await msg(busy)).status).toBe('uncertain');
+    // Delayed and repeated delivery reports for the accepted one: charged once.
+    const wamid = (await msg(ok)).provider_message_id!;
+    for (let i = 0; i < 3; i++) await statusHook(wamid, 'delivered', { billable: true, pricing_model: 'PMP', type: 'regular', category: 'marketing' }).expect(200);
+    expect((await app(async (tx) => (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM credit_entries WHERE message_id = $1 AND kind = 'charge'`, [ok])).rows[0]!.n))).toBe(1);
+  });
+
+  it('media: uploaded then sent by id; customer media fetched through 360dialog\'s address with the key', async () => {
+    const adapter = t.deps.channels.dialog360 as Dialog360Adapter;
+    const sealed = partnerKeySealer(t.deps.keys.webhookSecrets).seal(API_KEY);
+    const r = await adapter.sendMedia({ providerNumberId: NUMBER, to: '966500000001', callbackData: randomUUID(), credential: sealed, mediaType: 'document',
+      data: Buffer.from('%PDF-1.4 test'), contentType: 'application/pdf', filename: 'quote.pdf', caption: 'Your quote' });
+    expect(r.providerMessageId).toMatch(/^wamid\.d360\./);
+    expect(d360.requests.some((x) => x.path === '/media' && x.headers['content-type']?.toString().startsWith('multipart/form-data'))).toBe(true);
+    expect(d360.sent().at(-1)!.json).toMatchObject({ type: 'document', document: { filename: 'quote.pdf', caption: 'Your quote' } });
+    d360.media.set('m123', { data: Buffer.from('JPEGDATA'), mime: 'image/jpeg' });
+    const got = await adapter.fetchMedia({ providerNumberId: NUMBER, mediaId: 'm123', credential: sealed });
+    expect(got).toMatchObject({ contentType: 'image/jpeg' });
+    expect(got.data.toString()).toBe('JPEGDATA');
+    await expect(adapter.fetchMedia({ providerNumberId: NUMBER, mediaId: 'gone', credential: sealed })).rejects.toMatchObject({ code: 'media_not_found', kind: 'rejected' });
+    await expect(adapter.sendText({ providerNumberId: NUMBER, to: '1', body: 'x', callbackData: 'y', credential: null })).rejects.toMatchObject({ code: 'partner_key_missing' });
+  });
+});
+
+let topups = 0;
+/** A Stripe test-mode top-up end to end: checkout created, customer pays, signed webhook credits the balance. */
+async function topUp(amountMinor: number) {
+  const r = (await owner.post('/v1/credits/topups', { amountMinor }).expect(201)).body;
+  const session = [...stripe.sessions.values()].at(-1)!;
+  stripe.pay(String(session.id));
+  await stripeHook({ id: `evt_${++topups}_${randomUUID().slice(0, 6)}`, type: 'checkout.session.completed', data: { object: stripe.sessions.get(String(session.id)) } }).expect(200);
+  return { topupId: r.id as string, sessionId: String(session.id) };
+}
+
+describe('Stripe in test mode (stand-in)', () => {
+  it('a top-up creates a Checkout Session with our references; only Stripe\'s signed, matching event adds credit, once', async () => {
+    const before = (await account()).balanceMinor;
+    const r = (await owner.post('/v1/credits/topups', { amountMinor: 6000 }).expect(201)).body;
+    expect(r.checkoutUrl).toMatch(/^https:\/\/checkout\.stripe\.test\//);
+    const req = stripe.requests.filter((x) => x.path === '/v1/checkout/sessions').at(-1)!;
+    expect(req.headers['idempotency-key']).toBe(`checkout-${r.id}`);
+    const form = Object.fromEntries(new URLSearchParams(req.body));
+    expect(form).toMatchObject({ mode: 'payment', 'line_items[0][price_data][currency]': 'sar', 'line_items[0][price_data][unit_amount]': '6000', 'metadata[topupId]': r.id, 'metadata[tenantId]': tenant });
+    const session = [...stripe.sessions.values()].at(-1)!;
+    stripe.pay(String(session.id));
+    const event = { id: `evt_pay_${randomUUID().slice(0, 6)}`, type: 'checkout.session.completed', data: { object: session } };
+    await stripeHook(event, { secret: 'whsec_wrongwrongwrong' }).expect(400);
+    await stripeHook(event, { at: Math.floor(Date.now() / 1000) - 3600 }).expect(400);           // too old: replay refused
+    expect((await stripeHook(event).expect(200)).body.outcome).toBe('applied');
+    expect((await stripeHook(event).expect(200)).body.outcome).toBe('duplicate');
+    expect((await stripeHook({ id: 'evt_other', type: 'customer.created', data: { object: {} } }).expect(200)).body.outcome).toBe('ignored');
+    expect((await account()).balanceMinor).toBe(before + 6000);
+    const top = (await owner.get('/v1/credits/topups').expect(200)).body.find((x: { id: string }) => x.id === r.id);
+    expect(top.receiptNo).toMatch(/^CR-TEST-\d{4}-\d{6}$/);   // Stripe in test mode: documents are marked TEST
+  });
+
+  it('an expired checkout is a failed payment; a refund goes to the session\'s payment with our idempotency key; a lost dispute takes the credit back', async () => {
+    const r = (await owner.post('/v1/credits/topups', { amountMinor: 5000 }).expect(201)).body;
+    const s = [...stripe.sessions.values()].at(-1)!;
+    expect((await stripeHook({ id: `evt_exp_${randomUUID().slice(0, 6)}`, type: 'checkout.session.expired', data: { object: s } }).expect(200)).body.outcome).toBe('failed_recorded');
+    void r;
+    const { topupId, sessionId } = await topUp(8000);
+    const refund = (await owner.post('/v1/credits/refunds', { topupId, amountMinor: 1500, reason: 'Unused credit' }).expect(201)).body;
+    expect(refund.status).toBe('succeeded');
+    const rq = stripe.requests.filter((x) => x.path === '/v1/refunds').at(-1)!;
+    expect(rq.headers['idempotency-key']).toBe(`refund-${refund.id}`);
+    expect(Object.fromEntries(new URLSearchParams(rq.body))).toMatchObject({ payment_intent: stripe.sessions.get(sessionId)!.payment_intent, amount: '1500' });
+    stripe.refundScript.push('failed');
+    expect((await owner.post('/v1/credits/refunds', { topupId, amountMinor: 1000, reason: 'Refused at Stripe' }).expect(201)).body.status).toBe('failed');
+    const before = (await account()).balanceMinor;
+    const pi = String(stripe.sessions.get(sessionId)!.payment_intent);
+    expect((await stripeHook({ id: `evt_dsp_${randomUUID().slice(0, 6)}`, type: 'charge.dispute.closed',
+      data: { object: { id: 'dp_1', status: 'lost', payment_intent: pi, amount: 8000, currency: 'sar', reason: 'fraudulent' } } }).expect(200)).body.outcome).toBe('reversed');
+    expect((await account()).balanceMinor).toBe(before - (8000 - 1500));     // the refunded part is not taken twice
+  });
+
+  it('only Stripe test keys are accepted, and production refuses any credits provider', () => {
+    const base = { ...process.env, CREDITS_PROVIDER: 'stripe', STRIPE_WEBHOOK_SECRET: STRIPE_WHSEC };
+    expect(() => loadConfig({ ...base, STRIPE_SECRET_KEY: 'sk_live_' + 'a'.repeat(24) })).toThrow(/TEST key/);
+    const prod = { ...base, STRIPE_SECRET_KEY: STRIPE_KEY, NODE_ENV: 'production', SCANNER: 'clamd', SCANNER_REQUIRE_OFFICIAL_SIGNATURES: 'true', CHANNEL_SANDBOX_ENABLED: 'false',
+      SMTP_URL: 'smtp://example.test', INBOUND_APPLY: 'worker' };
+    expect(() => loadConfig(prod)).toThrow(/not approved yet/);
+    expect(() => loadConfig({ ...prod, CREDITS_PROVIDER: 'none', DIALOG360_WEBHOOK_TOKEN: TOKEN })).toThrow(/partner route is not approved/);
+  });
+});
+
+describe('partner funding is tracked apart from customer payments, with alerts', () => {
+  it('the monitor computes cost per day, cover and the buffer, and raises and clears alerts', async () => {
+    await staff.put('/v1/platform/partner/funding/settings', { lowBalanceMinor: 50000, minDaysCover: 14, topupLeadDays: 5, safetyBp: 5000 }).expect(200);
+    await staff.post('/v1/platform/partner/funding', { what: 'entry', kind: 'funding', amountMinor: 100000, currency: 'USD', reference: `WIRE-${randomUUID().slice(0, 6)}` }).expect(201);
+    await staff.post('/v1/platform/partner/funding', { what: 'balance', amountMinor: 1000, currency: 'USD' }).expect(201);
+    let f = await partnerFundingCheck(t.deps.db);
+    expect(f!.dailyCostMinor).toBeGreaterThanOrEqual(0);
+    expect(f!.openAlerts).toEqual(expect.arrayContaining(['partner_balance_low', 'partner_below_buffer']));
+    expect(f!.customerLiabilityMinor).toBeGreaterThan(0);                      // customers' unspent prepaid credit, in USD
+    await staff.post('/v1/platform/partner/funding', { what: 'balance', amountMinor: 10_000_000, currency: 'USD' }).expect(201);
+    f = await partnerFundingCheck(t.deps.db);
+    expect(f!.openAlerts).not.toContain('partner_balance_low');
+    expect(f!.openAlerts).not.toContain('partner_below_buffer');
+    const o = (await staff.get('/v1/platform/partner/funding').expect(200)).body;
+    expect(o.fundedMinor).toBeGreaterThanOrEqual(100000);
+    expect(o.monitor).toMatchObject({ partner: '360dialog', currency: 'USD' });
+    await owner.get('/v1/platform/partner/funding').expect(403);
+  });
+});
+
+describe('automatic top-up wording, versioned (Arabic and English)', () => {
+  it('nothing can be accepted until approved; the Arabic version is stored word for word with its version; retiring it turns automatic top-up off', async () => {
+    const wording = (await staff.get('/v1/platform/credits/consent-wording').expect(200)).body as Array<{ version: number; locale: string; text: string; status: string }>;
+    const ar = wording.find((w) => w.locale === 'ar' && w.version === 1)!;
+    expect(ar.text).toMatch(/أفوّض ConversaFlow/);
+    await app((tx) => tx.query(`INSERT INTO credit_payment_methods (tenant_id, provider, provider_ref, label) VALUES ($1, 'stripe', 'cus_1:pm_1', 'Visa •••• 4242')`, [tenant]));
+    const methodId = (await account()).methods[0].id;
+    const on = { enabled: true, thresholdMinor: 1000, amountMinor: 5000, dailyLimitMinor: 10000, methodId, consentVersion: 1, consentLocale: 'ar', consentText: ar.text };
+    if (ar.status !== 'approved') {
+      expect((await owner.put('/v1/credits/auto-topup', on).expect(409)).body.error.code).toBe('consent_not_approved');
+      expect((await account()).auto.available).toBe(false);
+      await staff.put('/v1/platform/credits/consent-wording/1/ar', { status: 'approved' }).expect(409);    // needs the legal reference
+      await staff.put('/v1/platform/credits/consent-wording/1/ar', { status: 'approved', legalReference: 'Counsel memo (test)' }).expect(200);
+    }
+    await owner.put('/v1/credits/auto-topup', { ...on, consentText: ar.text + ' ' }).expect(400);
+    await owner.put('/v1/credits/auto-topup', on).expect(200);
+    const row = await app(async (tx) => (await tx.query<{ v: number; l: string; text: string }>('SELECT auto_consent_version AS v, auto_consent_locale AS l, auto_consent_text AS text FROM credit_accounts')).rows[0]!);
+    expect(row).toEqual({ v: 1, l: 'ar', text: ar.text });
+    await expect(t.ownerDb.query(`UPDATE credit_consent_texts SET text = 'changed' WHERE version = 1 AND locale = 'ar'`)).rejects.toThrow(/never changes/);
+    const added = (await staff.post('/v1/platform/credits/consent-wording', { locale: 'ar', text: ar.text + ' (نسخة 2)' }).expect(201)).body;
+    expect(added).toMatchObject({ version: 2, status: 'awaiting_legal_review' });
+    await staff.put('/v1/platform/credits/consent-wording/1/ar', { status: 'retired' }).expect(200);
+    expect((await account()).auto.enabled).toBe(false);
+  });
+});
+
+describe('the database ties records together (review L6, L8)', () => {
+  it('the application role cannot write a top-up entry without a paid top-up, or any adjustment', async () => {
+    await expect(app((tx) => tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, topup_id) VALUES ($1, 'topup', 99999, gen_random_uuid())`, [tenant])))
+      .rejects.toThrow(/matching paid top-up/);
+    await expect(app((tx) => tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, note, created_by) VALUES ($1, 'adjustment', 99999, 'x', gen_random_uuid())`, [tenant])))
+      .rejects.toThrow(/platform staff only/);
+  });
+  it('the partner\'s monthly figure must be in the company\'s credit currency', async () => {
+    const month = new Date().toISOString().slice(0, 7);
+    expect((await staff.put(`/v1/platform/tenants/${tenant}/credits/partner-cost`, { month, currency: 'USD', costMinor: 100, reference: 'INV-1' })).status).toBe(409);
+    await staff.put(`/v1/platform/tenants/${tenant}/credits/partner-cost`, { month, currency: 'SAR', costMinor: 100, reference: 'INV-1' }).expect(200);
+  });
+});

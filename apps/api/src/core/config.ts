@@ -70,7 +70,17 @@ const Schema = z.object({
    * billing permission could add credit with it (review of 0061, L1). `none` (the default): top-ups are unavailable.
    * A real provider is added only after the owner approves the payment account.
    */
-  CREDITS_PROVIDER: z.enum(['none', 'test']).optional(),
+  CREDITS_PROVIDER: z.enum(['none', 'test', 'stripe']).optional(),
+  /** Stripe in test mode only (owner instruction of 29 Oct 2026: production payments stay off). Keys go in secrets, never code. */
+  STRIPE_SECRET_KEY: z.string().regex(/^(sk|rk)_test_[A-Za-z0-9]{10,}$/, 'must be a Stripe TEST key (sk_test_ or rk_test_)').optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().regex(/^whsec_[A-Za-z0-9]{10,}$/).optional(),
+  STRIPE_API_BASE: z.string().url().default('https://api.stripe.com'),
+  /**
+   * 360dialog (partner route, migration 0064). Turned on by setting the webhook token (a long random secret that
+   * 360dialog sends back in a header). Refused in production until the owner approves the partner route going live.
+   */
+  DIALOG360_WEBHOOK_TOKEN: z.string().min(32).optional(),
+  DIALOG360_BASE_URL: z.string().url().default('https://waba-v2.360dialog.io'),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),
   /** Token echoed during webhook verification (hub.verify_token). Generated per process when not set. */
@@ -78,7 +88,7 @@ const Schema = z.object({
 });
 
 export type Config = Omit<z.infer<typeof Schema>, 'CHANNEL_SANDBOX_ENABLED' | 'INBOUND_APPLY' | 'CREDITS_PROVIDER'>
-  & { CHANNEL_SANDBOX_ENABLED: boolean; INBOUND_APPLY: 'worker' | 'request'; CREDITS_PROVIDER: 'none' | 'test' };
+  & { CHANNEL_SANDBOX_ENABLED: boolean; INBOUND_APPLY: 'worker' | 'request'; CREDITS_PROVIDER: 'none' | 'test' | 'stripe' };
 
 /** Reads configuration from the environment and refuses to start when anything required is missing. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -109,6 +119,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const credits = parsed.data.CREDITS_PROVIDER ?? (parsed.data.NODE_ENV === 'test' ? 'test' : 'none');
   if (parsed.data.NODE_ENV === 'production' && credits === 'test') {
     throw new Error('Invalid configuration: production refuses CREDITS_PROVIDER=test (the test payment provider moves no money).');
+  }
+  if (parsed.data.NODE_ENV === 'production' && credits !== 'none') {
+    throw new Error('Invalid configuration: production payments for message credits are not approved yet (CREDITS_PROVIDER must be none).');
+  }
+  if (credits === 'stripe' && (!parsed.data.STRIPE_SECRET_KEY || !parsed.data.STRIPE_WEBHOOK_SECRET)) {
+    throw new Error('Invalid configuration: CREDITS_PROVIDER=stripe needs STRIPE_SECRET_KEY (test key) and STRIPE_WEBHOOK_SECRET.');
+  }
+  if (parsed.data.NODE_ENV === 'production' && parsed.data.DIALOG360_WEBHOOK_TOKEN) {
+    throw new Error('Invalid configuration: the 360dialog partner route is not approved for production yet.');
   }
   return { ...parsed.data, CHANNEL_SANDBOX_ENABLED: sandbox, INBOUND_APPLY: inbound, CREDITS_PROVIDER: credits };
 }

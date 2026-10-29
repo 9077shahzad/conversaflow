@@ -51,7 +51,8 @@ export function outboundTypeFor(contentType: string, size: number): Exclude<Medi
 export const MEDIA_LIMITS = { maxAttempts: 5, leaseSeconds: 120, baseBackoffSeconds: 10, fetchTimeoutMs: 60_000 };
 
 type MediaRow = { job_id: string; job_state: string; lease_live: boolean; attempts: number; message_id: string; media_type: MediaType;
-  provider_media_id: string; media_mime: string | null; media_status: string; number: string; provider: Provider; filename: string | null };
+  provider_media_id: string; media_mime: string | null; media_status: string; number: string; provider: Provider; filename: string | null;
+  credential: string | null };
 
 /**
  * Downloads inbound media in the background, checks it for malware and stores it in the company's own folder.
@@ -82,7 +83,8 @@ export class MediaFetcher {
     const row = await withContext(this.db, { tenantId, userId: null }, async (tx) => (await tx.query<MediaRow>(
       `SELECT j.id AS job_id, j.state AS job_state, (j.state = 'leased' AND j.lease_until > now()) AS lease_live, j.attempts,
               m.id AS message_id, m.media_type, m.provider_media_id, m.media_mime, m.media_status,
-              ch.provider_number_id AS number, ch.provider, m.media_filename AS filename
+              ch.provider_number_id AS number, ch.provider, m.media_filename AS filename,
+              (SELECT k.sealed_key FROM partner_channel_keys k WHERE k.connection_id = ch.id) AS credential
        FROM media_jobs j JOIN messages m ON m.id = j.message_id
        JOIN conversations c ON c.id = m.conversation_id JOIN channel_connections ch ON ch.id = c.connection_id
        WHERE j.id = $1`, [jobId])).rows[0]);
@@ -100,7 +102,7 @@ export class MediaFetcher {
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), MEDIA_LIMITS.fetchTimeoutMs);
       try {
-        ({ data, contentType } = await adapter.fetchMedia({ providerNumberId: row.number, mediaId: row.provider_media_id, signal: abort.signal }));
+        ({ data, contentType } = await adapter.fetchMedia({ providerNumberId: row.number, mediaId: row.provider_media_id, signal: abort.signal, credential: row.credential }));
       } finally { clearTimeout(timer); }
     } catch (err) {
       const e = err instanceof ChannelSendError ? err : new ChannelSendError('download_error', 'Download failed.', 'not_accepted');

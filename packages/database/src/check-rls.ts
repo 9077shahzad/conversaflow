@@ -49,10 +49,14 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
     // top-up on, to find those under their threshold (migration 0061, message credits)
     'credit_reservations', 'credit_accounts',
     // credit_refunds: pending refunds; credit_topups: pending automatic top-ups (migration 0062)
-    'credit_refunds', 'credit_topups'],
+    'credit_refunds', 'credit_topups',
+    // credit_entries: charge costs only, and messaging_routes, for the partner funding monitor (migration 0064)
+    'credit_entries', 'messaging_routes'],
   cf_identity: ['memberships'],
   // credit_accounts, credit_entries, credit_partner_costs: opening accounts, adjustments and the monthly reconciliation (0061)
-  cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags', 'credit_accounts', 'credit_entries', 'credit_partner_costs'],
+  cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags', 'credit_accounts', 'credit_entries', 'credit_partner_costs',
+    // messaging_routes, and connecting partner numbers with their sealed keys (migration 0064)
+    'messaging_routes', 'channel_connections', 'provider_accounts', 'partner_channel_keys'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
 };
 /**
@@ -130,9 +134,18 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // 0062: refunds and automatic top-ups left pending, settled by the worker.
   'credit_refunds_pending(integer)': '057e61ad768e40c0ce44347f54ad8b0a',  // re-pinned by 0063 (attempt cap)
   'credit_auto_topups_stuck(integer)': 'f25a465978167db5f2133c37aa824991',
+  // 0064: routes, partner numbers, consent wording, partner funding.
+  'partner_funding_check(text)': 'e4f76d96689cdfdf3e83a4ede5377fb3',
+  'platform_credit_consent_add(text,text,text)': 'bec147dc80c09d0dbd165c597aeef49a',
+  'platform_credit_consent_set(text,integer,text,text,text)': '987f66390266b10902fc109118215da7',
+  'platform_partner_connect_channel(text,uuid,text,text,text,text,text)': '4f6000a48bd5de8f0b5084189f933286',
+  'platform_partner_overview(text,text)': '024f95bbeb108e47fbb13e8bea6d361b',
+  'platform_partner_record(text,text,text,text,bigint,text,text,timestamp with time zone)': 'b01327fec571a4035f222dc0d9cf324e',
+  'platform_partner_settings(text,text,jsonb)': '32752fe0b647df2323b4515e1d3bfcf1',
+  'platform_set_messaging_route(text,uuid,text,text)': 'b54172288c39a805237c0175fc090b40',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
-  'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': 'd7bbfabe109450e56094143dfd2ad04a',
+  'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': '4046a5f0c06663a07319930b8af5be4c',  // re-pinned by 0064 (currency must match)
   'platform_credit_reconciliation(text,date)': '58bab21a6e500b4648e9038f4d06a485',  // re-pinned by 0063 (UTC months)
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
@@ -168,6 +181,8 @@ const SHARED_TABLES = [
   'trial_caps', 'trial_policy', 'user_credentials', 'users', 'system_role_grants',
   // Message credits (0061): the platform's price lists and settings, the same for every company.
   'credit_rate_cards', 'credit_rate_lines', 'credit_rate_markets', 'credit_settings',
+  // 0064: automatic top-up wording versions, partner funding and platform alerts (platform-wide, no company data).
+  'credit_consent_texts', 'partner_funding_settings', 'partner_balance_snapshots', 'partner_funding_entries', 'platform_alerts',
 ];
 /**
  * Non-built-in functions called by any row-security policy, pinned to md5(pg_get_functiondef || owner). Replacing

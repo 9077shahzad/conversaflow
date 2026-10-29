@@ -5,7 +5,7 @@ import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type MediaSendInput
 import { outboundTypeFor } from './media';
 import { claimCampaignSend } from './campaign-limits';
 import { stopTimerOnReply } from './sla';
-import { lockCreditAccount, pricingFrom, releaseReservation, reserveForSend, settleOnStatus, type Pricing } from './credits';
+import { SERVICE_FREE_PER_MONTH, lockCreditAccount, pricingFrom, releaseReservation, reserveForSend, serviceMessagesThisMonth, settleOnStatus, type Pricing } from './credits';
 
 /**
  * Reliable outbound sending (BRD v1.2 Wave 1; architecture extension AX-3).
@@ -120,7 +120,8 @@ export class Sender {
       // Message credits: for a template (the only kind that can be paid), the company's credit account, if any, is locked
       // before anything else, the same order as every other transaction that writes credit entries (review of 0061, M1).
       // Free-form replies and media take no credit lock (recheck N2).
-      if (await isTemplateJob(tx, jobId)) await lockCreditAccount(tx);
+      const creditLock = await mayBePaidJob(tx, jobId);
+      if (creditLock) await lockCreditAccount(tx);
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0];
       if (!row || row.job_state === 'done' || row.job_state === 'dead') return { done: 'nothing_to_do' as const };
       // Only the holder of a live lease may process a job (leaseNow or dispatch_claim). Explicit, as the review noted.
@@ -188,11 +189,12 @@ export class Sender {
       const ctx = (await tx.query<{
         opted_out: boolean; last_inbound_at: Date | null; paused: boolean; paused_by: string | null; channel_status: string;
         provider: Provider; number: string; wa: string | null; assigned: string | null; sender_may_reply: boolean;
-        marketing_consent: boolean; conn_account: string; suppressed: boolean;
+        marketing_consent: boolean; conn_account: string; suppressed: boolean; connection_id: string; credential: string | null;
       }>(
         `SELECT (ct.opted_out_at IS NOT NULL) AS opted_out, c.last_inbound_at,
                 (c.paused_at IS NOT NULL AND (c.paused_until IS NULL OR c.paused_until > now())) AS paused,
                 c.paused_by_membership_id AS paused_by, ch.status AS channel_status, ch.provider, ch.provider_number_id AS number,
+                ch.id AS connection_id, (SELECT k.sealed_key FROM partner_channel_keys k WHERE k.connection_id = ch.id) AS credential,
                 (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = ct.id AND ci.kind = 'whatsapp' LIMIT 1) AS wa,
                 c.assigned_membership_id AS assigned,
                 EXISTS (SELECT 1 FROM memberships mb JOIN membership_roles mr ON mr.membership_id = mb.id
@@ -262,7 +264,7 @@ export class Sender {
       // Prepaid message credits (migration 0061): a paid message reserves its price first, under the account lock, so
       // sends at the same time can never spend more than the balance. Companies paying Meta directly are not affected.
       const credit = await reserveForSend(tx, { tenantId, messageId: row.message_id, kind: row.kind, category: tpl?.category ?? null,
-        to: ctx.wa as string, lastInboundAt: ctx.last_inbound_at });
+        to: ctx.wa as string, connectionId: ctx.connection_id });
       if (credit === 'insufficient_credit' || credit === 'no_rate') {
         await this.finishFailed(tx, row, 'blocked', credit === 'no_rate' ? 'no_credit_rate' : 'insufficient_credit', 'done');
         return { done: 'failed' as const };
@@ -289,7 +291,7 @@ export class Sender {
         `UPDATE messages SET status = 'submitting', attempts = attempts + 1 WHERE id = $1 RETURNING attempts`, [row.message_id])).rows[0]!.attempts;
       await tx.query(`UPDATE send_jobs SET attempts = attempts + 1, updated_at = now() WHERE id = $1`, [jobId]);
       if (tpl) await tx.query('UPDATE messages SET pricing_category = $2 WHERE id = $1', [row.message_id, tpl.category]);
-      return { row, provider: ctx.provider, number: ctx.number, to: ctx.wa as string, tpl, media, attempt };
+      return { row, provider: ctx.provider, number: ctx.number, to: ctx.wa as string, tpl, media, attempt, credential: ctx.credential, creditLock };
     });
     if ('done' in prepared) return prepared.done as JobOutcome;
 
@@ -305,7 +307,7 @@ export class Sender {
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new ChannelSendError('provider_timeout', 'No answer from the provider in time.', 'uncertain')), this.providerTimeoutMs);
       });
-      const base = { providerNumberId: prepared.number, to: prepared.to, callbackData: prepared.row.message_id, signal: abort.signal };
+      const base = { providerNumberId: prepared.number, to: prepared.to, callbackData: prepared.row.message_id, signal: abort.signal, credential: prepared.credential };
       const call = prepared.tpl
         ? adapter.sendTemplate({ ...base, templateName: prepared.tpl.name, language: prepared.tpl.language, params: prepared.row.template_params ?? [] })
         : prepared.media
@@ -334,7 +336,9 @@ export class Sender {
 
     // Step 3: record the outcome, and the evidence for it.
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
-      if (prepared.tpl) await lockCreditAccount(tx);
+      // Recording the outcome may settle early statuses (applyOrphanStatuses), which may charge: prepaid companies take
+      // the credit lock first, in the usual order.
+      if (prepared.creditLock || await hasCreditAccount(tx)) await lockCreditAccount(tx);
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0]!;
       if (providerMessageId) {
         await lockProviderId(tx, providerMessageId);
@@ -394,8 +398,7 @@ export class Sender {
    */
   private async recordLateAnswer(tenantId: string, messageId: string, attempt: number, providerMessageId: string) {
     await withContext(this.db, { tenantId, userId: null }, async (tx) => {
-      const kind = (await tx.query<{ kind: string }>('SELECT kind FROM messages WHERE id = $1', [messageId])).rows[0]?.kind;
-      if (kind === 'template') await lockCreditAccount(tx);
+      if (await hasCreditAccount(tx)) await lockCreditAccount(tx);
       await lockProviderId(tx, providerMessageId);
       await recordAttempt(tx, tenantId, messageId, attempt, 'late_accepted', null, providerMessageId);
       if (!(await keepProviderId(tx, messageId, providerMessageId))) return;
@@ -461,9 +464,21 @@ async function keepProviderId(tx: Tx, messageId: string, providerMessageId: stri
   return true;
 }
 
-/** Whether a job's message is a template (kind never changes; read without locking anything). */
-async function isTemplateJob(tx: Tx, jobId: string): Promise<boolean> {
-  return (await tx.query(`SELECT 1 FROM send_jobs j JOIN messages m ON m.id = j.message_id WHERE j.id = $1 AND m.kind = 'template'`, [jobId])).rowCount === 1;
+/**
+ * Whether sending this job may hold credit: any template, or a free-form message of a prepaid company once the number
+ * has used its free monthly service messages. Read without locking anything (kind and connection never change).
+ */
+async function mayBePaidJob(tx: Tx, jobId: string): Promise<boolean> {
+  const j = (await tx.query<{ kind: string; connection_id: string; message_id: string }>(
+    `SELECT m.kind, c.connection_id, m.id AS message_id FROM send_jobs j JOIN messages m ON m.id = j.message_id
+     JOIN conversations c ON c.id = m.conversation_id WHERE j.id = $1`, [jobId])).rows[0];
+  if (!j) return false;
+  if (j.kind === 'template') return true;
+  if (!(await hasCreditAccount(tx))) return false;
+  return (await serviceMessagesThisMonth(tx, j.connection_id, j.message_id)) >= SERVICE_FREE_PER_MONTH;
+}
+async function hasCreditAccount(tx: Tx): Promise<boolean> {
+  return ((await tx.query(`SELECT 1 FROM credit_accounts WHERE status = 'active'`)).rowCount ?? 0) > 0;
 }
 
 /** Serialises everything that touches one provider message id, so a status can never slip between two steps. */
