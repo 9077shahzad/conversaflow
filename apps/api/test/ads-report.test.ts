@@ -117,7 +117,9 @@ describe('ad attribution', () => {
     await owner.post(`/v1/conversations/${c.id}/status`, { status: 'resolved', expectedVersion: c.version }).expect(200);
     const day = (d: Date) => d.toISOString().slice(0, 10);
     const from = day(new Date(Date.now() - (ATTRIBUTION_WINDOW_DAYS + 5) * 86_400_000));
-    const r = await report(owner, `?from=${from}&to=${day(new Date())}`);
+    // "Today" in the company's time zone (Asia/Dubai, UTC+4): after 20:00 UTC it is already tomorrow there.
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dubai' }).format(new Date());
+    const r = await report(owner, `?from=${from}&to=${today}`);
     expect(adRow(r, adId)).toMatchObject({ conversations: 1, resolved: 0 });
   });
 

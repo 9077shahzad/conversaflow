@@ -14,6 +14,19 @@ bound to their number (P1), and per-number webhook authentication with replay pr
 | P1 | A partner number's sealed API key is not tied to that number. Someone able to write to the database as platform staff could swap two numbers' keys, so one number's messages would go out on another number of the same partner account. | Low. It needs a platform-staff database write, which is already fully trusted; no customer can do it, and 360dialog keys only work for their own number, so a swapped key fails rather than sending wrongly in most set-ups. | Seal the number id with the key and check it when the key is opened. A small change; do it with the first live partner number. | Accepted for test mode only; to fix before the first live partner number |
 | P2 | The 360dialog webhook uses one shared secret header for all numbers and has no time limit, so a captured request could be replayed. | Low. Replayed messages and statuses are already ignored: each message and status is applied once by its WhatsApp id, and charges are once per message. The header is only sent over HTTPS. | Use 360dialog's per-number webhook settings with a separate secret per number, reject requests whose message timestamps are older than a few minutes, and keep a short record of request ids already seen; rotate secrets every quarter. Built and tested when the partner account exists. | Accepted for test mode only; to fix before the first live partner number |
 
+## Smaller points from the payment-recovery rechecks (open, low)
+
+None of these can credit twice or take money without a record. They are recorded for the work before live payments.
+
+- A top-up released for credit whose lookup keeps answering "pending" is asked about every ten minutes with no end;
+  add an alert after a few days.
+- Recovery looks top-ups up one at a time (up to 100 a minute); watch Stripe's rate limit at volume. Finding an
+  automatic charge whose answer was lost uses Stripe's search, which can lag by a minute or so.
+- Only the platform-staff database role can lift a hold, by design; a database administrator would need to use the
+  console function too.
+- Not covered by a test yet: a dispute for an automatic top-up whose Stripe reference was never saved (the code holds
+  it), and a failure while keeping the record (the hold is in the same transaction, so both are undone together).
+
 Closed in 0064: L6 (ledger rows not tied to a payment) and L8 (partner figures in another currency).
 Closed in 0065: the partner route review's H1, H2, M1 to M6 and its other Low points (`design-and-tests.md`).
 

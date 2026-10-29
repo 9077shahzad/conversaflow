@@ -8,7 +8,7 @@ Stripe. No account opening, paid plan or agreement.
 | Provider | Status | Blocker or next step |
 | --- | --- | --- |
 | 360dialog | **Not sent.** | Their form (start.360dialog.com → "Connect to my software" → "For many businesses") requires a phone number, which I don't have yet. The company email to use is admin@meronatic.com. |
-| Stripe | **Sent** through Stripe's support assistant, signed in as Meronatic Solutions Group, LLC; the account's application shows as "submitted". A request for written confirmation from a Stripe person is in the agent chat queue. | Stripe's sales form (stripe.com/contact/sales, work email admin@meronatic.com, United States) sends pre-revenue companies to self-service sign-up with "no sales chat needed", so support is the channel. |
+| Stripe | **Sent.** Asked through Stripe's support assistant and then a Stripe support agent (Parv), signed in as Meronatic Solutions Group, LLC (account acct_1SvZbDEHkJJapxhg, application "submitted"). The agent pointed to stripe.com/pricing for fees and to the dashboard for currencies, and passed the remaining questions (prepaid model, our fees, SAR, reserve) to a dedicated team as an email case, **case reference sco_VX3A5bt0S8nVhl** (last character read from the chat screen; l or I), replies to admin@meronatic.com. Contact name given: Muhammad Shahzad; planning volume given: about USD 1,500 to 7,500 a month in the first year. | Stripe's sales form sends pre-revenue companies to self-service sign-up, so support was used. Waiting for the email reply; the business phone number is to follow by email when you have it. |
 
 No account was created by me, no plan activated and no agreement accepted.
 
