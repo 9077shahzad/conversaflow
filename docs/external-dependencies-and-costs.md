@@ -25,8 +25,11 @@ statement was found. Nothing here is purchased, submitted or connected; each ite
 | Calling | Business-initiated calls unavailable in US, Canada, Egypt, Vietnam, Nigeria. **Saudi Arabia and UAE not mentioned by Meta; respond.io notes "local restrictions" there** | Not verified — behind a feature flag, tested in market first |
 | Native in-chat payments | Meta's payments documentation (read 20 Oct 2026) covers India, Brazil and Mexico only | **Not documented for KSA/UAE** in Meta's official pages — plan on payment links / hosted checkout, re-check before Wave 3 |
 
-**Cost to ConversaFlow:** Meta charges each customer directly (customers add their own card during onboarding).
-ConversaFlow passes rates through; any markup would be a commercial decision to disclose (BRD §11).
+**Cost to ConversaFlow:** two arrangements (ADR-042, 29 Oct 2026). Companies set up the original way: Meta charges
+each customer directly (customers add their own card during onboarding); unchanged. Companies onboarded through the
+Solution Partner arrangement: the partner pays Meta and invoices Meronatic; ConversaFlow charges each company from a
+prepaid credit balance at Meta's rate plus a disclosed margin (`docs/credits/`). Partner and payment costs:
+`docs/credits/partner-comparison.md`, `docs/credits/payment-providers.md`.
 
 ## 2. Instagram and Messenger (Wave 4)
 

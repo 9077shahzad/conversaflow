@@ -250,3 +250,21 @@ Migration 0019 and the guard:
   writer on any table a login role can change; the two reviewed billing triggers are allowed by signature. It also
   refuses any rule, and any view over the pilot or override tables. Tests plant a function in another schema, a
   trigger and a rule; each is caught.
+
+## ADR-042 — Prepaid WhatsApp message credits through a Solution Partner (owner decision of 29 Oct 2026)
+
+Replaces ADR-021 item 4 ("customers pay Meta directly") **for companies onboarded through the new Solution Partner
+arrangement only**. Companies already set up, or set up the old way, keep paying Meta directly; their billing is not
+changed automatically (a company moves only when a credit account is opened for it, one company at a time).
+
+- **Model:** a Solution Partner pays Meta and invoices Meronatic in one consolidated bill. ConversaFlow sells each
+  company prepaid message credit at Meta's rate (through the partner) plus a configurable margin. Credits are kept
+  apart from subscription charges: own tables, own ledger, own receipt and credit-note numbers (migration 0061).
+- **Partner:** 360dialog recommended (Partner-Paid billing model), Infobip as the fallback if Saudi presence becomes a
+  requirement (`docs/credits/partner-comparison.md`). No commitment until the owner approves after seeing costs.
+- **Payments:** a provider-neutral interface with a labelled test provider; Stripe (US account under the Delaware
+  LLC) recommended for subscriptions and top-ups, Moyasar or Tap later for mada (`docs/credits/payment-providers.md`).
+  Live payments only after owner approval.
+- **Charging rules:** versioned rate cards (currency, market by calling code, category, effective date), reservation
+  before sending under the account lock, one charge per message on Meta's billable delivery status, release on
+  failure, free messages never charged. Design and test evidence: `docs/credits/design-and-tests.md`.
