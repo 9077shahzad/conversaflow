@@ -121,8 +121,8 @@ Stripe refunds pending for more than three days are escalated to a person, and a
 | The answer to an automatic charge is lost (timeout or crash), so we never learn Stripe's reference | Found at Stripe by our top-up id, its reference adopted, credited once | "the charge answer for an automatic top-up is lost…" |
 | A lookup says failed, then the payment succeeds after all | The later success is credited once | "a lookup says failed…" |
 | A lookup and a webhook at the same moment | Both lock the account and the top-up; the second sees it paid | same |
-| An event that can never be applied (unknown top-up, different amount, account closed) | If money may have been taken: kept once in `credit_unmatched_events` with a platform alert; a platform owner refunds or credits by hand and closes it in the console with what was done. A failed or expired payment took no money: logged only | "a payment that can never be applied…" |
-| A payment kept for a person whose top-up is credited later (account reopened) | The kept record closes itself, so nobody refunds a payment that was credited | "a payment arriving for a closed account…" |
+| An event that cannot be applied (unknown top-up, different amount or reference) | If money may have been taken: kept once in `credit_unmatched_events` with a platform alert; a platform owner refunds or credits by hand and closes it in the console with what was done. A failed or expired payment took no money: logged only | "a payment that can never be applied…" |
+| A payment for a top-up whose account was closed | Kept for a person, and the top-up is held: no webhook or lookup credits it. The platform owner decides **credit** (the account must be open; the next lookup credits it once) or **refunded** (returned by hand at Stripe; the top-up is closed and can never be credited) | "a payment arriving for a closed account is held…" |
 | A refund Stripe keeps pending | Asked every minute for three days, then daily, with a platform alert and a notice to the company | "M6: a refund Stripe reports as pending…" |
 
 Each credit is one ledger entry tied to its top-up, and the tests count those entries as well as the balance.

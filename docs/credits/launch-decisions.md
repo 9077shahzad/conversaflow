@@ -18,7 +18,7 @@ items 9 and 10 are approved: production refuses any payment provider and the par
 | 11 | **Production activation:** turn on Stripe live keys and the partner route in production (a configuration change I make on your approval) | You | After items 2–10 and the staging checks | Prepaid messaging in production |
 | 12 | **The four open low findings** (L5, N7, P1, P2) | You | **Decided 29 Oct:** accepted for isolated test mode only. All four are fixed and tested before the first live partner number (`open-findings.md`) | First live partner number |
 | 13 | **Meta's October 2026 pricing:** service replies after 1,000 free per number per month, and utility templates inside the 24-hour window, are now charged; ConversaFlow passes these on | You | Confirm, and add it to the customer terms | Customer communication |
-| 14 | **Payments that cannot be applied:** who checks the platform alert and refunds or credits by hand, and within what time | You | The platform owner on duty, within one working day; each case is closed in the console with what was done | Live top-ups |
+| 14 | **Payments that cannot be applied:** who checks the platform alert and decides, for each kept payment, to credit it or refund it at Stripe, and within what time | You | The platform owner on duty, within one working day; each case is closed in the console as credit, refunded or closed, with what was done | Live top-ups |
 
 Already on the general list and still needed first: staging hosting (owner action 3) and the risk decisions
 (owner action 6).
