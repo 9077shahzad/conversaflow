@@ -44,9 +44,13 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
   // push_jobs: scheduling columns of notifications waiting to be sent (migration 0052, W2.5)
   // promises: scheduling columns of confirmed promises, to warn before and mark misses (migration 0053, W2.6)
   // webhook_deliveries: scheduling columns of outgoing webhook deliveries (migration 0056, W2.8)
-  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs', 'promises', 'webhook_deliveries', 'op_quotes'],
+  cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs', 'promises', 'webhook_deliveries', 'op_quotes',
+    // credit_reservations: held reservations, to give back those never billed; credit_accounts: accounts with automatic
+    // top-up on, to find those under their threshold (migration 0061, message credits)
+    'credit_reservations', 'credit_accounts'],
   cf_identity: ['memberships'],
-  cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags'],
+  // credit_accounts, credit_entries, credit_partner_costs: opening accounts, adjustments and the monthly reconciliation (0061)
+  cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags', 'credit_accounts', 'credit_entries', 'credit_partner_costs'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
 };
 /**
@@ -115,6 +119,15 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // cf_channel: quote acceptance link lookup; cf_dispatch: sent quotes past their validity (migration 0059, Operator slice 1)
   'op_quote_link_route(bytea)': 'ed5ff7a18158cc475cfb18105e1f5c38',
   'op_quotes_expiring(integer)': '03b46d3982a3b02e4094c65aab165cbb',
+  // Message credits (migration 0061): worker scans (cf_dispatch) and token-bound console functions (cf_ops).
+  'credit_reservations_stale(integer)': '157b05a934b72cf1d19f620ace0f5a68',
+  'credit_auto_topup_due(integer)': '7fd6d910161faac1d3059eaea7a6f83b',
+  'platform_credit_open_account(text,uuid,text,bigint)': '7f189ac53de882b0f03404f5ad3c07b0',
+  'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '0314fbcb05e0a1d2402a9506e939cf06',
+  'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
+  'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
+  'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': 'd7bbfabe109450e56094143dfd2ad04a',
+  'platform_credit_reconciliation(text,date)': '26e6eb367994a46088634451391a923a',
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
@@ -147,6 +160,8 @@ const SHARED_TABLES = [
   'mfa_recovery_codes', 'mfa_reset_requests', 'permissions', 'plan_entitlements', 'plan_versions', 'plans', 'platform_audit_events',
   'platform_staff', 'provider_allowances', 'provider_rates', 'retention_policies', 'schema_migrations', 'sessions', 'tenants',
   'trial_caps', 'trial_policy', 'user_credentials', 'users', 'system_role_grants',
+  // Message credits (0061): the platform's price lists and settings, the same for every company.
+  'credit_rate_cards', 'credit_rate_lines', 'credit_rate_markets', 'credit_settings',
 ];
 /**
  * Non-built-in functions called by any row-security policy, pinned to md5(pg_get_functiondef || owner). Replacing

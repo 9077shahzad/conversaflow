@@ -174,6 +174,13 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'قوائم الأسعار' : 'Price lists' })).toBeVisible();
       await checkPage(page, locale, 'operator', view);
 
+      // Prepaid message credits (0061): test-mode banner, balance from the demo's simulated top-up, receipt listed.
+      await page.goto(`/${locale}/app/credits`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'رصيد الرسائل' : 'Message credits');
+      await expect(page.getByText(locale === 'ar' ? /وضع الاختبار: لا تُنقل أي أموال/ : /Test mode: no money moves/)).toBeVisible();
+      await expect(page.getByRole('button', { name: /CR-\d{4}-\d{6}/ })).toBeVisible();
+      await checkPage(page, locale, 'credits', view);
+
       // The customer's quote page without a link: a plain explanation, no sign-in.
       await page.goto(`/${locale}/q`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'هذا الرابط لا يعمل' : 'This link does not work');

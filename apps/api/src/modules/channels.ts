@@ -224,6 +224,8 @@ const StatusUpdate = z.object({
   recipient_id: z.string().max(40).optional(),
   biz_opaque_callback_data: z.string().max(512).optional(),
   errors: z.array(z.object({ code: z.union([z.number(), z.string()]).optional(), title: z.string().optional() }).passthrough()).optional(),
+  // Meta's pricing for this message (per-message pricing): whether it is billable and its category (message credits).
+  pricing: z.object({ billable: z.boolean().optional(), category: z.string().max(40).optional(), type: z.string().max(40).optional() }).passthrough().optional(),
 }).passthrough();
 const ChangeValue = z.object({
   metadata: z.object({ phone_number_id: z.string().min(1).max(64), display_phone_number: z.string().max(32).optional() }),
@@ -279,7 +281,8 @@ export type ParsedEvent =
       occurredAt: Date; type: string; body: string | null; referral: Record<string, unknown> | null; raw: unknown;
       media: { type: MediaType; id: string; mime: string | null; filename: string | null } | null }
   | { kind: 'status'; providerNumberId: string; key: string; providerMessageId: string; status: 'sent' | 'delivered' | 'read' | 'failed';
-      occurredAt: Date; errorCode: string | null; callbackData: string | null; raw: unknown };
+      occurredAt: Date; errorCode: string | null; callbackData: string | null; raw: unknown;
+      pricing: { billable: boolean | null; category: string | null; type: string | null } | null };
 
 /**
  * Provider timestamps are capped at the time we receive them, so a timestamp in the future can never keep the
@@ -326,6 +329,7 @@ export function parseWebhook(payload: unknown, receivedAt = Date.now()): { event
           kind: 'status', providerNumberId: number, key: `st:${s.id}:${s.status}`, providerMessageId: s.id, status: s.status,
           occurredAt: providerTime(s.timestamp, receivedAt), errorCode: code === undefined ? null : String(code),
           callbackData: s.biz_opaque_callback_data ?? null, raw: s,
+          pricing: s.pricing ? { billable: s.pricing.billable ?? null, category: s.pricing.category ?? null, type: s.pricing.type ?? null } : null,
         });
       }
     }

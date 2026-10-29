@@ -19,6 +19,7 @@ import { SavedRepliesService, TagsService } from '../modules/inbox-tools';
 import { CampaignRunner, CampaignsService } from '../modules/campaigns';
 import { Sender } from '../modules/sender';
 import { Notifier } from '../worker/notifier';
+import { CreditsService, createPaymentProvider } from '../modules/credits';
 
 const PASSWORD = 'Demo-Only-Password-2026';
 
@@ -168,6 +169,29 @@ async function main() {
     const replies = new SavedRepliesService(deps);
     await replies.create(ownerActor, { title: 'Opening hours', body: 'Hi {name}, we are open Sunday to Wednesday 8:00–17:00 and Thursday 8:00–13:00.', language: 'en' });
     await replies.create(ownerActor, { title: 'مواعيد العمل', body: 'مرحبًا {name}، نعمل من الأحد إلى الأربعاء من 8:00 إلى 17:00، والخميس من 8:00 إلى 13:00.', language: 'ar' });
+  }
+
+  // Prepaid message credits (test mode): an account opened as platform staff would, demo rates (not Meta's prices), and
+  // one simulated top-up with its receipt. Only when the local owner connection is available.
+  if (process.env.DATABASE_URL) {
+    const ownerPool = createPool(process.env.DATABASE_URL, 1);
+    const c = await ownerPool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query('SET LOCAL ROLE cf_ops');
+      await c.query(`INSERT INTO credit_accounts (tenant_id, currency, low_threshold_minor) VALUES ($1, 'SAR', 5000)`, [tenant.id]);
+      if (!(await c.query(`SELECT 1 FROM credit_rate_cards WHERE currency = 'SAR'`)).rowCount) {
+        const card = (await c.query<{ id: string }>(`INSERT INTO credit_rate_cards (currency, effective_from, source) VALUES ('SAR', now() - interval '1 minute', 'Demo rates (not Meta prices)') RETURNING id`)).rows[0]!.id;
+        await c.query(`INSERT INTO credit_rate_lines (card_id, market, category, unit_cost_minor) VALUES
+          ($1, 'saudi_arabia', 'marketing', 17), ($1, 'saudi_arabia', 'utility', 4), ($1, 'saudi_arabia', 'authentication', 4),
+          ($1, 'other', 'marketing', 25), ($1, 'other', 'utility', 6), ($1, 'other', 'authentication', 6)`, [card]);
+        await c.query(`INSERT INTO credit_rate_markets (card_id, prefix, market) VALUES ($1, '966', 'saudi_arabia')`, [card]);
+      }
+      await c.query('COMMIT');
+    } finally { c.release(); await ownerPool.end(); }
+    const credits = new CreditsService(deps, createPaymentProvider('test', deps.keys.webhookSecrets, config.APP_ORIGIN));
+    const top = await credits.startTopUp(actor, { amountMinor: 20000 });
+    await credits.simulateCheckout(actor, top.id, 'succeeded');
   }
 
   console.log(JSON.stringify({ ownerEmail, password: PASSWORD, tenantId: tenant.id }));

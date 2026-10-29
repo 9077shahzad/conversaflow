@@ -4,6 +4,7 @@ import { Errors } from '../core/errors';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
 import { applyStatus } from './sender';
+import { pricingFrom } from './credits';
 import { InboundProcessor } from './inbound';
 
 /**
@@ -131,13 +132,13 @@ export class HealthService {
   /** Re-applies delivery statuses that arrived before their message was recorded. Safe to repeat. */
   async reapplyStatuses(actor: TenantActor) {
     return withContext(this.deps.db, actor, async (tx) => {
-      const waiting = (await tx.query<{ id: string; wamid: string; status: string; code: string | null; ref: string | null }>(
+      const waiting = (await tx.query<{ id: string; wamid: string; status: string; code: string | null; ref: string | null; pricing: unknown }>(
         `SELECT id, payload->>'id' AS wamid, payload->>'status' AS status, payload#>>'{errors,0,code}' AS code,
-                payload->>'biz_opaque_callback_data' AS ref
+                payload->>'biz_opaque_callback_data' AS ref, payload->'pricing' AS pricing
          FROM webhook_events WHERE kind = 'status' AND outcome = 'orphan_status' ORDER BY received_at LIMIT 500`)).rows;
       const result = { applied: 0, stillWaiting: 0, stale: 0 };
       for (const w of waiting) {
-        const outcome = await applyStatus(tx, w.wamid, w.status, w.code, w.ref);
+        const outcome = await applyStatus(tx, w.wamid, w.status, w.code, w.ref, pricingFrom(w.pricing));
         if (outcome === 'orphan_status') { result.stillWaiting++; continue; }
         await tx.query('UPDATE webhook_events SET outcome = $2, processed_at = now() WHERE id = $1', [w.id, outcome]);
         if (outcome === 'applied') result.applied++; else result.stale++;

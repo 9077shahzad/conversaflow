@@ -5,6 +5,7 @@ import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type MediaSendInput
 import { outboundTypeFor } from './media';
 import { claimCampaignSend } from './campaign-limits';
 import { stopTimerOnReply } from './sla';
+import { pricingFrom, releaseReservation, reserveForSend, settleOnStatus, type Pricing } from './credits';
 
 /**
  * Reliable outbound sending (BRD v1.2 Wave 1; architecture extension AX-3).
@@ -254,6 +255,14 @@ export class Sender {
         await this.finishFailed(tx, row, 'blocked', (refusal2 ?? mediaRefusal)!, 'done');
         return { done: 'failed' as const };
       }
+      // Prepaid message credits (migration 0061): a paid message reserves its price first, under the account lock, so
+      // sends at the same time can never spend more than the balance. Companies paying Meta directly are not affected.
+      const credit = await reserveForSend(tx, { tenantId, messageId: row.message_id, kind: row.kind, category: tpl?.category ?? null,
+        to: ctx.wa as string, lastInboundAt: ctx.last_inbound_at });
+      if (credit === 'insufficient_credit' || credit === 'no_rate') {
+        await this.finishFailed(tx, row, 'blocked', credit === 'no_rate' ? 'no_credit_rate' : 'insufficient_credit', 'done');
+        return { done: 'failed' as const };
+      }
       // Campaign limits, checked again now and atomically (owner instruction of 21 Oct 2026): a contact over its
       // frequency limits is not sent the message; a number with no room left under its daily limit holds it (no attempt
       // counted) until room frees up. On success the message is counted in this same transaction.
@@ -397,8 +406,10 @@ export class Sender {
    * finding 3), and that answer wins. The job is closed either way.
    */
   private async finishFailed(tx: Tx, row: JobRow, kind: Exclude<FailureKind, 'provider_reported'>, code: string, jobState: 'done' | 'dead') {
-    await tx.query(`UPDATE messages SET status = 'failed', failure_kind = $2, error_code = $3 WHERE id = $1 AND status IN ('queued', 'submitting')`,
+    const failed = await tx.query(`UPDATE messages SET status = 'failed', failure_kind = $2, error_code = $3 WHERE id = $1 AND status IN ('queued', 'submitting')`,
       [row.message_id, kind, code.slice(0, 100)]);
+    // Not sent: any credit held for it is given back.
+    if (failed.rowCount) await releaseReservation(tx, row.message_id, `not_sent:${code}`);
     await this.closeJob(tx, row.job_id, jobState, code);
   }
 
@@ -449,6 +460,7 @@ export async function lockProviderId(tx: Tx, providerMessageId: string) {
 /** Applies a delivery status. Statuses only move forward. Matches by provider id, or by our callback reference. */
 export async function applyStatus(
   tx: Tx, providerMessageId: string, status: string, errorCode: string | null, callbackData: string | null,
+  pricing: Pricing | null = null,
 ): Promise<'applied' | 'stale_status' | 'orphan_status'> {
   await lockProviderId(tx, providerMessageId);
   const rank = STATUS_RANK[status];
@@ -463,6 +475,7 @@ export async function applyStatus(
     // Outgoing webhooks (W2.8): only real changes are reported.
     const r = byId.rows[0] as { id: string; tenant_id: string; conversation_id: string };
     await emitEvent(tx, r.tenant_id, 'message.status', { messageId: r.id, conversationId: r.conversation_id, status, errorCode: status === 'failed' ? errorCode : null });
+    await settleOnStatus(tx, r.tenant_id, r.id, status, pricing);
     return 'applied';
   }
   if (callbackData && /^[0-9a-f-]{36}$/i.test(callbackData)) {
@@ -476,6 +489,7 @@ export async function applyStatus(
     if (byRef.rowCount) {
       const r = byRef.rows[0] as { id: string; tenant_id: string; conversation_id: string };
       await emitEvent(tx, r.tenant_id, 'message.status', { messageId: r.id, conversationId: r.conversation_id, status, errorCode: status === 'failed' ? errorCode : null });
+      await settleOnStatus(tx, r.tenant_id, r.id, status, pricing);
       await tx.query(`UPDATE send_jobs SET state = 'done', lease_until = NULL, updated_at = now() WHERE message_id = $1::uuid AND state <> 'dead'`, [callbackData]);
       // An uncertain reply turned out to be accepted: it answered the customer.
       if (status !== 'failed') {
@@ -486,18 +500,20 @@ export async function applyStatus(
       return 'applied';
     }
   }
-  const exists = await tx.query(`SELECT 1 FROM messages WHERE provider_message_id = $1 AND direction = 'out'`, [providerMessageId]);
+  const exists = await tx.query<{ id: string; tenant_id: string }>(`SELECT id, tenant_id FROM messages WHERE provider_message_id = $1 AND direction = 'out'`, [providerMessageId]);
+  // A status that arrives out of order (delivered after read) still carries the pricing: it is settled, once.
+  if (exists.rows[0]) await settleOnStatus(tx, exists.rows[0].tenant_id, exists.rows[0].id, status === 'failed' ? 'stale_failed' : status, pricing);
   return exists.rowCount ? 'stale_status' : 'orphan_status';
 }
 
 /** Statuses that arrived before the provider id was recorded (out of order) are applied once it is. */
 export async function applyOrphanStatuses(tx: Tx, messageId: string, providerMessageId: string) {
-  const orphans = await tx.query<{ id: string; status: string; code: string | null }>(
-    `SELECT id, payload->>'status' AS status, payload#>>'{errors,0,code}' AS code FROM webhook_events
+  const orphans = await tx.query<{ id: string; status: string; code: string | null; pricing: unknown }>(
+    `SELECT id, payload->>'status' AS status, payload#>>'{errors,0,code}' AS code, payload->'pricing' AS pricing FROM webhook_events
      WHERE kind = 'status' AND outcome = 'orphan_status' AND (payload->>'id' = $1 OR payload->>'biz_opaque_callback_data' = $2)
      ORDER BY received_at`, [providerMessageId, messageId]);
   for (const o of orphans.rows) {
-    await applyStatus(tx, providerMessageId, o.status, o.code, null);
+    await applyStatus(tx, providerMessageId, o.status, o.code, null, pricingFrom(o.pricing));
     await tx.query(`UPDATE webhook_events SET outcome = 'applied', processed_at = now() WHERE id = $1`, [o.id]);
   }
 }

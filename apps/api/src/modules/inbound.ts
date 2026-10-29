@@ -182,7 +182,7 @@ export class InboundProcessor {
         for (const { row, e } of items) {
           const outcome = e.kind === 'message'
             ? await applyInboundMessage(tx, tenantId, connectionId, e, assignmentLocked)
-            : e.kind === 'status' ? await applyStatus(tx, e.providerMessageId, e.status, e.errorCode, e.callbackData) : 'applied';
+            : e.kind === 'status' ? await applyStatus(tx, e.providerMessageId, e.status, e.errorCode, e.callbackData, e.pricing) : 'applied';
           results.push({ id: row.id, outcome });
         }
       }

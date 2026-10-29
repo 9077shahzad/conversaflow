@@ -133,6 +133,21 @@ async function populate(owner: Client, label: string, tenantId: string) {
     (await tx.query<{ body: string }>('SELECT body FROM messages WHERE id = $1', [sent.body.messageId])).rows[0]!.body);
   await request(t.app.getHttpServer()).post('/v1/quote/accept').set('X-Requested-With', 'conversaflow')
     .set('X-Quote-Link', /#([A-Za-z0-9_-]{43})/.exec(qmsg)![1]!).send({ quoteNumber: 1, agree: true }).expect(200);
+  // Prepaid message credits (0061): an account, a price list, a test top-up (receipt, payment event), a refund, a saved
+  // test card, a reservation for a sent message, a low-balance notice and the partner's monthly figure.
+  await staff.post(`/v1/platform/tenants/${tenantId}/credits/account`, { currency: 'SAR', lowThresholdMinor: 100000 }).expect(201);
+  const card = (await staff.post('/v1/platform/credits/rate-cards', { currency: 'SAR', effectiveFrom: new Date(Date.now() + 300).toISOString(), source: `Isolation ${label}`,
+    lines: [{ market: 'other', category: 'marketing', unitCostMinor: 50 }], markets: [] }).expect(201)).body;
+  const top = (await owner.post('/v1/credits/topups', { amountMinor: 10000 }).expect(201)).body;
+  await owner.post(`/v1/credits/test/topups/${top.id}/complete`, { outcome: 'succeeded' }).expect(200);
+  await owner.post('/v1/credits/refunds', { topupId: top.id, amountMinor: 1000, reason: 'Isolation fixture' }).expect(201);
+  await owner.post('/v1/credits/test/methods', { last4: '4242' }).expect(201);
+  await withContext(t.deps.db, { tenantId, userId: null }, async (tx) => {
+    await tx.query(`INSERT INTO credit_reservations (message_id, tenant_id, rate_card_id, market, category, cost_minor, price_minor, margin_bp)
+                    VALUES ($1, $2, $3, 'other', 'marketing', 50, 60, 2000)`, [sent.body.messageId, tenantId, card.id]);
+    await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, reserved_delta, message_id) VALUES ($1, 'reserve', 0, 60, $2)`, [tenantId, sent.body.messageId]);
+  });
+  await staff.put(`/v1/platform/tenants/${tenantId}/credits/partner-cost`, { month: new Date().toISOString().slice(0, 7), currency: 'SAR', costMinor: 0, reference: `ISO-${label}` }).expect(200);
   const branch = (await owner.post('/v1/branches', { name: `Branch ${label}` }).expect(201)).body;
   const team = (await owner.post('/v1/teams', { name: `Team ${label}`, branchId: branch.id }).expect(201)).body;
   const agentId = (await owner.get('/v1/members').expect(200)).body.find((m: { roles: string[] }) => m.roles.includes('agent')).id;

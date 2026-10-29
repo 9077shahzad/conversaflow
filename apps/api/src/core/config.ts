@@ -64,13 +64,20 @@ const Schema = z.object({
   /** Development and tests only: lets outgoing webhooks reach private addresses (never in production). */
   WEBHOOKS_ALLOW_PRIVATE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
+  /**
+   * Payment provider for prepaid message-credit top-ups (migration 0061). `test`: a clearly labelled stand-in where
+   * no money moves (default outside production; refused in production). `none`: top-ups are unavailable. A real
+   * provider is added only after the owner approves the payment account.
+   */
+  CREDITS_PROVIDER: z.enum(['none', 'test']).optional(),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
   SANDBOX_WEBHOOK_SECRET: z.string().min(16).optional(),
   /** Token echoed during webhook verification (hub.verify_token). Generated per process when not set. */
   SANDBOX_VERIFY_TOKEN: z.string().min(16).optional(),
 });
 
-export type Config = Omit<z.infer<typeof Schema>, 'CHANNEL_SANDBOX_ENABLED' | 'INBOUND_APPLY'> & { CHANNEL_SANDBOX_ENABLED: boolean; INBOUND_APPLY: 'worker' | 'request' };
+export type Config = Omit<z.infer<typeof Schema>, 'CHANNEL_SANDBOX_ENABLED' | 'INBOUND_APPLY' | 'CREDITS_PROVIDER'>
+  & { CHANNEL_SANDBOX_ENABLED: boolean; INBOUND_APPLY: 'worker' | 'request'; CREDITS_PROVIDER: 'none' | 'test' };
 
 /** Reads configuration from the environment and refuses to start when anything required is missing. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -98,5 +105,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (parsed.data.NODE_ENV === 'production' && inbound !== 'worker') {
     throw new Error('Invalid configuration: production requires INBOUND_APPLY=worker (incoming events are applied by the worker).');
   }
-  return { ...parsed.data, CHANNEL_SANDBOX_ENABLED: sandbox, INBOUND_APPLY: inbound };
+  const credits = parsed.data.CREDITS_PROVIDER ?? (parsed.data.NODE_ENV === 'production' ? 'none' : 'test');
+  if (parsed.data.NODE_ENV === 'production' && credits === 'test') {
+    throw new Error('Invalid configuration: production refuses CREDITS_PROVIDER=test (the test payment provider moves no money).');
+  }
+  return { ...parsed.data, CHANNEL_SANDBOX_ENABLED: sandbox, INBOUND_APPLY: inbound, CREDITS_PROVIDER: credits };
 }

@@ -1,5 +1,6 @@
 /// <reference types="multer" />
 import { OperatorService, QuotePortalService, QUOTE_LINK_HEADER } from '../modules/operator';
+import { CreditsService } from '../modules/credits';
 import { SetupService } from '../modules/setup';
 import { OutcomesService } from '../modules/outcomes';
 import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
@@ -450,6 +451,80 @@ export class PlatformController {
   @Get('tenants/:id/members')
   async supportMembers(@CurrentSession() s: AuthSession, @Param('id') id: string) {
     return this.platform.supportView(await this.platform.requireStaff(s), id, 'members');
+  }
+
+  // Prepaid message credits (migration 0061): platform owners only, each action bound to the session in the database.
+  @Post('tenants/:id/credits/account') @HttpCode(201)
+  async creditOpen(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.creditOpenAccount(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+  @Post('credits/rate-cards') @HttpCode(201)
+  async creditRates(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.creditPublishRates(await this.platform.requireStaff(s, 'platform_owner'), body);
+  }
+  @Put('credits/margin')
+  async creditMargin(@CurrentSession() s: AuthSession, @Body() body: unknown) {
+    return this.platform.creditSetMargin(await this.platform.requireStaff(s, 'platform_owner'), body);
+  }
+  @Post('tenants/:id/credits/adjustments') @HttpCode(201)
+  async creditAdjust(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.creditAdjust(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+  @Put('tenants/:id/credits/partner-cost')
+  async creditPartnerCost(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.creditPartnerCost(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+  @Get('credits/reconciliation/:month')
+  async creditReconciliation(@CurrentSession() s: AuthSession, @Param('month') month: string) {
+    return this.platform.creditReconciliation(await this.platform.requireStaff(s, 'platform_owner'), month);
+  }
+}
+
+/** Prepaid WhatsApp message credits for this company (migration 0061). Separate from the subscription. */
+@Controller('v1/credits')
+export class CreditsController {
+  constructor(@Inject(CreditsService) private readonly credits: CreditsService) {}
+
+  @RequirePermission('billing.read') @Get()
+  account(@CurrentActor() actor: TenantActor) { return this.credits.account(actor); }
+  @RequirePermission('billing.read') @Get('entries')
+  entries(@CurrentActor() actor: TenantActor, @Query() q: { before?: string; limit?: string }) { return this.credits.entries(actor, q); }
+  @RequirePermission('billing.read') @Get('topups')
+  topups(@CurrentActor() actor: TenantActor) { return this.credits.topups(actor); }
+  @RequirePermission('billing.read') @Get('documents/:id')
+  document(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.credits.document(actor, id); }
+  @RequirePermission('billing.read') @Get('statements/:month')
+  statement(@CurrentActor() actor: TenantActor, @Param('month') month: string) { return this.credits.statement(actor, month); }
+  @RequirePermission('billing.read') @Post('notices/read') @HttpCode(200)
+  noticesRead(@CurrentActor() actor: TenantActor) { return this.credits.markNoticesRead(actor); }
+
+  @RequirePermission('billing.manage') @Post('topups') @HttpCode(201)
+  topUp(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.credits.startTopUp(actor, body); }
+  @RequirePermission('billing.manage') @Put('settings')
+  settings(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.credits.saveSettings(actor, body); }
+  @RequirePermission('billing.manage') @Put('auto-topup')
+  auto(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.credits.setAuto(actor, body); }
+  @RequirePermission('billing.manage') @Post('refunds') @HttpCode(201)
+  refund(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.credits.refund(actor, body); }
+
+  // Test mode only (refused in production and with any real provider).
+  @RequirePermission('billing.manage') @Post('test/topups/:id/complete') @HttpCode(200)
+  simulate(@CurrentActor() actor: TenantActor, @Param('id') id: string, @Body() body: { outcome?: string }) {
+    return this.credits.simulateCheckout(actor, id, body?.outcome === 'failed' ? 'failed' : 'succeeded');
+  }
+  @RequirePermission('billing.manage') @Post('test/methods') @HttpCode(201)
+  testMethod(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.credits.addTestMethod(actor, body); }
+}
+
+/** Payment provider events for credit top-ups: the signature over the exact bytes is checked before anything else. */
+@Controller('v1/webhooks/credits')
+export class CreditPaymentWebhookController {
+  constructor(@Inject(CreditsService) private readonly credits: CreditsService) {}
+  @SignedWebhook() @Post(':provider') @HttpCode(200)
+  async receive(@Param('provider') provider: string, @Req() req: CfRequest & { rawBody?: Buffer }) {
+    const sig = req.headers['x-cf-payment-signature'];
+    const outcome = await this.credits.handleEvent(provider, req.rawBody?.toString('utf8') ?? '', typeof sig === 'string' ? sig : undefined);
+    return { outcome };
   }
 }
 

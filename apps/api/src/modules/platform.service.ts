@@ -27,6 +27,22 @@ const MfaResetRequest = z.object({
     // At most 5 digits in total, of any script, whatever separates them (recheck of candidate 3, L-A).
     .refine((v) => (v.match(/\p{Nd}/gu) ?? []).length < 6, 'Do not record document or account numbers; describe the check in words (write dates as "20 Oct")'),
 });
+// Prepaid message credits (migration 0061).
+const CreditAccountRequest = z.object({ currency: z.enum(['SAR', 'AED', 'USD']), lowThresholdMinor: z.number().int().min(0).max(10_000_000).default(0) }).strict();
+const CreditRatesRequest = z.object({
+  currency: z.enum(['SAR', 'AED', 'USD']),
+  effectiveFrom: z.string().datetime({ offset: true }),
+  source: z.string().trim().min(3).max(300),
+  lines: z.array(z.object({ market: z.string().regex(/^[a-z_]{2,40}$/), category: z.enum(['marketing', 'utility', 'authentication', 'service']),
+    unitCostMinor: z.number().int().min(0).max(1_000_000) }).strict()).min(1).max(2000),
+  markets: z.array(z.object({ prefix: z.string().regex(/^[0-9]{1,6}$/), market: z.string().regex(/^[a-z_]{2,40}$/) }).strict()).max(500).default([]),
+}).strict();
+const CreditMarginRequest = z.object({ tenantId: z.string().uuid().nullable(), marginBp: z.number().int().min(0).max(20000).nullable() }).strict();
+const CreditAdjustRequest = z.object({ amountMinor: z.number().int().refine((v) => v !== 0, 'not zero').refine((v) => Math.abs(v) <= 100_000_000, 'too large'),
+  note: z.string().trim().min(5).max(300) }).strict();
+const PartnerCostRequest = z.object({ month: z.string().regex(/^\d{4}-\d{2}$/), currency: z.enum(['SAR', 'AED', 'USD']), costMinor: z.number().int().min(0),
+  messageCount: z.number().int().min(0).nullable().default(null), reference: z.string().trim().min(2).max(200) }).strict();
+
 const PilotRequest = z.object({
   seats: z.number().int().min(1).max(50).default(10),
   days: z.number().int().min(7).max(180).default(90),
@@ -151,6 +167,51 @@ export class PlatformService {
   async revokeSupport(staff: StaffActor, grantId: string) {
     if (!isUuid(grantId)) throw Errors.notFound('Grant');
     await this.run(staff, (tx) => tx.query('SELECT platform_revoke_support($1, $2)', [staff.token, grantId]));
+  }
+
+  // --- Prepaid message credits (owner decision of 29 Oct 2026) ---
+  async creditOpenAccount(staff: StaffActor, tenantId: string, input: unknown) {
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    const b = parse(CreditAccountRequest, input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_credit_open_account($1, $2, $3, $4)', [staff.token, tenantId, b.currency, b.lowThresholdMinor]));
+    return { tenantId, currency: b.currency };
+  }
+  async creditPublishRates(staff: StaffActor, input: unknown) {
+    const b = parse(CreditRatesRequest, input);
+    const id = await this.run(staff, async (tx) => (await tx.query<{ id: string }>('SELECT platform_credit_publish_rates($1, $2, $3, $4, $5, $6) AS id',
+      [staff.token, b.currency, b.effectiveFrom, b.source, JSON.stringify(b.lines), JSON.stringify(b.markets)])).rows[0]!.id);
+    return { id };
+  }
+  async creditSetMargin(staff: StaffActor, input: unknown) {
+    const b = parse(CreditMarginRequest, input);
+    if (b.tenantId === null && b.marginBp === null) throw Errors.badRequest('The default margin needs a value.');
+    await this.run(staff, (tx) => tx.query('SELECT platform_credit_set_margin($1, $2, $3)', [staff.token, b.tenantId, b.marginBp]));
+    return { ok: true };
+  }
+  async creditAdjust(staff: StaffActor, tenantId: string, input: unknown) {
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    const b = parse(CreditAdjustRequest, input);
+    const id = await this.run(staff, async (tx) => (await tx.query<{ id: string }>('SELECT platform_credit_adjust($1, $2, $3, $4) AS id',
+      [staff.token, tenantId, b.amountMinor, b.note])).rows[0]!.id);
+    return { id };
+  }
+  async creditPartnerCost(staff: StaffActor, tenantId: string, input: unknown) {
+    if (!isUuid(tenantId)) throw Errors.notFound('Company');
+    const b = parse(PartnerCostRequest, input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_credit_record_partner_cost($1, $2, $3, $4, $5, $6, $7)',
+      [staff.token, tenantId, `${b.month}-01`, b.currency, b.costMinor, b.messageCount, b.reference]));
+    return { ok: true };
+  }
+  async creditReconciliation(staff: StaffActor, month: string) {
+    if (!/^\d{4}-\d{2}$/.test(month)) throw Errors.badRequest('Month as YYYY-MM.');
+    const rows = await this.run(staff, async (tx) => (await tx.query<Record<string, unknown>>(
+      `SELECT tenant_id AS "tenantId", currency, charges, price_minor::bigint AS price, cost_minor AS cost, margin_minor AS margin,
+              partner_cost_minor AS "partnerCost", partner_count AS "partnerCount", difference_minor AS difference, partner_reference AS "partnerReference"
+       FROM platform_credit_reconciliation($1, $2)`, [staff.token, `${month}-01`])).rows);
+    const n = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    return { month, rows: rows.map((r) => ({ tenantId: r.tenantId, currency: r.currency, charges: r.charges, priceMinor: n(r.price), costMinor: n(r.cost), marginMinor: n(r.margin),
+      partnerCostMinor: n(r.partnerCost), partnerCount: r.partnerCount, differenceMinor: n(r.difference), partnerReference: r.partnerReference,
+      status: r.partnerCost === null ? 'awaiting_partner_figure' : Number(r.difference) === 0 ? 'matched' : 'difference' })) };
   }
 
   /** Support read of a company's files or members. The database refuses it without an active grant and records it. */
