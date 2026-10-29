@@ -155,6 +155,8 @@ export async function lockCreditAccount(tx: Tx): Promise<void> {
 
 /** Gives back a held reservation (the message failed, was not sent, or turned out free). Safe to call repeatedly. */
 export async function releaseReservation(tx: Tx, messageId: string, why: string) {
+  // Nothing held (every free message): no lock taken at all (recheck N2).
+  if (!(await tx.query(`SELECT 1 FROM credit_reservations WHERE message_id = $1 AND state = 'held'`, [messageId])).rowCount) return;
   if (!(await lockAccount(tx))) return;                                    // no open account: nothing to give back (L4)
   const r = (await tx.query<{ price_minor: string; tenant_id: string }>(
     `UPDATE credit_reservations SET state = 'released', settled_at = now() WHERE message_id = $1 AND state = 'held' RETURNING price_minor, tenant_id`, [messageId])).rows[0];
@@ -183,6 +185,12 @@ export async function settleOnStatus(tx: Tx, tenantId: string, messageId: string
     return;
   }
   if (pricing.billable !== true || status === 'sent') return;                  // Meta charges on delivery
+  const reserved = (await tx.query('SELECT 1 FROM credit_reservations WHERE message_id = $1', [messageId])).rowCount;
+  if (!reserved) {
+    // Only templates can be paid; a billable report for anything else is logged, never charged (and takes no lock).
+    const kind = (await tx.query<{ kind: string }>('SELECT kind FROM messages WHERE id = $1', [messageId])).rows[0]?.kind;
+    if (kind !== 'template') { console.error('credits: billable status for a non-template message', messageId); return; }
+  }
   const acct = await lockAccount(tx);
   if (!acct) return;
   if ((await tx.query(`SELECT 1 FROM credit_entries WHERE message_id = $1 AND kind = 'charge'`, [messageId])).rowCount) return;
@@ -273,10 +281,6 @@ const EventShape = z.object({
   amountMinor: z.number().int().positive(), currency: z.string().regex(/^[A-Z]{3}$/), tenantId: z.string().uuid(), topupId: z.string().uuid(), reason: z.string().max(200).optional(),
 });
 
-/** Receipt and credit-note numbers; test-mode documents say TEST so they can never pass for real ones (review L2). */
-const receiptNo = (prefix: 'CR' | 'CN', seq: string, providerExpr: string) =>
-  `'${prefix}-' || CASE WHEN ${providerExpr} = 'test' THEN 'TEST-' ELSE '' END || to_char(now(), 'YYYY') || '-' || lpad(nextval('${seq}')::text, 6, '0')`;
-
 /**
  * Applies a verified provider event to the company's top-up, once. Payment events must match the top-up's reference,
  * amount and currency exactly; a dispute may be for part of it. An event that does not match is not recorded, so the
@@ -285,8 +289,8 @@ const receiptNo = (prefix: 'CR' | 'CN', seq: string, providerExpr: string) =>
 export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEvent): Promise<string> {
   return withContext(db, { tenantId: e.tenantId, userId: null }, async (tx) => {
     if (!(await lockAccount(tx))) return 'no_account';
-    const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed: boolean; refunded_minor: string }>(
-      'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed, refunded_minor FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE', [e.topupId, provider])).rows[0];
+    const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed_minor: string }>(
+      'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed_minor FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE', [e.topupId, provider])).rows[0];
     if (!t) return 'unknown_topup';
     const amountOk = e.type === 'dispute.lost' ? e.amountMinor <= Number(t.amount_minor) : e.amountMinor === Number(t.amount_minor);
     if (t.provider_ref !== e.providerRef || !amountOk || t.currency !== e.currency) return 'mismatch';
@@ -299,7 +303,8 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
       if (t.status === 'succeeded') return outcome('already_applied');
       // A payment reported failed (or given up on) and then confirmed is credited: the money was taken (review M3).
       await tx.query(`UPDATE credit_topups SET status = 'succeeded', failure_reason = NULL, settled_at = now(),
-                        receipt_no = ${receiptNo('CR', 'credit_receipt_seq', 'provider')} WHERE id = $1`, [t.id]);
+                        receipt_no = 'CR-' || CASE WHEN provider = 'test' THEN 'TEST-' ELSE '' END || to_char(now(), 'YYYY') || '-'
+                                     || lpad(nextval('credit_receipt_seq')::text, 6, '0') WHERE id = $1`, [t.id]);
       await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, topup_id, note) VALUES ($1, 'topup', $2, $3, $4)`,
         [e.tenantId, e.amountMinor, t.id, t.kind === 'auto' ? 'automatic top-up' : t.status !== 'pending' ? `confirmed after ${t.status}` : null]);
       await checkLowBalance(tx, e.tenantId);
@@ -316,10 +321,13 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     }
     // dispute.lost: the bank took (part of) the payment back. What was already refunded is not taken twice; the rest is
     // taken back even below zero (review M3).
-    if (t.status !== 'succeeded' || t.reversed) return outcome('nothing_to_reverse');
-    const take = Math.min(e.amountMinor, Number(t.amount_minor) - Number(t.refunded_minor));
-    await tx.query('UPDATE credit_topups SET reversed = true WHERE id = $1', [t.id]);
+    // Only refunds that went through count (a pending one may still be refused, recheck N3); earlier disputes of the
+    // same payment are counted by amount, so a second partial dispute applies too (N4).
+    if (t.status !== 'succeeded') return outcome('nothing_to_reverse');
+    const refundedOk = Number((await tx.query<{ s: string }>(`SELECT coalesce(sum(amount_minor), 0) AS s FROM credit_refunds WHERE topup_id = $1 AND status = 'succeeded'`, [t.id])).rows[0]!.s);
+    const take = Math.min(e.amountMinor, Number(t.amount_minor) - refundedOk - Number(t.reversed_minor));
     if (take <= 0) return outcome('nothing_to_reverse');
+    await tx.query('UPDATE credit_topups SET reversed = true, reversed_minor = reversed_minor + $2 WHERE id = $1', [t.id, take]);
     await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, topup_id, note) VALUES ($1, 'reversal', $2, $3, $4)`,
       [e.tenantId, -take, t.id, (e.reason ?? 'dispute lost').slice(0, 300)]);
     await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'reversal', $2)`, [e.tenantId, JSON.stringify({ topupId: t.id, amountMinor: take })]);
@@ -343,6 +351,15 @@ export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: 
     answer = await provider.refund({ providerRef: r.provider_ref, amountMinor: Number(r.amount_minor), idempotencyKey: refundId });
   } catch (err) {
     console.error('refund: no answer from the provider; the worker will try again', refundId, err instanceof Error ? err.message : err);
+    // Counted; after 30 attempts the worker stops and a person is told (recheck N6). The money stays out of the balance:
+    // whether it reached the customer must be checked with the provider.
+    await withContext(db, { tenantId, userId: null }, async (tx) => {
+      const n = (await tx.query<{ attempts: number }>(`UPDATE credit_refunds SET attempts = attempts + 1 WHERE id = $1 AND status = 'pending' RETURNING attempts`, [refundId])).rows[0]?.attempts;
+      if (n === 30) {
+        await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'refund_stuck', $2)`, [tenantId, JSON.stringify({ refundId, amountMinor: Number(r.amount_minor) })]);
+        await AuditService.record(tx, { tenantId, actorUserId: null, action: 'credits.refund_stuck', ip: undefined, targetType: 'credit_refund', targetId: refundId, metadata: { attempts: n } });
+      }
+    });
     return 'pending';
   }
   return withContext(db, { tenantId, userId: null }, async (tx) => {
@@ -351,7 +368,8 @@ export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: 
     if (!still) return (await tx.query<{ status: string }>('SELECT status FROM credit_refunds WHERE id = $1', [refundId])).rows[0]!.status;
     if (answer.status === 'succeeded') {
       await tx.query(`UPDATE credit_refunds f SET status = 'succeeded', provider_ref = $2, settled_at = now(),
-                        credit_note_no = ${receiptNo('CN', 'credit_note_seq', '(SELECT t.provider FROM credit_topups t WHERE t.id = f.topup_id)')} WHERE f.id = $1`, [refundId, answer.refundRef]);
+                        credit_note_no = 'CN-' || CASE WHEN (SELECT t.provider FROM credit_topups t WHERE t.id = f.topup_id) = 'test' THEN 'TEST-' ELSE '' END
+                                         || to_char(now(), 'YYYY') || '-' || lpad(nextval('credit_note_seq')::text, 6, '0') WHERE f.id = $1`, [refundId, answer.refundRef]);
       await AuditService.record(tx, { tenantId, actorUserId: null, action: 'credits.refunded', ip: undefined, targetType: 'credit_refund', targetId: refundId, metadata: { amountMinor: Number(r.amount_minor) } });
       return 'succeeded';
     }

@@ -57,4 +57,17 @@ An independent review of the first version found 2 High, 6 Medium and 9 Low issu
 
 Accepted as they are (recorded, not changed): the worker's look-up functions are callable by the application role, as for every other worker job (L5); the application role can write ledger rows the database does not tie to a payment (defence in depth, L6); partner invoices in another currency than the company's balance show as a difference (L8).
 
-One consequence of M1: for a company on prepaid credit, the preparation and recording steps of its outgoing messages run one at a time (they are short database steps; the call to WhatsApp is not inside them). Companies paying Meta directly are not affected.
+One consequence of M1: for a company on prepaid credit, the preparation and recording steps of its outgoing **templates** run one at a time (short database steps; the call to WhatsApp is not inside them). Replies, media and companies paying Meta directly are not affected.
+
+## Recheck and further fixes (migration 0063)
+
+The reviewer rechecked the fixes and confirmed them. They found no remaining deadlock path and raised six smaller points, fixed as follows:
+
+- Campaign messages waiting for the daily limit no longer keep their credit held, so other messages can still use it.
+- The credit lock is taken only for templates; replies and media are never held up by it.
+- A refund still pending when the bank takes a payment back does not protect part of that payment.
+- A second partial dispute of the same payment is applied.
+- A refund the provider never answers is retried at most 30 times. The company is then told, and the platform owner checks it with the provider.
+- Platform reconciliation uses UTC calendar months, matching the partner's invoices. The company's own statement uses the company's time zone.
+
+As before, the worker's look-up functions remain callable by the application role, the same pattern as every other worker job.

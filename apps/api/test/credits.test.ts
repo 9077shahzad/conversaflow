@@ -8,8 +8,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { loadConfig } from '../src/core/config';
 import { signBody, type SandboxAdapter } from '../src/modules/channels';
-import { AUTO_TOPUP_CONSENT, CreditWorker, CreditsService, TestPaymentProvider, categoryOf, marketFor } from '../src/modules/credits';
+import { AUTO_TOPUP_CONSENT, CreditWorker, CreditsService, TestPaymentProvider, categoryOf, marketFor, settleRefund } from '../src/modules/credits';
 import { Sender } from '../src/modules/sender';
+import { CampaignRunner } from '../src/modules/campaigns';
 import { activateSubscription, addMember, enableMfa, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
 
 let t: TestApp;
@@ -516,6 +517,21 @@ describe('review fixes (0062)', () => {
     const part = provider_.event({ type: 'dispute.lost', providerRef: `pay_test_${top2}`, amountMinor: 1500, currency: 'SAR', tenantId: tenant, topupId: top2 });
     expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', part.signature).send(part.raw).expect(200)).body.outcome).toBe('reversed');
     expect((await account()).balanceMinor).toBe(b2 - 1500);
+    // A second partial dispute of the same payment applies too (recheck N4), never more than the payment.
+    const part2 = provider_.event({ type: 'dispute.lost', providerRef: `pay_test_${top2}`, amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: top2 });
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', part2.signature).send(part2.raw).expect(200)).body.outcome).toBe('reversed');
+    expect((await account()).balanceMinor).toBe(b2 - 5000);
+    // A refund still pending when the bank takes the payment back does not shield part of it (recheck N3).
+    const top3 = await topUp(6000);
+    const b4 = (await account()).balanceMinor;
+    provider_.refundScript.push('throw');
+    const pend = (await owner.post('/v1/credits/refunds', { topupId: top3, amountMinor: 2000, reason: 'Pending during dispute' }).expect(201)).body;
+    expect(pend.status).toBe('pending');
+    const d3 = provider_.event({ type: 'dispute.lost', providerRef: `pay_test_${top3}`, amountMinor: 6000, currency: 'SAR', tenantId: tenant, topupId: top3 });
+    await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', d3.signature).send(d3.raw).expect(200);
+    provider_.refundScript.push('fail');
+    expect(await settleRefund(t.deps.db, provider_, tenant, pend.id)).toBe('failed');
+    expect((await account()).balanceMinor).toBe(b4 - 6000);
     // Reported failed, then confirmed: credited once.
     const start = (await owner.post('/v1/credits/topups', { amountMinor: 5000 }).expect(201)).body;
     await owner.post(`/v1/credits/test/topups/${start.id}/complete`, { outcome: 'failed' }).expect(200);
@@ -523,6 +539,51 @@ describe('review fixes (0062)', () => {
     const late = provider_.event({ type: 'payment.succeeded', providerRef: `pay_test_${start.id}`, amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: start.id });
     expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', late.signature).send(late.raw).expect(200)).body.outcome).toBe('applied');
     expect((await account()).balanceMinor).toBe(b3 + 5000);
+  });
+
+  it('a refund the provider never answers stops being retried after 30 attempts and a person is told (recheck N6)', async () => {
+    await setAvailable(0);
+    const top = await topUp(5000);
+    provider_.refundScript.push(...Array(31).fill('throw'));
+    const r = (await owner.post('/v1/credits/refunds', { topupId: top, amountMinor: 1000, reason: 'Never answered' }).expect(201)).body;
+    for (let i = 0; i < 29; i++) await settleRefund(t.deps.db, provider_, tenant, r.id);
+    expect((await account()).notices.some((n) => n.kind === 'refund_stuck')).toBe(true);
+    await t.ownerDb.query('ALTER TABLE credit_refunds NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE credit_refunds SET created_at = now() - interval '10 minutes' WHERE id = $1`, [r.id]); }
+    finally { await t.ownerDb.query('ALTER TABLE credit_refunds FORCE ROW LEVEL SECURITY'); }
+    await new CreditWorker(t.deps.db, provider_).settlePendingRefunds(500);   // no longer picked up
+    provider_.refundScript.length = 0;
+    expect((await owner.get(`/v1/credits/documents/${r.id}`)).status).toBe(404);
+  });
+
+  it('campaign messages waiting for the daily limit do not keep credit held (recheck N1)', async () => {
+    await setAvailable(100000);
+    const before = (await account()).reservedMinor;
+    await app((tx) => tx.query('UPDATE tenant_settings SET campaign_daily_limit = 1, campaign_min_gap_hours = 0'));
+    const conn = (await app(async (tx) => (await tx.query<{ id: string }>('SELECT id FROM channel_connections LIMIT 1')).rows[0]!.id));
+    const c = (await owner.post('/v1/campaigns', { name: 'Credit wait', templateId: marketing.id, connectionId: conn, params: [{ source: 'static', value: 'friend' }] }).expect(201)).body;
+    await owner.post(`/v1/campaigns/${c.id}/schedule`, { at: null }).expect(200);
+    await new CampaignRunner(t.deps.db).runBatch(tenant, c.id);
+    const queued = await app(async (tx) => (await tx.query<{ id: string; contact_id: string }>(
+      `SELECT m.id, v.contact_id FROM messages m JOIN conversations v ON v.id = m.conversation_id WHERE m.campaign_id = $1`, [c.id])).rows);
+    expect(queued.length).toBeGreaterThanOrEqual(1);
+    // Today's single campaign send on this number is already used (as an earlier send would have).
+    await app(async (tx) => {
+      const conv = (await tx.query<{ id: string }>('SELECT conversation_id AS id FROM messages WHERE id = $1', [queued[0]!.id])).rows[0]!.id;
+      const m = (await tx.query<{ id: string }>(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status, template_id, template_params, campaign_id)
+         VALUES ($1, $2, 'out', 'template', 'Earlier', $3, $4, now(), 'sent', $5, '["x"]', $6) RETURNING id`, [tenant, conv, randomUUID(), ownerMembership, marketing.id, c.id])).rows[0]!;
+      await tx.query(`INSERT INTO campaign_send_counts (tenant_id, message_id, attempt, campaign_id, connection_id, contact_id, counted_at) VALUES ($1, $2, 1, $3, $4, $5, now())`,
+        [tenant, m.id, c.id, conn, queued[0]!.contact_id]);
+    });
+    await send();
+    for (const q of queued) {
+      expect((await msg(q.id)).status).toBe('queued');                          // waiting for room under the limit
+      expect([null, 'released']).toContain((await reservation(q.id))?.state ?? null);
+    }
+    expect((await account()).reservedMinor).toBe(before);
+    await owner.post(`/v1/campaigns/${c.id}/cancel`, {});
+    await app((tx) => tx.query('UPDATE tenant_settings SET campaign_daily_limit = 1000'));
   });
 
   it('an event that does not match yet is not remembered, so the provider retry is applied (M4)', async () => {

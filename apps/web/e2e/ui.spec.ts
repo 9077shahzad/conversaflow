@@ -178,7 +178,7 @@ for (const locale of ['en', 'ar'] as const) {
       await page.goto(`/${locale}/app/credits`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'رصيد الرسائل' : 'Message credits');
       await expect(page.getByText(locale === 'ar' ? /وضع الاختبار: لا تُنقل أي أموال/ : /Test mode: no money moves/)).toBeVisible();
-      await expect(page.getByRole('button', { name: /CR-\d{4}-\d{6}/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: /CR-TEST-\d{4}-\d{6}/ })).toBeVisible();
       await checkPage(page, locale, 'credits', view);
 
       // The customer's quote page without a link: a plain explanation, no sign-in.

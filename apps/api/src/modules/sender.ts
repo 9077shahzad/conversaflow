@@ -117,9 +117,10 @@ export class Sender {
   async processJob(tenantId: string, jobId: string): Promise<JobOutcome> {
     // Step 1: decide and mark `submitting`, committed before anything leaves.
     const prepared = await withContext(this.db, { tenantId, userId: null }, async (tx) => {
-      // Message credits: the company's credit account (if any) is locked before anything else, the same order as every
-      // other transaction that writes credit entries (review of 0061, M1). Companies paying Meta directly: no-op.
-      await lockCreditAccount(tx);
+      // Message credits: for a template (the only kind that can be paid), the company's credit account, if any, is locked
+      // before anything else, the same order as every other transaction that writes credit entries (review of 0061, M1).
+      // Free-form replies and media take no credit lock (recheck N2).
+      if (await isTemplateJob(tx, jobId)) await lockCreditAccount(tx);
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0];
       if (!row || row.job_state === 'done' || row.job_state === 'dead') return { done: 'nothing_to_do' as const };
       // Only the holder of a live lease may process a job (leaseNow or dispatch_claim). Explicit, as the review noted.
@@ -276,6 +277,8 @@ export class Sender {
           return { done: 'failed' as const };
         }
         if (!v.ok) {
+          // Waiting for room under the daily limit (possibly for days): its credit is not held meanwhile (recheck N1).
+          await releaseReservation(tx, row.message_id, 'waiting_for_daily_limit');
           await tx.query(`UPDATE send_jobs SET state = 'pending', lease_until = NULL, next_attempt_at = $2, last_error = 'daily_limit', updated_at = now() WHERE id = $1`,
             [jobId, v.retryAt]);
           return { done: 'retry_later' as const };
@@ -331,7 +334,7 @@ export class Sender {
 
     // Step 3: record the outcome, and the evidence for it.
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
-      await lockCreditAccount(tx);
+      if (prepared.tpl) await lockCreditAccount(tx);
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0]!;
       if (providerMessageId) {
         await lockProviderId(tx, providerMessageId);
@@ -391,7 +394,8 @@ export class Sender {
    */
   private async recordLateAnswer(tenantId: string, messageId: string, attempt: number, providerMessageId: string) {
     await withContext(this.db, { tenantId, userId: null }, async (tx) => {
-      await lockCreditAccount(tx);
+      const kind = (await tx.query<{ kind: string }>('SELECT kind FROM messages WHERE id = $1', [messageId])).rows[0]?.kind;
+      if (kind === 'template') await lockCreditAccount(tx);
       await lockProviderId(tx, providerMessageId);
       await recordAttempt(tx, tenantId, messageId, attempt, 'late_accepted', null, providerMessageId);
       if (!(await keepProviderId(tx, messageId, providerMessageId))) return;
@@ -455,6 +459,11 @@ async function keepProviderId(tx: Tx, messageId: string, providerMessageId: stri
   }
   await tx.query('UPDATE messages SET provider_message_id = $2 WHERE id = $1 AND provider_message_id IS NULL', [messageId, providerMessageId]);
   return true;
+}
+
+/** Whether a job's message is a template (kind never changes; read without locking anything). */
+async function isTemplateJob(tx: Tx, jobId: string): Promise<boolean> {
+  return (await tx.query(`SELECT 1 FROM send_jobs j JOIN messages m ON m.id = j.message_id WHERE j.id = $1 AND m.kind = 'template'`, [jobId])).rowCount === 1;
 }
 
 /** Serialises everything that touches one provider message id, so a status can never slip between two steps. */

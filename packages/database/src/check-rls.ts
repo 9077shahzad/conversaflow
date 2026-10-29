@@ -128,12 +128,12 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // Re-pinned by 0062: a card must price every paid category for the market 'other'.
   'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '21bb78a06722951c0c801b7408d13948',
   // 0062: refunds and automatic top-ups left pending, settled by the worker.
-  'credit_refunds_pending(integer)': '974d133ebb87fbdae70b6818d46177b9',
+  'credit_refunds_pending(integer)': '057e61ad768e40c0ce44347f54ad8b0a',  // re-pinned by 0063 (attempt cap)
   'credit_auto_topups_stuck(integer)': 'f25a465978167db5f2133c37aa824991',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': 'd7bbfabe109450e56094143dfd2ad04a',
-  'platform_credit_reconciliation(text,date)': '26e6eb367994a46088634451391a923a',
+  'platform_credit_reconciliation(text,date)': '58bab21a6e500b4648e9038f4d06a485',  // re-pinned by 0063 (UTC months)
 };
 /** Company tables on which the table owner has its own policy (used by billing and audit triggers; reviewed). */
 const OWNER_POLICY_TABLES = ['audit_events', 'entitlement_overrides', 'subscriptions'];
