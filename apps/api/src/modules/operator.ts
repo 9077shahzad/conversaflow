@@ -29,7 +29,7 @@ export const OPERATOR_FACTS = ['service', 'quantity', 'equipment', 'area', 'addr
 const FactState = z.enum(['unknown', 'unavailable', 'not_applicable', 'stated', 'confirmed']);
 const FactInput = z.object({ state: FactState, value: z.string().trim().max(300).optional(), original: z.string().trim().max(500).optional() }).strict()
   .refine((f) => !['stated', 'confirmed'].includes(f.state) || !!f.value, 'A stated or confirmed fact needs a value.');
-const FactsPatch = z.object({ facts: z.record(z.enum(OPERATOR_FACTS), FactInput), expectedVersion: z.number().int().min(0) }).strict();
+const FactsPatch = z.object({ facts: z.partialRecord(z.enum(OPERATOR_FACTS), FactInput), expectedVersion: z.number().int().min(0) }).strict();
 const SettingsInput = z.object({
   enabled: z.boolean().optional(),
   mode: z.enum(['off', 'assist', 'approval', 'limited']).optional(),

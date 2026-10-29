@@ -208,7 +208,7 @@ const InboundMessage = z.object({
   timestamp: epochSeconds,
   type: z.string().min(1).max(40),
   text: z.object({ body: z.string().max(4096) }).optional(),
-  referral: z.record(z.unknown()).optional(),
+  referral: z.record(z.string(), z.unknown()).optional(),
 }).passthrough();
 const MediaPart = z.object({
   id: z.string().min(1).max(200),

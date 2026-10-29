@@ -13,7 +13,7 @@ const interval = z.tuple([hhmm, hhmm]).refine(([a, b]) => a < b, 'Opening time m
 export const SettingsRequest = z
   .object({
     // Intervals of one day may not overlap (review of slice 3, finding 6: overlapping hours were counted twice).
-    businessHours: z.record(z.enum(DAYS), z.array(interval).max(4).refine((list) => {
+    businessHours: z.partialRecord(z.enum(DAYS), z.array(interval).max(4).refine((list) => {
       const sorted = [...list].sort((a, b) => a[0].localeCompare(b[0]));
       return sorted.every((x, i) => i === 0 || sorted[i - 1]![1] <= x[0]);
     }, 'Opening hours on the same day must not overlap')),
