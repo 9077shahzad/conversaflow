@@ -1,8 +1,10 @@
 # Prepaid message credits: design and test evidence (test mode)
 
-Owner decision of 29 Oct 2026 (ADR-042). Built and tested locally in **test mode**: the payment provider is a labelled
-test provider (no money moves) and WhatsApp is the sandbox (nothing leaves the machine). Nothing is hosted, no partner
-or payment account exists, and nothing is live.
+Owner decisions of 29 Oct 2026 (ADR-042, and the instruction of 18:17). Built and tested locally in **test mode**:
+payments go to a labelled test provider or to Stripe's API in test mode (only `sk_test_` keys are accepted), and
+WhatsApp goes to the sandbox or to a local stand-in for 360dialog. Nothing leaves the machine in the tests, no money
+moves, no partner or payment account exists, and nothing is live. Production refuses any payment provider, the
+partner route and opening credit accounts.
 
 ## How it works
 
@@ -12,7 +14,9 @@ or payment account exists, and nothing is live.
 | Ledger | Every change is one append-only entry (top-up, reserve, release, charge, refund, reversal, adjustment). A trigger applies it to the account in the same statement; a guard refuses any other change to the balance. | `credit_entries`, `credit_apply_entry`, `credit_accounts_guard` |
 | Rates | Rate cards per currency with an effective date; lines per market and category; markets from the longest calling-code prefix, with an `other` fallback. Cards never change; a new price is a new card. | `credit_rate_cards/lines/markets`, `platform_credit_publish_rates` |
 | Margin | Default margin plus an optional per-company margin, in basis points; price = cost × (1 + margin), rounded half-up. | `credit_settings`, `platform_credit_set_margin` |
-| Reserve | When a paid message is about to be sent (marketing or authentication template, or a utility template outside the 24-hour window), its price is reserved from the available balance under the account's row lock. Not enough credit: the message is not sent (`insufficient_credit`). | `reserveForSend` in the sender |
+| Route | Each company has exactly one messaging and billing route: `meta_direct` (the default for every existing company: it pays Meta itself and is never charged credit) or `partner_360dialog` (prepaid credit). Set only by a platform owner, one company at a time, with a reason; refused while the company has live numbers, credit, held amounts, or top-ups or refunds in progress. The database refuses a credit account, or a live number of the wrong provider, that does not match the route, and the same WhatsApp number can never be live twice. | `messaging_routes`, `platform_set_messaging_route`, triggers in 0064/0065 |
+| Partner numbers | Connected by a platform owner with the number's 360dialog API key, stored sealed (AES-256-GCM) and readable only by the API and worker. Messages, templates and media go to 360dialog in Meta's Cloud API format; its webhooks need a secret header. | `dialog360.ts`, `platform_partner_connect_channel` |
+| Reserve | When a paid message is about to be sent (any template Meta bills, and from 1 Oct 2026 replies after the number's 1,000 free service messages in the month), its price is reserved from the available balance under the account's row lock. Not enough credit: the message is not sent (`insufficient_credit`). | `reserveForSend` in the sender |
 | Charge | Meta's delivery status carries `pricing.billable` and the category. Billable and delivered (or read): charged once per message, at the reserved price, whatever the number or order of webhooks. Not billable: released. Failed: released. | `settleOnStatus` |
 | Stale | Reservations never billed are released by the worker after `reservation_hours` (72 by default). | `credit_reservations_stale`, `CreditWorker.releaseStale` |
 | Top-ups | A pending top-up, then the provider's checkout. Credit is added only from a verified, signed provider event whose company, top-up, reference, amount and currency all match; each event is applied once. Receipt `CR-YYYY-000001`. | `credit_topups`, `credit_payment_events`, `applyPaymentEvent` |
@@ -26,15 +30,24 @@ or payment account exists, and nothing is live.
 | Reconciliation | Per company and month: messages charged, price, our cost, margin, the partner's figure and the difference (`matched`, `difference`, `awaiting_partner_figure`). | `platform_credit_reconciliation` |
 | Screen | `/[locale]/app/credits` in English and Arabic with a test-mode banner. | `apps/web/app/[locale]/app/credits/page.tsx` |
 
-Payment providers plug in through one interface (`createCheckout`, `chargeSaved`, `refund`, `verifyEvent`). Only the
-test provider exists; production refuses it (`CREDITS_PROVIDER=test`), so production has no top-ups until a real
-provider is added after approval.
+Payment providers plug in through one interface (`createCheckout`, `chargeSaved`, `refund`, `refundStatus`,
+`verifyEvent`). Two exist: the test provider and Stripe (Checkout Sessions, off-session PaymentIntents, refunds and
+disputes, webhook signatures checked with a 5-minute window). Production refuses both until launch is approved.
+
+**Meta's pricing from 1 October 2026.** Service replies are charged at the utility rate after 1,000 free per number per
+month, and utility templates inside the 24-hour window are charged. Free entry-point conversations stay free. The
+software holds credit for these and charges only what Meta's status marks billable. Several replies sent at the same
+moment can pass the 1,000th together; Meta may then charge a few replies that were not held, and those are charged on
+delivery like any unreserved billable message (the balance can go slightly below zero, and paid sends then stop).
 
 ## Not built yet (needs an approval or an outside account)
 
-- The Solution Partner adapter (360dialog sends through its own endpoint and key: the WhatsApp adapter needs a new
-  base address and authentication). Needs owner actions 4 and 16.
-- A real payment provider (Stripe recommended). Needs owner action 17.
+- Live connections: a 360dialog partner account and a Stripe account (both need your approval and the written
+  provider answers). The adapters are built and tested against local stand-ins only.
+- Saving a card through Stripe for automatic top-up (Checkout in `setup` mode). Automatic top-up stays disabled until
+  the wording is approved, so this is built with the Stripe account.
+- Reading the partner's balance automatically from 360dialog: entered by a platform owner for now; the monitor raises
+  a "stale balance" alert after 24 hours without a figure.
 - Tax invoices, VAT and expiry rules: waiting for the legal and tax answers (`docs/credits/legal-review.md`).
 - Importing the partner's invoice automatically: the partner figure is entered by a platform owner for now.
 - A platform screen for rates, margins and reconciliation: the platform API exists; the screen does not.
@@ -61,19 +74,6 @@ One consequence of M1: for a company on prepaid credit, the preparation and reco
 
 ## Recheck and further fixes (migration 0063)
 
-The reviewer rechecked the fixes and confirmed them. They found no remaining deadlock path and raised six smaller points, fixed as follows:
-
-- Campaign messages waiting for the daily limit no longer keep their credit held, so other messages can still use it.
-- The credit lock is taken only for templates; replies and media are never held up by it.
-- A refund still pending when the bank takes a payment back does not protect part of that payment.
-- A second partial dispute of the same payment is applied.
-- A refund the provider never answers is retried at most 30 times. The company is then told, and the platform owner checks it with the provider.
-- Platform reconciliation uses UTC calendar months, matching the partner's invoices. The company's own statement uses the company's time zone.
-
-As before, the worker's look-up functions remain callable by the application role, the same pattern as every other worker job.
-
-## Recheck and further fixes (migration 0063)
-
 The reviewer rechecked the fixes and confirmed them, finding no lock cycle. Remaining gaps, now fixed:
 
 - **Campaign holds:** campaign messages waiting for room under the daily limit no longer keep credit held, so a large campaign cannot starve other paid messages.
@@ -81,6 +81,24 @@ The reviewer rechecked the fixes and confirmed them, finding no lock cycle. Rema
 - **Disputes:** a dispute counts only refunds that went through. A second partial dispute of the same payment applies too, never more than the payment.
 - **Refunds with no answer:** a refund the provider never answers is tried 30 times. The company is then told, and a person checks it with the provider; the money stays out of the balance until then.
 - **Reconciliation months:** platform reconciliation uses calendar months in UTC, explicitly, to match the partner's invoice. The company's own statement uses its own time zone.
+
+## Partner route review and fixes (migration 0065)
+
+An independent review of the partner route (commit 0f83560) found 2 High and 6 Medium issues and several Low ones.
+Fixed in 51daa71:
+
+| Finding | Fix |
+| --- | --- |
+| H1 A credit account opened before routes existed stayed active for a company on the direct route, which would charge it twice (Meta and us) | Such accounts are moved to the partner route, or closed if the company has a live direct number. The database also checks the route when an account is reactivated, and the code checks it again before any charge |
+| H2 A Stripe automatic top-up could be paid before our reference was saved; its webhook was then dropped with a success answer, so Stripe never retried and the customer paid without receiving credit | The event names our top-up, company, amount and currency, all checked, so its reference is adopted. Any event that cannot be applied is answered with an error, so Stripe sends it again (for up to three days) |
+| M1 Route changes and new numbers could race | One lock per company for route changes, numbers and accounts |
+| M2 A switch back to direct ignored top-ups and refunds in progress; a closed account could never be reopened | Refused while either is in progress; a closed account can be reopened in its original currency |
+| M3 Production could still move a company to the partner route | Refused in production, as is opening a credit account |
+| M4, M5 The sender decided twice whether a reply may be paid, which could take the credit lock out of order | Decided once, before any lock (a message with a hold kept counts as paid) |
+| M6 Stripe's "pending" refunds were treated as completed | Kept pending with Stripe's reference; the worker asks Stripe for the refund's state |
+| Low | Consent: a change of language is checked too. Funding: the buffer covers customers' unspent credit, figures must be in the partner's currency, closed accounts' usage counts, and the check cannot be called from a company's context. Stripe: any one of several signatures (secret rotation) is accepted; live events are refused |
+
+Six new tests cover these (`apps/api/test/partner.test.ts`, "fixes from the review of 0064").
 
 ## Test evidence (29 Oct 2026)
 
