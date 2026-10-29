@@ -76,6 +76,26 @@ exact wording, and the time, person and wording are stored:
 It charges at most one top-up at a time and within the daily limit; a declined card is not retried in a loop and the
 company is told.
 
+**Wording for review (version 1, stored in the system, status "awaiting legal review")**
+
+English:
+
+> I authorise ConversaFlow to charge the saved card the amount below whenever our available message credit falls
+> under the threshold, up to the daily limit, until I turn this off.
+
+Arabic (Modern Standard Arabic, prepared for review by counsel and a native business reader):
+
+> أفوّض ConversaFlow بخصم المبلغ المحدد أدناه من البطاقة المحفوظة كلما انخفض رصيد الرسائل المتاح لدينا عن الحد
+> المحدد، وبما لا يتجاوز الحد اليومي، إلى أن أوقف هذا التفويض.
+
+How it works in the software (migration 0064):
+- **Versions:** each version is stored word for word per language and can never be edited. A change is a new
+  version.
+- **Turning automatic top-up on:** this is refused until a platform owner marks the version approved with the legal
+  review reference. The customer must accept the text exactly as shown. The account keeps the version, the language,
+  the exact text, who accepted it and when.
+- **Retiring a version:** this turns off automatic top-up for every company that accepted it.
+
 **Questions**
 18. Is this wording enough as a merchant-initiated-transaction mandate under card scheme rules and local consumer or
     e-commerce law (even for B2B)? Does each charge need a notice, and how much in advance?
@@ -87,6 +107,9 @@ company is told.
 - Free messages (Meta's free service window, and anything Meta marks as not billable) are never charged.
 - A message is charged once, when WhatsApp confirms delivery and that it is billable; failed messages are not charged.
 - Prices are shown in the account's currency (SAR, AED or USD); the margin is configurable per company.
+
+- From 1 October 2026 Meta charges service replies (after 1,000 free per number per month) and utility templates
+  inside the 24-hour window; ConversaFlow passes these charges on to prepaid companies. Customer terms should say so.
 
 Counsel should confirm these, supply the customer-facing terms (prepaid-credit policy, refund policy, auto top-up
 terms) and say what must appear on the website before the payment provider and partner accounts are opened.
