@@ -71,3 +71,13 @@ The reviewer rechecked the fixes and confirmed them. They found no remaining dea
 - Platform reconciliation uses UTC calendar months, matching the partner's invoices. The company's own statement uses the company's time zone.
 
 As before, the worker's look-up functions remain callable by the application role, the same pattern as every other worker job.
+
+## Recheck and further fixes (migration 0063)
+
+The reviewer rechecked the fixes and confirmed them, finding no lock cycle. Remaining gaps, now fixed:
+
+- **Campaign holds:** campaign messages waiting for room under the daily limit no longer keep credit held, so a large campaign cannot starve other paid messages.
+- **Lock taken only when needed:** only template messages, the only kind that can be paid, take the company's credit lock. Free replies and media do not, so a slow file read cannot hold up credits.
+- **Disputes:** a dispute counts only refunds that went through. A second partial dispute of the same payment applies too, never more than the payment.
+- **Refunds with no answer:** a refund the provider never answers is tried 30 times. The company is then told, and a person checks it with the provider; the money stays out of the balance until then.
+- **Reconciliation months:** platform reconciliation uses calendar months in UTC, explicitly, to match the partner's invoice. The company's own statement uses its own time zone.
