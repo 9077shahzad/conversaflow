@@ -344,6 +344,9 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
       if (e.type !== 'payment.failed') {
         await tx.query(`UPDATE credit_topups SET review_hold = true WHERE id = $1 AND provider = $2 AND status <> 'succeeded'
                           AND (provider_ref IS NULL OR provider_ref = $3) AND currency = $4`, [e.topupId, provider, e.providerRef, e.currency]);
+        // The record for a person is written in the same transaction as the hold, so a hold never exists without one
+        // (recheck of 89b6d52).
+        await recordUnmatched(tx, provider, e, 'no_account');
       }
       return 'no_account';
     }
@@ -361,6 +364,12 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     if (t.provider_ref === null && amountOk && t.currency === e.currency && e.type !== 'dispute.lost') {
       await tx.query('UPDATE credit_topups SET provider_ref = $2 WHERE id = $1 AND provider_ref IS NULL', [t.id, e.providerRef]);
       t.provider_ref = e.providerRef;
+    }
+    // A dispute on a top-up never credited whose reference was never saved: held and kept, never credited later.
+    if (e.type === 'dispute.lost' && t.status !== 'succeeded' && t.provider_ref === null) {
+      await tx.query('UPDATE credit_topups SET review_hold = true WHERE id = $1', [t.id]);
+      await recordUnmatched(tx, provider, e, 'dispute_uncredited');
+      return 'dispute_uncredited';
     }
     if (t.provider_ref !== e.providerRef || !amountOk || t.currency !== e.currency) return 'mismatch';
     // Checked after the match, so a different payment for the same top-up is still kept for a person.
@@ -404,6 +413,7 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     // credited later by a webhook or a lookup, and a person closes it (recheck of 3bd80a3, M-B).
     if (t.status !== 'succeeded') {
       await tx.query('UPDATE credit_topups SET review_hold = true WHERE id = $1', [t.id]);
+      await recordUnmatched(tx, provider, e, 'dispute_uncredited');
       return outcome('dispute_uncredited');
     }
     const refundedOk = Number((await tx.query<{ s: string }>(`SELECT coalesce(sum(amount_minor), 0) AS s FROM credit_refunds WHERE topup_id = $1 AND status = 'succeeded'`, [t.id])).rows[0]!.s);
@@ -426,6 +436,12 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
  * person, and a top-up of ours is held so nothing credits it until they decide (credit it, or record a refund by hand).
  * A failure or an expiry took no money and is only logged.
  */
+/** Keeps a payment event for a person (idempotent by event id), inside the caller's transaction. */
+async function recordUnmatched(tx: Tx, provider: string, e: PaymentEvent, reason: string) {
+  await tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+    [provider, e.id, e.type, reason, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]);
+}
+
 export async function settleEventOutcome(db: Db, provider: string, e: PaymentEvent, outcome: string): Promise<string> {
   if (outcome === 'dispute_uncredited') {
     await withContext(db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
