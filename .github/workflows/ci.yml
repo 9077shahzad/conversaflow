@@ -45,7 +45,8 @@ jobs:
       CLAMD_HOST: 127.0.0.1
       CLAMD_PORT: '3310'
       REDIS_URL: redis://localhost:6379
-      FILE_STORAGE_DIR: ${{ runner.temp }}/storage
+      # Job-level env cannot use the runner context; a fixed path on the runner.
+      FILE_STORAGE_DIR: /tmp/cf-storage
     steps:
       - uses: actions/checkout@v4
         with:
