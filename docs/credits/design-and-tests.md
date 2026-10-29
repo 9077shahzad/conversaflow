@@ -100,7 +100,9 @@ Fixed in 51daa71:
 
 Six new tests cover these (`apps/api/test/partner.test.ts`, "fixes from the review of 0064").
 
-A recheck of these fixes found three more Medium points, fixed in 521e0af: starting a top-up now locks the account,
+A recheck of these fixes found three more Medium points, fixed in 521e0af, and a further recheck three more, fixed in
+e60ef18 (lost charge answers, records kept for a person closing themselves when credited, stuck refunds alerted).
+In 521e0af: starting a top-up now locks the account,
 so a route switch cannot close it in between; the migration closes old accounts instead of moving them; and events
 that cannot be applied are kept rather than refused. Lows fixed there too: one lock order when opening an account,
 Stripe refunds pending for more than three days are escalated to a person, and an event from the other Stripe mode
@@ -116,7 +118,12 @@ Stripe refunds pending for more than three days are escalated to a person, and a
 | Out of order: "expired" after "paid" | Ignored (`not_pending:succeeded`) | same |
 | Every webhook lost, or Stripe stops retrying | The worker looks each pending top-up up with Stripe directly (after 10 minutes, then at most every 10 minutes) and applies the answer through the same path; the late webhook then changes nothing | "every webhook lost…" |
 | An automatic top-up closed as unconfirmed, paid later | Looked up for three more days; credited once | "an automatic top-up closed…" |
-| An event that can never be applied (unknown top-up, different amount, account closed) | Kept once in `credit_unmatched_events` with a platform alert; a platform owner refunds or credits by hand and closes it in the console with what was done | "a payment that can never be applied…" |
+| The answer to an automatic charge is lost (timeout or crash), so we never learn Stripe's reference | Found at Stripe by our top-up id, its reference adopted, credited once | "the charge answer for an automatic top-up is lost…" |
+| A lookup says failed, then the payment succeeds after all | The later success is credited once | "a lookup says failed…" |
+| A lookup and a webhook at the same moment | Both lock the account and the top-up; the second sees it paid | same |
+| An event that can never be applied (unknown top-up, different amount, account closed) | If money may have been taken: kept once in `credit_unmatched_events` with a platform alert; a platform owner refunds or credits by hand and closes it in the console with what was done. A failed or expired payment took no money: logged only | "a payment that can never be applied…" |
+| A payment kept for a person whose top-up is credited later (account reopened) | The kept record closes itself, so nobody refunds a payment that was credited | "a payment arriving for a closed account…" |
+| A refund Stripe keeps pending | Asked every minute for three days, then daily, with a platform alert and a notice to the company | "M6: a refund Stripe reports as pending…" |
 
 Each credit is one ledger entry tied to its top-up, and the tests count those entries as well as the balance.
 

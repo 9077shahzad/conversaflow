@@ -3,14 +3,35 @@
 Owner approval of 29 Oct 2026: contact 360dialog sales (preferred candidate, subject to written confirmation) and
 Stripe. No account opening, paid plan or agreement.
 
-## Status (29 Oct 2026, 23:30 Gulf time)
+## Status (29 Oct 2026, 23:50 Gulf time)
 
-| Provider | Route | Status | Exact blocker | Alternative |
-| --- | --- | --- | --- | --- |
-| 360dialog | Web form at start.360dialog.com ("Connect to my software" → "For many businesses" → contact details). The form takes contact details only; sales reply by email. | **Not sent.** | The form requires a phone number. The owner's message of 29 Oct carried the placeholder "[INSERT NUMBER WITH COUNTRY CODE]" rather than a number. | Supply the number and I submit the form. Or submit it yourself, with your own phone and email, and paste in the text below. |
-| Stripe | Sales form at stripe.com/contact/sales. | **Not sent.** | The form refuses free email addresses (Yahoo) and requires a company-domain work email. The owner's message carried the placeholder "[INSERT VERIFIED COMPANY EMAIL]". Stripe's support contact needs a signed-in Stripe account, which I may not create. | Set up a mailbox on the company's own domain (for example on meronatic.com), send me the address, and I submit the form. Opening a Stripe account to reach support is not suggested, because sign-up accepts Stripe's services agreement. |
+| Provider | Status | Blocker or next step |
+| --- | --- | --- |
+| 360dialog | **Not sent.** | Their form (start.360dialog.com → "Connect to my software" → "For many businesses") requires a phone number, which I don't have yet. The company email to use is admin@meronatic.com. |
+| Stripe | **Sent** through Stripe's support assistant, signed in as Meronatic Solutions Group, LLC; the account's application shows as "submitted". A request for written confirmation from a Stripe person is in the agent chat queue. | Stripe's sales form (stripe.com/contact/sales, work email admin@meronatic.com, United States) sends pre-revenue companies to self-service sign-up with "no sales chat needed", so support is the channel. |
 
-Nothing has been submitted to either provider, no account has been created, and no plan or agreement has been accepted.
+No account was created by me, no plan activated and no agreement accepted.
+
+### Stripe's support assistant: preliminary answers (AI assistant, 29 Oct 2026; not a written confirmation)
+
+1. **Eligibility:** a Delaware LLC with an EIN and a US bank account is eligible whether or not its owners live in the
+   US. Owners without an SSN or ITIN may give their local tax ID plus documents showing they are not US taxpayers.
+   The account representative's ID is checked at onboarding; non-resident owners' IDs once lifetime volume passes
+   $500,000. Standard business details (legal name, EIN, address) are also needed.
+2. **Prepaid credits:** the model as described is "consistent with a standard prepaid usage-credit or usage-based
+   billing structure", which differs from stored value or money transmission; final eligibility is decided at account
+   review.
+3. **Fees:** not given in that channel; it pointed to stripe.com/pricing and stripe.com/billing/pricing, with account
+   terms confirmed after review.
+4. **Currencies:** 135+ presentment currencies; SAR and AED to be checked on the supported-currency list; charges in
+   other currencies convert to USD at settlement unless multi-currency settlement is set up.
+5. **Payouts and reserves:** first payout about seven days after the first live payment, then on the chosen schedule.
+   A reserve is not automatic; it depends on underwriting, and Stripe would email the amount and duration.
+6. **Disputes and automatic top-up:** a dispute fee applies, plus a fee to counter one. Off-session charges for
+   automatic top-up are allowed when the card was saved for future use with a customer mandate.
+7. **Stripe Tax:** for Saudi Arabia it covers B2C digital services by remote sellers; B2B sales by a non-resident
+   generally do not require registration. UAE coverage for remote sellers is to be checked. It noted this is not tax
+   advice.
 
 ## Text to send to 360dialog
 
