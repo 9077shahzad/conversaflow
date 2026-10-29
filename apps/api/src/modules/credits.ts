@@ -346,8 +346,6 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     if (!t) return 'unknown_topup';
     // A payment of this top-up is with a person (kept unmatched): nothing is credited until they decide; returned by
     // hand: never credited (recheck of e60ef18, M1 and M2). Not recorded, so the provider's retry is harmless.
-    if (t.failure_reason === 'refunded_by_hand' && e.type === 'payment.succeeded') return 'refunded_by_hand';
-    if (t.review_hold && e.type === 'payment.succeeded') return 'held_for_review';
     const amountOk = e.type === 'dispute.lost' ? e.amountMinor <= Number(t.amount_minor) : e.amountMinor === Number(t.amount_minor);
     // The provider's reference is saved after its call returns, so its webhook can arrive first (an automatic top-up
     // with Stripe). The event names our top-up, company, amount and currency, all checked; its reference is then adopted
@@ -357,6 +355,9 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
       t.provider_ref = e.providerRef;
     }
     if (t.provider_ref !== e.providerRef || !amountOk || t.currency !== e.currency) return 'mismatch';
+    // Checked after the match, so a different payment for the same top-up is still kept for a person.
+    if (t.failure_reason === 'refunded_by_hand' && e.type === 'payment.succeeded') return 'refunded_by_hand';
+    if (t.review_hold && e.type === 'payment.succeeded') return 'held_for_review';
     const seen = await tx.query(`INSERT INTO credit_payment_events (tenant_id, provider, event_id, type, provider_ref, amount_minor, currency, outcome)
                                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'received') ON CONFLICT (provider, event_id) DO NOTHING RETURNING id`,
       [e.tenantId, provider, e.id, e.type, e.providerRef, e.amountMinor, e.currency]);
@@ -386,7 +387,8 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     // taken back even below zero (review M3).
     // Only refunds that went through count (a pending one may still be refused, recheck N3); earlier disputes of the
     // same payment are counted by amount, so a second partial dispute applies too (N4).
-    if (t.status !== 'succeeded') return outcome('nothing_to_reverse');
+    // The bank took back a payment we never credited (held for a person, say): it must never be credited later.
+    if (t.status !== 'succeeded') return outcome(t.status === 'pending' || t.review_hold ? 'dispute_uncredited' : 'nothing_to_reverse');
     const refundedOk = Number((await tx.query<{ s: string }>(`SELECT coalesce(sum(amount_minor), 0) AS s FROM credit_refunds WHERE topup_id = $1 AND status = 'succeeded'`, [t.id])).rows[0]!.s);
     const take = Math.min(e.amountMinor, Number(t.amount_minor) - refundedOk - Number(t.reversed_minor));
     if (take <= 0) return outcome('nothing_to_reverse');
@@ -408,6 +410,11 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
  * A failure or an expiry took no money and is only logged.
  */
 export async function settleEventOutcome(db: Db, provider: string, e: PaymentEvent, outcome: string): Promise<string> {
+  if (outcome === 'dispute_uncredited') {
+    await withContext(db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+      [provider, e.id, e.type, outcome, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]));
+    return `unmatched:${outcome}`;
+  }
   if (outcome !== 'mismatch' && outcome !== 'unknown_topup' && outcome !== 'no_account') return outcome;
   if (e.type === 'payment.failed') {
     console.warn('credits: a failed payment for a top-up that cannot be found or is closed; no money was taken', provider, e.id, outcome);

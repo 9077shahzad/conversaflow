@@ -609,11 +609,20 @@ describe('payment recovery: early, repeated, out-of-order and lost Stripe events
     expect((await stripeHook(evt('checkout.session.async_payment_succeeded', s1)).expect(200)).body.outcome).toBe('held_for_review');
     expect((await u.get('/v1/credits').expect(200)).body.balanceMinor).toBe(0);
     expect((await staff.put(`/v1/platform/credits/unmatched-events/${k1.id}`, { action: 'closed', resolution: 'Close without deciding' })).status).toBe(409);
-    // Decision 1: credit it. The hold is lifted and the next lookup credits it once.
+    // Decision 1, taken late (40 days on): credit it. The hold is lifted and the next lookup credits it once, whatever its age.
+    await age(r1.id, 40 * 24 * 60);
     await staff.put(`/v1/platform/credits/unmatched-events/${k1.id}`, { action: 'credit', resolution: 'Genuine payment; account reopened' }).expect(200);
     expect(await worker.recoverTopUps()).toBe(1);
     expect(await entries(r1.id, tid)).toBe(1);
-    // Decision 2: refunded by hand at Stripe. The top-up is closed, and a later success never credits it.
+    // Meanwhile the bank takes back the second payment (dispute lost): it can never be credited, only closed.
+    const pi2 = String(stripe.sessions.get(String(s2.id))!.payment_intent);
+    expect((await stripeHook(evt('charge.dispute.closed', { id: 'dp_held', status: 'lost', payment_intent: pi2, amount: 6200, currency: 'sar', reason: 'fraudulent' }))
+      .expect(200)).body.outcome).toBe('unmatched:dispute_uncredited');
+    const dsp = ((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string; reason: string; topupRef: string }>)
+      .find((x) => x.reason === 'dispute_uncredited' && x.topupRef === r2.id)!;
+    const refused = await staff.put(`/v1/platform/credits/unmatched-events/${dsp.id}`, { action: 'credit', resolution: 'Try to credit a disputed payment' });
+    expect([refused.status, refused.body.error.message]).toEqual([409, expect.stringMatching(/disputed/)]);
+    // Decision 2: refunded (here, taken back by the bank). The top-up is closed, and a later success never credits it.
     await staff.put(`/v1/platform/credits/unmatched-events/${k2.id}`, { action: 'refunded', resolution: 'Refunded in the Stripe dashboard (test)' }).expect(200);
     expect((await stripeHook(evt('checkout.session.async_payment_succeeded', s2)).expect(200)).body.outcome).toBe('refunded_by_hand');
     expect(await worker.recoverTopUps()).toBe(0);
