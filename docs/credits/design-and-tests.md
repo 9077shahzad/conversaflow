@@ -81,3 +81,10 @@ The reviewer rechecked the fixes and confirmed them, finding no lock cycle. Rema
 - **Disputes:** a dispute counts only refunds that went through. A second partial dispute of the same payment applies too, never more than the payment.
 - **Refunds with no answer:** a refund the provider never answers is tried 30 times. The company is then told, and a person checks it with the provider; the money stays out of the balance until then.
 - **Reconciliation months:** platform reconciliation uses calendar months in UTC, explicitly, to match the partner's invoice. The company's own statement uses its own time zone.
+
+## Test evidence (29 Oct 2026)
+
+- Clean checkout of a1093b8, built and tested from nothing (`docs/reports/evidence/clean-checkout-a1093b8.txt`): install from the lock file, strict dependency audit with no advisories, build, lint, type check, migrations 0001–0063, the isolation guard, 684 of 684 API tests and 16 of 16 browser checks (English and Arabic at three sizes, including the credits screen). Result: all checks passed.
+- `apps/api/test/credits.test.ts` holds the 32 message-credit tests; `isolation.db.test.ts` fills every credit table for two companies and confirms neither can see the other's rows.
+- Screens: `docs/reports/evidence/ui/*-credits.png`.
+- Not tested, because they don't exist yet: a real payment provider, the Solution Partner's API, Meta's live pricing webhooks (the tests use Meta's documented `pricing` fields through the sandbox) and hosting.
