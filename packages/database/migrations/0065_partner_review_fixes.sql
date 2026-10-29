@@ -1,7 +1,7 @@
 -- 0065 Fixes from the independent review of 0064 (29 Oct 2026).
 --
--- H1  Credit accounts opened before routes existed: put on the partner route (or closed when they have a live direct
---     number), and the route check now also runs when an account is reopened.
+-- H1  Credit accounts opened before routes existed are closed (the migration stops if one still holds money), and the
+--     route check now also runs when an account is reopened.
 -- M1  Route changes, number connections and account opening for one company are serialised by the same lock, so no
 --     race can leave a company on both routes.
 -- M2  A switch back to the direct route is refused while top-ups or refunds are still pending; a closed account can
@@ -12,17 +12,31 @@
 --     company's context.
 
 -- --- H1 ----------------------------------------------------------------------------------------------------------
+-- Accounts opened under 0061, before routes existed, belong to companies that are on the direct route by default. They
+-- are closed, never moved to the partner route (that needs the owner's decision per company, and is refused in
+-- production). An account that still holds money, held amounts or payments in progress stops the migration instead, so
+-- a person settles it first (recheck of 0065, finding 3). No such account exists outside local test databases.
 ALTER TABLE credit_accounts DISABLE TRIGGER credit_accounts_guard;
 ALTER TABLE credit_accounts NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE messaging_routes NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE channel_connections NO FORCE ROW LEVEL SECURITY;
-UPDATE credit_accounts a SET status = 'closed', auto_enabled = false
-WHERE a.status = 'active' AND NOT EXISTS (SELECT 1 FROM messaging_routes r WHERE r.tenant_id = a.tenant_id)
-  AND EXISTS (SELECT 1 FROM channel_connections c WHERE c.tenant_id = a.tenant_id AND c.provider = 'whatsapp_cloud' AND c.status = 'active');
-INSERT INTO messaging_routes (tenant_id, route, note)
-SELECT a.tenant_id, 'partner_360dialog', 'Set by migration 0065: the company already had prepaid credit'
-FROM credit_accounts a WHERE a.status = 'active' AND NOT EXISTS (SELECT 1 FROM messaging_routes r WHERE r.tenant_id = a.tenant_id);
-ALTER TABLE channel_connections FORCE ROW LEVEL SECURITY;
+ALTER TABLE credit_topups NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE credit_refunds NO FORCE ROW LEVEL SECURITY;
+DO $$
+DECLARE n integer;
+BEGIN
+  SELECT count(*) INTO n FROM credit_accounts a
+  WHERE a.status = 'active' AND NOT EXISTS (SELECT 1 FROM messaging_routes r WHERE r.tenant_id = a.tenant_id)
+    AND (a.balance_minor <> 0 OR a.reserved_minor <> 0
+         OR EXISTS (SELECT 1 FROM credit_topups t WHERE t.tenant_id = a.tenant_id AND t.status = 'pending')
+         OR EXISTS (SELECT 1 FROM credit_refunds f WHERE f.tenant_id = a.tenant_id AND f.status = 'pending'));
+  IF n > 0 THEN
+    RAISE EXCEPTION '0065: % credit account(s) of companies on the direct route still hold credit or payments in progress; settle them first', n;
+  END IF;
+  UPDATE credit_accounts a SET status = 'closed', auto_enabled = false
+  WHERE a.status = 'active' AND NOT EXISTS (SELECT 1 FROM messaging_routes r WHERE r.tenant_id = a.tenant_id);
+END $$;
+ALTER TABLE credit_refunds FORCE ROW LEVEL SECURITY;
+ALTER TABLE credit_topups FORCE ROW LEVEL SECURITY;
 ALTER TABLE messaging_routes FORCE ROW LEVEL SECURITY;
 ALTER TABLE credit_accounts FORCE ROW LEVEL SECURITY;
 ALTER TABLE credit_accounts ENABLE TRIGGER credit_accounts_guard;
@@ -73,7 +87,9 @@ BEGIN
     IF FOUND AND a.status = 'active' AND (a.balance_minor <> 0 OR a.reserved_minor <> 0) THEN
       RAISE EXCEPTION 'the company still has prepaid credit or held amounts; refund or settle them first' USING ERRCODE = 'check_violation';
     END IF;
-    IF EXISTS (SELECT 1 FROM credit_topups t WHERE t.tenant_id = p_tenant AND t.status = 'pending')
+    -- A checkout left unpaid expires at the provider within a day; older pending top-ups do not block. A payment that
+    -- still arrives for a closed account is recorded and raises an alert for a person to refund it.
+    IF EXISTS (SELECT 1 FROM credit_topups t WHERE t.tenant_id = p_tenant AND t.status = 'pending' AND t.created_at > now() - interval '2 days')
        OR EXISTS (SELECT 1 FROM credit_refunds f WHERE f.tenant_id = p_tenant AND f.status = 'pending') THEN
       RAISE EXCEPTION 'top-ups or refunds are still in progress; wait for them to finish' USING ERRCODE = 'check_violation';
     END IF;
@@ -86,7 +102,8 @@ BEGIN
   INSERT INTO audit_events (tenant_id, actor_user_id, action, target_type, target_id, metadata, hash)
   VALUES (p_tenant, v_staff, 'messaging.route_changed', 'tenant', p_tenant::text, jsonb_build_object('from', v_old, 'to', p_route), ''::bytea);
 END $$;
-GRANT SELECT (tenant_id, status) ON credit_topups, credit_refunds TO cf_ops;
+GRANT SELECT (tenant_id, status) ON credit_refunds TO cf_ops;
+GRANT SELECT (tenant_id, status, created_at) ON credit_topups TO cf_ops;
 CREATE POLICY credit_topups_ops_read ON credit_topups FOR SELECT TO cf_ops USING (status = 'pending');
 CREATE POLICY credit_refunds_ops_read ON credit_refunds FOR SELECT TO cf_ops USING (status = 'pending');
 
@@ -96,6 +113,8 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE v_staff uuid := platform_require(p_token, 'platform_owner'); v_existing record; v_reopen boolean;
 BEGIN
   IF p_currency NOT IN ('SAR', 'AED', 'USD') THEN RAISE EXCEPTION 'unsupported currency' USING ERRCODE = 'check_violation'; END IF;
+  -- The company's route lock first, then the account row: the same order as a route change (no deadlock).
+  PERFORM pg_advisory_xact_lock(hashtextextended('messaging_route:' || p_tenant::text, 0));
   SELECT status, currency INTO v_existing FROM credit_accounts WHERE tenant_id = p_tenant FOR UPDATE;
   v_reopen := FOUND;
   IF v_reopen THEN
@@ -111,6 +130,8 @@ END $$;
 GRANT UPDATE (status, low_threshold_minor) ON credit_accounts TO cf_ops;
 
 -- --- M5 ----------------------------------------------------------------------------------------------------------
+-- Built in the migration while the table is small (nothing is live). Before production volume, replace the monthly
+-- count with a counter per number (open-findings.md).
 CREATE INDEX messages_service_month ON messages (conversation_id, created_at) WHERE direction = 'out' AND kind <> 'template';
 
 -- --- Low: consent language --------------------------------------------------------------------------------------
@@ -201,3 +222,102 @@ BEGIN
   INSERT INTO platform_audit_events (actor_user_id, action, target_type, target_id, metadata)
   VALUES (v_staff, 'partner.' || p_what || '_recorded', 'partner', p_partner, jsonb_build_object('kind', p_kind, 'amountMinor', p_amount, 'currency', p_currency, 'reference', p_reference));
 END $$;
+
+-- --- Payment events that cannot be applied (recheck of 0065, findings 1 and 2) ----------------------------------------
+-- A signed provider event that names a top-up we do not have, does not match it, or arrives for a closed account cannot
+-- become right by sending it again. It is kept here, answered as received, and raises an alert for a person (the money
+-- may have been taken: it is refunded by hand). Platform-wide: the company in the event may not even exist here.
+CREATE TABLE credit_unmatched_events (
+  id            uuid PRIMARY KEY DEFAULT uuid_generate_v7(),
+  provider      text NOT NULL,
+  event_id      text NOT NULL CHECK (length(event_id) BETWEEN 1 AND 200),
+  type          text NOT NULL CHECK (length(type) <= 60),
+  reason        text NOT NULL CHECK (reason IN ('mismatch', 'unknown_topup', 'no_account')),
+  tenant_ref    text CHECK (length(tenant_ref) <= 60),
+  topup_ref     text CHECK (length(topup_ref) <= 60),
+  provider_ref  text CHECK (length(provider_ref) <= 200),
+  amount_minor  bigint,
+  currency      text CHECK (length(currency) <= 3),
+  received_at   timestamptz NOT NULL DEFAULT now(),
+  resolved_at   timestamptz,
+  UNIQUE (provider, event_id)
+);
+GRANT SELECT, UPDATE (resolved_at) ON credit_unmatched_events TO cf_ops;
+GRANT SELECT, INSERT ON credit_unmatched_events TO cf_dispatch;
+ALTER TABLE platform_alerts DROP CONSTRAINT platform_alerts_kind_check;
+ALTER TABLE platform_alerts ADD CONSTRAINT platform_alerts_kind_check
+  CHECK (kind IN ('partner_balance_low', 'partner_cover_short', 'partner_below_buffer', 'partner_balance_stale', 'payment_unmatched'));
+
+CREATE FUNCTION credit_record_unmatched(p_provider text, p_event_id text, p_type text, p_reason text, p_tenant text, p_topup text,
+                                        p_provider_ref text, p_amount bigint, p_currency text) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_new boolean;
+BEGIN
+  INSERT INTO credit_unmatched_events (provider, event_id, type, reason, tenant_ref, topup_ref, provider_ref, amount_minor, currency)
+  VALUES (left(p_provider, 30), p_event_id, left(p_type, 60), p_reason, left(p_tenant, 60), left(p_topup, 60), left(p_provider_ref, 200), p_amount, left(p_currency, 3))
+  ON CONFLICT (provider, event_id) DO NOTHING;
+  v_new := FOUND;
+  INSERT INTO platform_alerts (kind, subject, data)
+  VALUES ('payment_unmatched', left(p_provider, 30), jsonb_build_object('lastEventId', p_event_id, 'reason', p_reason))
+  ON CONFLICT DO NOTHING;
+  RETURN v_new;
+END $$;
+ALTER FUNCTION credit_record_unmatched(text, text, text, text, text, text, text, bigint, text) OWNER TO cf_dispatch;
+REVOKE ALL ON FUNCTION credit_record_unmatched(text, text, text, text, text, text, text, bigint, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION credit_record_unmatched(text, text, text, text, text, text, text, bigint, text) TO cf_app;
+
+-- The unmatched payment events, for a platform owner (the alert says how many are waiting; this shows them).
+CREATE FUNCTION platform_credit_unmatched(p_token text)
+RETURNS TABLE (id uuid, provider text, event_id text, type text, reason text, tenant_ref text, topup_ref text, provider_ref text,
+               amount_minor bigint, currency text, received_at timestamptz)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_staff uuid := platform_require(p_token, 'platform_owner');
+BEGIN
+  RETURN QUERY SELECT u.id, u.provider, u.event_id, u.type, u.reason, u.tenant_ref, u.topup_ref, u.provider_ref, u.amount_minor, u.currency, u.received_at
+  FROM credit_unmatched_events u WHERE u.resolved_at IS NULL ORDER BY u.received_at DESC LIMIT 200;
+END $$;
+ALTER FUNCTION platform_credit_unmatched(text) OWNER TO cf_ops;
+REVOKE ALL ON FUNCTION platform_credit_unmatched(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform_credit_unmatched(text) TO cf_platform;
+
+-- --- Recovery when the provider's notices stop (owner instruction of 29 Oct, point 2) ---------------------------------
+-- Top-ups still pending (or automatic ones closed as unconfirmed in the last three days) are looked up with the provider
+-- directly, at most every ten minutes, so a payment whose webhooks were all lost is still credited, once.
+ALTER TABLE credit_topups ADD COLUMN checked_at timestamptz;
+GRANT UPDATE (checked_at) ON credit_topups TO cf_app;
+CREATE POLICY credit_topups_dispatch_check ON credit_topups FOR SELECT TO cf_dispatch
+  USING (status = 'pending' OR (status = 'cancelled' AND failure_reason = 'not_confirmed'));
+GRANT SELECT (id, tenant_id, provider, provider_ref, status, failure_reason, created_at, checked_at) ON credit_topups TO cf_dispatch;
+CREATE FUNCTION credit_topups_to_check(p_provider text, p_limit integer) RETURNS TABLE (topup_id uuid, tenant_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT t.id, t.tenant_id FROM credit_topups t
+  WHERE t.provider = p_provider AND t.provider_ref IS NOT NULL AND t.created_at < now() - interval '10 minutes'
+    AND (t.checked_at IS NULL OR t.checked_at < now() - interval '10 minutes')
+    AND (t.status = 'pending' OR (t.status = 'cancelled' AND t.failure_reason = 'not_confirmed' AND t.created_at > now() - interval '3 days'))
+  ORDER BY t.checked_at NULLS FIRST, t.created_at LIMIT least(greatest(p_limit, 1), 500)
+$$;
+ALTER FUNCTION credit_topups_to_check(text, integer) OWNER TO cf_dispatch;
+REVOKE ALL ON FUNCTION credit_topups_to_check(text, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION credit_topups_to_check(text, integer) TO cf_app;
+
+-- A platform owner closes an unmatched event once it is dealt with (refunded at the provider, or credited by hand).
+ALTER TABLE credit_unmatched_events ADD COLUMN resolution text CHECK (resolution IS NULL OR length(resolution) BETWEEN 5 AND 500);
+ALTER TABLE credit_unmatched_events ADD COLUMN resolved_by uuid;
+GRANT UPDATE (resolved_at, resolution, resolved_by) ON credit_unmatched_events TO cf_ops;
+CREATE FUNCTION platform_credit_unmatched_resolve(p_token text, p_id uuid, p_resolution text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_staff uuid := platform_require(p_token, 'platform_owner'); v_provider text;
+BEGIN
+  IF p_resolution IS NULL OR length(btrim(p_resolution)) < 5 THEN RAISE EXCEPTION 'say what was done' USING ERRCODE = 'check_violation'; END IF;
+  UPDATE credit_unmatched_events SET resolved_at = now(), resolution = btrim(p_resolution), resolved_by = v_staff
+  WHERE id = p_id AND resolved_at IS NULL RETURNING provider INTO v_provider;
+  IF NOT FOUND THEN RAISE EXCEPTION 'no such open event' USING ERRCODE = 'check_violation'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM credit_unmatched_events WHERE provider = v_provider AND resolved_at IS NULL) THEN
+    UPDATE platform_alerts SET resolved_at = now() WHERE kind = 'payment_unmatched' AND subject = v_provider AND resolved_at IS NULL;
+  END IF;
+  INSERT INTO platform_audit_events (actor_user_id, action, target_type, target_id, metadata)
+  VALUES (v_staff, 'credits.unmatched_resolved', 'credit_unmatched_event', p_id::text, jsonb_build_object('resolution', btrim(p_resolution)));
+END $$;
+ALTER FUNCTION platform_credit_unmatched_resolve(text, uuid, text) OWNER TO cf_ops;
+REVOKE ALL ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text) TO cf_platform;

@@ -266,6 +266,11 @@ export interface PaymentProvider {
   chargeSaved(input: { tenantId: string; topupId: string; methodRef: string; amountMinor: number; currency: string; idempotencyKey: string }): Promise<{ providerRef: string; event: { raw: string; signature: string } | null }>;
   /** 'pending': the provider accepted the refund but has not finished it (Stripe, some cards); asked again by refundStatus. */
   refund(input: { providerRef: string; amountMinor: number; idempotencyKey: string }): Promise<{ refundRef: string; status: 'succeeded' | 'failed' | 'pending' }>;
+  /**
+   * Looks a payment up directly with the provider (our own authenticated call, not a webhook), for recovery when its
+   * notices never arrive. Null when the provider cannot say.
+   */
+  lookupPayment?(providerRef: string): Promise<{ status: 'succeeded' | 'failed' | 'pending'; amountMinor: number; currency: string; reason?: string } | null>;
   /** The current state of a refund the provider reported as pending (review of 0064, M6). */
   refundStatus?(refundRef: string): Promise<'succeeded' | 'failed' | 'pending'>;
   /** Verifies the signature and reads the event; null for events that need no action. May look things up with the provider. */
@@ -425,7 +430,14 @@ export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: 
     if (answer.status === 'pending') {
       // Accepted, not finished: kept pending with the provider's reference; the worker asks again. The money stays out of
       // the balance until the provider confirms either way.
-      await tx.query(`UPDATE credit_refunds SET provider_ref = $2 WHERE id = $1`, [refundId, answer.refundRef]);
+      // Counted only after three days, so the worker keeps asking for about three days and then tells a person
+      // (refund_stuck), as for a refund that is never answered (recheck finding 5).
+      const n = (await tx.query<{ attempts: number }>(`UPDATE credit_refunds SET provider_ref = $2,
+          attempts = attempts + CASE WHEN created_at < now() - interval '3 days' THEN 1 ELSE 0 END WHERE id = $1 RETURNING attempts`, [refundId, answer.refundRef])).rows[0]!.attempts;
+      if (n === 30) {
+        await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'refund_stuck', $2)`, [tenantId, JSON.stringify({ refundId, amountMinor: Number(r.amount_minor) })]);
+        await AuditService.record(tx, { tenantId, actorUserId: null, action: 'credits.refund_stuck', ip: undefined, targetType: 'credit_refund', targetId: refundId, metadata: { attempts: n, providerStatus: 'pending' } });
+      }
       return 'pending';
     }
     if (answer.status === 'succeeded') {
@@ -508,7 +520,8 @@ export class CreditsService {
     const body = parse(TopUpInput, input);
     if (!this.provider) throw Errors.conflict('payments_unavailable', 'Online payments are not connected yet.');
     const t = await withContext(this.deps.db, actor, async (tx) => {
-      const a = (await tx.query<{ currency: string }>(`SELECT currency FROM credit_accounts WHERE status = 'active'`)).rows[0];
+      // Locked, so a route change cannot close the account between this check and the pending top-up (recheck finding 1).
+      const a = await lockAccount(tx);
       if (!a) throw Errors.conflict('no_credit_account', 'This company pays Meta directly; it has no message-credit balance.');
       if (body.amountMinor < (MIN_TOPUP[a.currency] ?? 1000)) throw Errors.badRequest('The amount is below the minimum top-up.');
       const pending = (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM credit_topups WHERE status = 'pending' AND created_at > now() - interval '1 hour'`)).rows[0]!.n;
@@ -551,10 +564,14 @@ export class CreditsService {
     }
     if (!e) return 'ignored';
     const outcome = await applyPaymentEvent(this.deps.db, this.provider.name, e, this.provider.testMode);
-    // Not applied and not recorded: answered with an error so the provider sends it again later (review of 0064, H2).
-    // Stripe retries for up to three days.
+    // An event that cannot be applied will not become right if sent again (the reference is adopted when it arrives first,
+    // review of 0064 H2). It is kept and raises a platform alert: the money may have been taken and a person refunds it
+    // (recheck of 0065, finding 2).
     if (outcome === 'mismatch' || outcome === 'unknown_topup' || outcome === 'no_account') {
-      throw new AppError(409, `payment_event_${outcome}`, 'The payment event could not be applied yet; please send it again.');
+      await withContext(this.deps.db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [this.provider!.name, e.id, e.type, outcome, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]));
+      console.error('credits: payment event not applied; recorded for a person to check', this.provider.name, e.id, outcome);
+      return `unmatched:${outcome}`;
     }
     return outcome;
   }
@@ -813,6 +830,39 @@ export class CreditWorker {
    * Automatic top-ups never confirmed (a crash after recording, a lost answer) are closed as not confirmed, with a
    * notice, so automatic top-up is not blocked for good (review M4). A confirmation arriving later still credits it.
    */
+  /**
+   * Recovery when every webhook for a payment was lost and the provider has stopped retrying (owner instruction of
+   * 29 Oct, point 2): pending top-ups are looked up with the provider at most every ten minutes and the answer is applied
+   * through the same path as a webhook, so a payment is still credited exactly once whatever arrives later.
+   */
+  async recoverTopUps(limit = 100): Promise<number> {
+    const provider = this.provider;
+    if (!provider?.lookupPayment) return 0;
+    const due = await withContext(this.db, { tenantId: null, userId: null }, async (tx) =>
+      (await tx.query<{ topup_id: string; tenant_id: string }>('SELECT * FROM credit_topups_to_check($1, $2)', [provider.name, limit])).rows);
+    let n = 0;
+    for (const d of due) {
+      try {
+        const t = await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => (await tx.query<{ provider_ref: string; amount_minor: string; currency: string }>(
+          `UPDATE credit_topups SET checked_at = now() WHERE id = $1 RETURNING provider_ref, amount_minor, currency`, [d.topup_id])).rows[0]);
+        if (!t) continue;
+        const found = await provider.lookupPayment(t.provider_ref);
+        if (!found || found.status === 'pending') continue;
+        const e: PaymentEvent = { id: `lookup:${t.provider_ref}:${found.status}`, type: found.status === 'succeeded' ? 'payment.succeeded' : 'payment.failed',
+          providerRef: t.provider_ref, amountMinor: found.amountMinor, currency: found.currency, tenantId: d.tenant_id, topupId: d.topup_id,
+          ...(found.reason ? { reason: found.reason } : {}) };
+        const outcome = await applyPaymentEvent(this.db, provider.name, e, provider.testMode);
+        if (outcome === 'mismatch' || outcome === 'unknown_topup' || outcome === 'no_account') {
+          await withContext(this.db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+            [provider.name, e.id, e.type, outcome, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]));
+          // Nothing more a lookup can do: stop looking; the alert brings it to a person.
+          await withContext(this.db, { tenantId: d.tenant_id, userId: null }, (tx) => tx.query(`UPDATE credit_topups SET checked_at = 'infinity' WHERE id = $1`, [d.topup_id]));
+        } else if (outcome === 'applied' || outcome === 'failed_recorded') n++;
+      } catch (err) { console.error('top-up recovery failed', d.topup_id, err instanceof Error ? err.message : err); }
+    }
+    return n;
+  }
+
   async closeStuckAutoTopUps(limit = 100): Promise<number> {
     const due = await withContext(this.db, { tenantId: null, userId: null }, async (tx) =>
       (await tx.query<{ topup_id: string; tenant_id: string }>('SELECT * FROM credit_auto_topups_stuck($1)', [limit])).rows);

@@ -83,6 +83,8 @@ export class FakeStripe {
   refundScript: Array<'succeeded' | 'failed' | 'pending'> = [];
   /** Refunds by id; a test may move a pending one on (Stripe finishing it later). */
   readonly refunds = new Map<string, Record<string, unknown>>();
+  /** Payment intents created for automatic top-ups; a test moves their status on. */
+  readonly intents = new Map<string, Record<string, unknown>>();
   private seq = 0;
   private server = createServer((req, res) => void this.handle(req, res));
   url = '';
@@ -132,7 +134,14 @@ export class FakeStripe {
       return r ? json(res, 200, r) : json(res, 404, { error: { type: 'invalid_request_error', code: 'resource_missing' } });
     }
     if (req.method === 'POST' && url.pathname === '/v1/payment_intents') {
-      return json(res, 200, { id: `pi_test_auto_${++this.seq}`, object: 'payment_intent', status: 'processing', amount: Number(form.amount), metadata: {} });
+      const pi = { id: `pi_test_auto_${++this.seq}`, object: 'payment_intent', status: 'processing', amount: Number(form.amount), currency: form.currency,
+        metadata: { tenantId: form['metadata[tenantId]'], topupId: form['metadata[topupId]'], kind: form['metadata[kind]'] } };
+      this.intents.set(pi.id, pi);
+      return json(res, 200, pi);
+    }
+    if (req.method === 'GET' && url.pathname.startsWith('/v1/payment_intents/')) {
+      const pi = this.intents.get(decodeURIComponent(url.pathname.split('/').pop()!));
+      return pi ? json(res, 200, pi) : json(res, 404, { error: { type: 'invalid_request_error', code: 'resource_missing' } });
     }
     return json(res, 404, { error: { type: 'invalid_request_error', code: 'unknown' } });
   }

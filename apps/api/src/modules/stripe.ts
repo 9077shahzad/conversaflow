@@ -95,6 +95,25 @@ export class StripePaymentProvider implements PaymentProvider {
     return { refundRef: String(r.id), status: refundState(r.status) };
   }
 
+  /** A checkout session (manual top-up) or payment intent (automatic top-up), read directly from Stripe. */
+  async lookupPayment(providerRef: string) {
+    if (providerRef.startsWith('cs_')) {
+      const o = await this.api('GET', `/v1/checkout/sessions/${encodeURIComponent(providerRef)}`);
+      const base = { amountMinor: Number(o.amount_total), currency: String(o.currency).toUpperCase() };
+      if (o.payment_status === 'paid') return { status: 'succeeded' as const, ...base };
+      if (o.status === 'expired') return { status: 'failed' as const, ...base, reason: 'checkout_expired' };
+      return { status: 'pending' as const, ...base };
+    }
+    if (providerRef.startsWith('pi_')) {
+      const o = await this.api('GET', `/v1/payment_intents/${encodeURIComponent(providerRef)}`);
+      const base = { amountMinor: Number(o.amount), currency: String(o.currency).toUpperCase() };
+      if (o.status === 'succeeded') return { status: 'succeeded' as const, ...base };
+      if (o.status === 'canceled' || o.status === 'requires_payment_method') return { status: 'failed' as const, ...base, reason: 'payment_failed' };
+      return { status: 'pending' as const, ...base };
+    }
+    return null;
+  }
+
   /** A refund Stripe reported as pending (or requiring action): its state now (review of 0064, M6). */
   async refundStatus(refundRef: string) {
     const r = await this.api('GET', `/v1/refunds/${encodeURIComponent(refundRef)}`);
@@ -104,8 +123,8 @@ export class StripePaymentProvider implements PaymentProvider {
   async verifyEvent(raw: string, signature: string | undefined): Promise<PaymentEvent | null> {
     this.checkSignature(raw, signature);
     const ev = JSON.parse(raw) as { id: string; type: string; livemode?: boolean; data: { object: Record<string, unknown> } };
-    // Test mode only: a live event is refused even when signed (a live endpoint pointed here by mistake).
-    if (ev.livemode === true) throw new AppError(400, 'live_event_refused', 'Live payment events are not accepted while payments are in test mode.');
+    // An event from the other mode is refused even when signed (a live endpoint pointed at a test set-up, or the reverse).
+    if (typeof ev.livemode === 'boolean' && ev.livemode !== !this.testMode) throw new AppError(400, 'live_event_refused', 'Live payment events are not accepted while payments are in test mode.');
     const o = ev.data?.object ?? {};
     const meta = (o.metadata ?? {}) as Record<string, string>;
     const base = (type: PaymentEvent['type'], providerRef: string, amount: number, currency: string, m: Record<string, string>, reason?: string): PaymentEvent | null =>

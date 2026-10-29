@@ -161,7 +161,7 @@ process.on('SIGINT', () => (stopping = true));
       // Operator quotes past their validity (slice 1).
       try { await quoteExpiry.dispatchDue(200); } catch (err) { console.error('quote expiry error', err instanceof Error ? err.message : err); }
       // Message credits: reservations never billed are given back; automatic top-ups for companies that turned them on.
-      try { await credits.releaseStale(200); await credits.settlePendingRefunds(100); await credits.closeStuckAutoTopUps(100); await credits.autoTopUps(100); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
+      try { await credits.releaseStale(200); await credits.settlePendingRefunds(100); await credits.recoverTopUps(100); await credits.closeStuckAutoTopUps(100); await credits.autoTopUps(100); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
       // Partner funding: the partner's balance against what it must cover; alerts are raised or cleared (owner instruction 4).
       // Only where the partner route is configured (never in production until approved).
       if (env.DIALOG360_WEBHOOK_TOKEN) try { const f = await partnerFundingCheck(appDb); if (f?.openAlerts.length) console.warn('partner funding alerts', f.openAlerts.join(', ')); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }

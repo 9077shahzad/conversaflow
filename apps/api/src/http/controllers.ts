@@ -475,6 +475,15 @@ export class PlatformController {
   async consentSet(@CurrentSession() s: AuthSession, @Param('version') version: string, @Param('locale') locale: string, @Body() body: unknown) {
     return this.platform.consentSet(await this.platform.requireStaff(s, 'platform_owner'), version, locale, body);
   }
+  /** Signed payment events that could not be applied (money may have been taken without credit): for a person to check. */
+  @Get('credits/unmatched-events')
+  async creditUnmatched(@CurrentSession() s: AuthSession) {
+    return this.platform.creditUnmatched(await this.platform.requireStaff(s, 'platform_owner'));
+  }
+  @Put('credits/unmatched-events/:id')
+  async creditUnmatchedResolve(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
+    return this.platform.creditUnmatchedResolve(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
   @Get('partner/funding')
   async partnerOverview(@CurrentSession() s: AuthSession) {
     return this.platform.partnerOverview(await this.platform.requireStaff(s, 'platform_owner'));

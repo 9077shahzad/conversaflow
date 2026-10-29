@@ -130,7 +130,7 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // Message credits (migration 0061): worker scans (cf_dispatch) and token-bound console functions (cf_ops).
   'credit_reservations_stale(integer)': '157b05a934b72cf1d19f620ace0f5a68',
   'credit_auto_topup_due(integer)': '7fd6d910161faac1d3059eaea7a6f83b',
-  'platform_credit_open_account(text,uuid,text,bigint)': 'cbf630023d656888f9c8b448a2be5f3b',  // re-pinned by 0065 (reopen)
+  'platform_credit_open_account(text,uuid,text,bigint)': '0e4cba1d615bc4173064a555739c83d0',  // re-pinned by 0065 (reopen, route lock first)
   // Re-pinned by 0062: a card must price every paid category for the market 'other'.
   'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '21bb78a06722951c0c801b7408d13948',
   // 0062: refunds and automatic top-ups left pending, settled by the worker.
@@ -144,7 +144,12 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'platform_partner_overview(text,text)': '024f95bbeb108e47fbb13e8bea6d361b',
   'platform_partner_record(text,text,text,text,bigint,text,text,timestamp with time zone)': '8fae7d32ce0d14c85f94f3d6f7b4a9da',
   'platform_partner_settings(text,text,jsonb)': '32752fe0b647df2323b4515e1d3bfcf1',
-  'platform_set_messaging_route(text,uuid,text,text)': '3130ecf9f74aa21979efbbbc5b9b06eb',
+  'platform_set_messaging_route(text,uuid,text,text)': 'ae8dd25d63f2b2c77ac62415745e5c26',
+  // 0065: payment events that cannot be applied, and recovery by lookup with the provider.
+  'credit_record_unmatched(text,text,text,text,text,text,text,bigint,text)': '4da69669e78d651e08956fa36eeb1d74',
+  'credit_topups_to_check(text,integer)': 'fa615c7812b540d3cfc5cf5cacd15f6a',
+  'platform_credit_unmatched(text)': 'f351deae43c24cc77d4bcadc96f7edcc',
+  'platform_credit_unmatched_resolve(text,uuid,text)': '874f71643e1af547adead44f4c33adee',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': '4046a5f0c06663a07319930b8af5be4c',  // re-pinned by 0064 (currency must match)
@@ -185,6 +190,8 @@ const SHARED_TABLES = [
   'credit_rate_cards', 'credit_rate_lines', 'credit_rate_markets', 'credit_settings',
   // 0064: automatic top-up wording versions, partner funding and platform alerts (platform-wide, no company data).
   'credit_consent_texts', 'partner_funding_settings', 'partner_balance_snapshots', 'partner_funding_entries', 'platform_alerts',
+  // 0065: signed payment events that could not be applied (provider references only, for a person to check).
+  'credit_unmatched_events',
 ];
 /**
  * Non-built-in functions called by any row-security policy, pinned to md5(pg_get_functiondef || owner). Replacing

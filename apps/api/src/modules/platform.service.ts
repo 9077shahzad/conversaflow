@@ -240,6 +240,16 @@ export class PlatformService {
     await this.run(staff, (tx) => tx.query('SELECT platform_partner_settings($1, $2, $3)', [staff.token, '360dialog', JSON.stringify(b)]));
     return { ok: true };
   }
+  async creditUnmatched(staff: StaffActor) {
+    return this.run(staff, async (tx) => (await tx.query(`SELECT id, provider, event_id AS "eventId", type, reason, tenant_ref AS "tenantRef", topup_ref AS "topupRef",
+      provider_ref AS "providerRef", amount_minor::int AS "amountMinor", currency, received_at AS "receivedAt" FROM platform_credit_unmatched($1)`, [staff.token])).rows);
+  }
+  async creditUnmatchedResolve(staff: StaffActor, id: string, input: unknown) {
+    if (!isUuid(id)) throw Errors.notFound('Event');
+    const b = parse(z.object({ resolution: z.string().trim().min(5).max(500) }).strict(), input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_credit_unmatched_resolve($1, $2, $3)', [staff.token, id, b.resolution]));
+    return { id, resolved: true };
+  }
   /** Partner funding: the ledger totals, the monitor's figures (computed now) and open alerts. */
   async partnerOverview(staff: StaffActor) {
     const ledger = await this.run(staff, async (tx) => (await tx.query<Record<string, unknown>>('SELECT * FROM platform_partner_overview($1, $2)', [staff.token, '360dialog'])).rows[0]!);

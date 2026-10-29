@@ -10,7 +10,7 @@ import { withContext } from '@conversaflow/database';
 import { loadConfig } from '../src/core/config';
 import { Dialog360Adapter, partnerKeySealer } from '../src/modules/dialog360';
 import { Sender } from '../src/modules/sender';
-import { SERVICE_FREE_PER_MONTH, partnerFundingCheck, settleRefund } from '../src/modules/credits';
+import { CreditWorker, SERVICE_FREE_PER_MONTH, partnerFundingCheck, settleRefund } from '../src/modules/credits';
 import { PlatformService } from '../src/modules/platform.service';
 import { StripePaymentProvider, stripeSignature } from '../src/modules/stripe';
 import { Fake360dialog, FakeStripe } from './fakes';
@@ -388,9 +388,13 @@ describe('fixes from the review of 0064 (migration 0065)', () => {
     expect((await stripeHook({ id: `evt_early_${randomUUID().slice(0, 6)}`, type: 'payment_intent.succeeded', data: { object: pi } }).expect(200)).body.outcome).toBe('applied');
     expect((await other.get('/v1/credits').expect(200)).body.balanceMinor).toBe(before + 4000);
     expect((await appOther(async (tx) => (await tx.query<{ provider_ref: string }>('SELECT provider_ref FROM credit_topups WHERE id = $1', [topupId])).rows[0]!)).provider_ref).toBe(pi.id);
-    // A wrong amount, or a top-up we do not know: not applied, not recorded, and not a 2xx.
-    const bad = await stripeHook({ id: `evt_bad_${randomUUID().slice(0, 6)}`, type: 'payment_intent.succeeded', data: { object: { ...pi, metadata: { ...pi.metadata, topupId: randomUUID() } } } });
-    expect([bad.status, bad.body.error.code]).toEqual([409, 'payment_event_unknown_topup']);
+    // A top-up we do not know: not applied; kept with an alert for a person, since sending it again cannot help.
+    const badId = `evt_bad_${randomUUID().slice(0, 6)}`;
+    expect((await stripeHook({ id: badId, type: 'payment_intent.succeeded', data: { object: { ...pi, metadata: { ...pi.metadata, topupId: randomUUID() } } } }).expect(200)).body.outcome)
+      .toBe('unmatched:unknown_topup');
+    const unmatched = (await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ eventId: string; reason: string; amountMinor: number }>;
+    expect(unmatched.find((u) => u.eventId === badId)).toMatchObject({ reason: 'unknown_topup', amountMinor: 4000 });
+    await other.get('/v1/platform/credits/unmatched-events').expect(403);
   });
 
   it('M6: a refund Stripe reports as pending stays pending, then is settled by asking Stripe for its state (not by refunding again)', async () => {
@@ -411,6 +415,14 @@ describe('fixes from the review of 0064 (migration 0065)', () => {
     expect(posts()).toBe(n);
     expect(stripe.requests.some((x) => x.method === 'GET' && x.path === `/v1/refunds/${ref}`)).toBe(true);
     expect((await account()).balanceMinor).toBe(before - 2000);
+    // A refund Stripe keeps pending for more than three days is counted, and a person is told once the count runs out.
+    stripe.refundScript.push('pending');
+    const r2 = (await owner.post('/v1/credits/refunds', { topupId, amountMinor: 1000, reason: 'Unused credit' }).expect(201)).body;
+    await t.ownerDb.query(`ALTER TABLE credit_refunds NO FORCE ROW LEVEL SECURITY`);
+    try { await t.ownerDb.query(`UPDATE credit_refunds SET created_at = now() - interval '4 days', attempts = 29 WHERE id = $1`, [r2.id]); }
+    finally { await t.ownerDb.query(`ALTER TABLE credit_refunds FORCE ROW LEVEL SECURITY`); }
+    expect(await settleRefund(t.deps.db, provider, tenant, r2.id)).toBe('pending');
+    expect((await app(async (tx) => (await tx.query(`SELECT 1 FROM credit_notices WHERE kind = 'refund_stuck' AND data->>'refundId' = $1`, [r2.id])).rowCount))).toBe(1);
   });
 
   it('Stripe: any one of several signatures is enough (secret being rolled); live events are refused', async () => {
@@ -434,5 +446,86 @@ describe('fixes from the review of 0064 (migration 0065)', () => {
     const fake = { token: 'not-used', userId: randomUUID(), role: 'platform_owner' } as unknown as Parameters<PlatformService['setRoute']>[0];
     await expect(prod.setRoute(fake, otherTenant, { route: 'partner_360dialog', note: 'Should be refused' })).rejects.toThrow(/not approved/);
     await expect(prod.creditOpenAccount(fake, otherTenant, { currency: 'SAR' })).rejects.toThrow(/not approved/);
+  });
+});
+
+describe('payment recovery: early, repeated, out-of-order and lost Stripe events give exactly one credit (owner point 2)', () => {
+  const provider = () => new StripePaymentProvider(STRIPE_KEY, STRIPE_WHSEC, 'http://localhost', stripe.url);
+  const age = async (topupId: string, minutes: number) => {
+    await t.ownerDb.query('ALTER TABLE credit_topups NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE credit_topups SET created_at = now() - make_interval(mins => $2), checked_at = NULL WHERE id = $1`, [topupId, minutes]); }
+    finally { await t.ownerDb.query('ALTER TABLE credit_topups FORCE ROW LEVEL SECURITY'); }
+  };
+  const entries = (topupId: string) => app(async (tx) => (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM credit_entries WHERE topup_id = $1 AND kind = 'topup'`, [topupId])).rows[0]!.n);
+  const evt = (type: string, object: unknown) => ({ id: `evt_${type}_${randomUUID().slice(0, 8)}`, type, data: { object } });
+
+  it('early (before our reference is saved), repeated, a second notice for the same payment, and a late "expired": one credit', async () => {
+    const before = (await account()).balanceMinor;
+    const r = (await owner.post('/v1/credits/topups', { amountMinor: 5500 }).expect(201)).body;
+    const session = [...stripe.sessions.values()].at(-1)!;
+    await app((tx) => tx.query('UPDATE credit_topups SET provider_ref = NULL WHERE id = $1', [r.id]));   // as if the webhook won the race
+    stripe.pay(String(session.id));
+    const completed = evt('checkout.session.completed', session);
+    expect((await stripeHook(completed).expect(200)).body.outcome).toBe('applied');
+    expect((await stripeHook(completed).expect(200)).body.outcome).toBe('duplicate');                 // Stripe's retry of the same event
+    expect((await stripeHook(evt('checkout.session.async_payment_succeeded', session)).expect(200)).body.outcome).toBe('already_applied');
+    expect((await stripeHook(evt('checkout.session.expired', { ...session, status: 'expired' })).expect(200)).body.outcome).toBe('not_pending:succeeded');
+    await age(r.id, 30);
+    expect(await new CreditWorker(t.deps.db, provider()).recoverTopUps()).toBe(0);                       // nothing left to recover
+    expect(await entries(r.id)).toBe(1);
+    expect((await account()).balanceMinor).toBe(before + 5500);
+  });
+
+  it('every webhook lost: the worker looks the payment up with Stripe and credits it once; the late webhook then changes nothing', async () => {
+    const before = (await account()).balanceMinor;
+    const r = (await owner.post('/v1/credits/topups', { amountMinor: 6500 }).expect(201)).body;
+    const session = [...stripe.sessions.values()].at(-1)!;
+    stripe.pay(String(session.id));                                                                  // paid, but no webhook arrives
+    const worker = new CreditWorker(t.deps.db, provider());
+    expect(await worker.recoverTopUps()).toBe(0);                                                    // too recent: Stripe is still retrying
+    await age(r.id, 30);
+    expect(await worker.recoverTopUps()).toBe(1);
+    expect(await worker.recoverTopUps()).toBe(0);                                                    // looked at once per ten minutes at most
+    expect((await stripeHook(evt('checkout.session.completed', session)).expect(200)).body.outcome).toBe('already_applied');
+    expect(await entries(r.id)).toBe(1);
+    expect((await account()).balanceMinor).toBe(before + 6500);
+    const top = (await owner.get('/v1/credits/topups').expect(200)).body.find((x: { id: string }) => x.id === r.id);
+    expect(top).toMatchObject({ status: 'succeeded', receiptNo: expect.stringMatching(/^CR-TEST-/) });
+  });
+
+  it('an automatic top-up closed as unconfirmed and paid later is still credited once, by lookup', async () => {
+    await app((tx) => tx.query(`INSERT INTO credit_payment_methods (tenant_id, provider, provider_ref, label) VALUES ($1, 'stripe', 'cus_9:pm_9', 'Visa •••• 4242')`, [tenant]));
+    const id = (await app(async (tx) => (await tx.query<{ id: string }>(
+      `INSERT INTO credit_topups (tenant_id, amount_minor, currency, kind, provider) VALUES ($1, 5200, 'SAR', 'auto', 'stripe') RETURNING id`, [tenant])).rows[0]!)).id;
+    const charged = await provider().chargeSaved({ tenantId: tenant, topupId: id, methodRef: 'cus_9:pm_9', amountMinor: 5200, currency: 'SAR', idempotencyKey: id });
+    await app((tx) => tx.query('UPDATE credit_topups SET provider_ref = $2 WHERE id = $1', [id, charged.providerRef]));
+    await age(id, 20);
+    const worker = new CreditWorker(t.deps.db, provider());
+    expect(await worker.recoverTopUps()).toBe(0);                                                    // Stripe still processing
+    expect(await worker.closeStuckAutoTopUps()).toBe(1);                                             // closed as unconfirmed, with a notice
+    const before = (await account()).balanceMinor;
+    stripe.intents.get(charged.providerRef)!.status = 'succeeded';
+    await age(id, 30);
+    expect(await worker.recoverTopUps()).toBe(1);
+    expect(await entries(id)).toBe(1);
+    expect((await account()).balanceMinor).toBe(before + 5200);
+  });
+
+  it('a payment that can never be applied is kept with an alert after retries stop, and a platform owner closes it with what was done', async () => {
+    const id = randomUUID();
+    const pi = { id: `pi_test_orphan_${randomUUID().slice(0, 6)}`, object: 'payment_intent', amount: 3100, currency: 'sar', metadata: { tenantId: tenant, topupId: id, kind: 'auto' } };
+    const e = evt('payment_intent.succeeded', pi);
+    expect((await stripeHook(e).expect(200)).body.outcome).toBe('unmatched:unknown_topup');
+    expect((await stripeHook(e).expect(200)).body.outcome).toBe('unmatched:unknown_topup');          // repeated: still one record
+    const open = ((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string; eventId: string }>).filter((u) => u.eventId === e.id);
+    expect(open).toHaveLength(1);
+    const alerts = await t.ownerDb.query(`SELECT 1 FROM platform_alerts WHERE kind = 'payment_unmatched' AND subject = 'stripe' AND resolved_at IS NULL`);
+    expect(alerts.rowCount).toBe(1);
+    await staff.put(`/v1/platform/credits/unmatched-events/${open[0]!.id}`, { resolution: 'x' }).expect(400);
+    for (const u of (await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string }>) {
+      await staff.put(`/v1/platform/credits/unmatched-events/${u.id}`, { resolution: 'Refunded in the Stripe dashboard (test)' }).expect(200);
+    }
+    expect((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body).toEqual([]);
+    expect((await t.ownerDb.query(`SELECT 1 FROM platform_alerts WHERE kind = 'payment_unmatched' AND subject = 'stripe' AND resolved_at IS NULL`)).rowCount).toBe(0);
   });
 });
