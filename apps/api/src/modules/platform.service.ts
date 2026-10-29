@@ -101,6 +101,12 @@ export class PlatformService {
     return { userId: row.user_id, role: row.role, token: session.token };
   }
 
+  /** Whether this session is platform staff (for showing the platform pages); no error for everyone else. */
+  async staffRole(session: AuthSession): Promise<{ role: StaffRole | null }> {
+    const row = (await this.db.query<{ role: StaffRole | null }>('SELECT role FROM platform_session_staff($1)', [session.token])).rows[0];
+    return { role: row?.role ?? null };
+  }
+
   private run<T>(staff: StaffActor, fn: Parameters<typeof withContext<T>>[2]) {
     return withContext(this.db, { tenantId: null, userId: null }, fn).catch((err: { code?: string; message?: string }) => {
       if (err.code === '42501') throw Errors.forbidden(err.message);
@@ -250,6 +256,21 @@ export class PlatformService {
     await this.run(staff, (tx) => tx.query('SELECT platform_credit_unmatched_resolve($1, $2, $3, $4)', [staff.token, id, b.action, b.resolution]));
     return { id, action: b.action, resolved: true };
   }
+  /**
+   * The platform owner's dashboard for a period (UTC days): companies, subscription value, messaging revenue, cost and
+   * margin, customer payments, unspent credit, partner funding and open alerts.
+   */
+  async dashboard(staff: StaffActor, query: unknown) {
+    const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+    const q = parse(z.object({ from: day.optional(), to: day.optional() }).strict(), query ?? {});
+    const to = q.to ?? new Date().toISOString().slice(0, 10);
+    const from = q.from ?? new Date(Date.parse(`${to}T00:00:00Z`) - 29 * 86_400_000).toISOString().slice(0, 10);
+    const figures = await this.run(staff, async (tx) => (await tx.query<{ d: Record<string, unknown> }>('SELECT platform_dashboard($1, $2, $3) AS d',
+      [staff.token, from, to])).rows[0]!.d);
+    const partner = await this.partnerOverview(staff);
+    return { period: { from, to, timeZone: 'UTC' }, ...figures, partner };
+  }
+
   /** Partner funding: the ledger totals, the monitor's figures (computed now) and open alerts. */
   async partnerOverview(staff: StaffActor) {
     const ledger = await this.run(staff, async (tx) => (await tx.query<Record<string, unknown>>('SELECT * FROM platform_partner_overview($1, $2)', [staff.token, '360dialog'])).rows[0]!);

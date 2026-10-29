@@ -151,6 +151,8 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'platform_credit_unmatched(text)': 'f351deae43c24cc77d4bcadc96f7edcc',
   'credit_alerts_refresh()': 'bf1b23bc11d157c53009f2dde46abf68',
   'platform_credit_unmatched_resolve(text,uuid,text,text)': '9683bd579ef155d7e27ebdcc508913c1',
+  // 0066: the platform owner's dashboard (totals and per-company figures only).
+  'platform_dashboard(text,date,date)': '13161c8aec23e15480f9266c24b47b5b',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': '4046a5f0c06663a07319930b8af5be4c',  // re-pinned by 0064 (currency must match)

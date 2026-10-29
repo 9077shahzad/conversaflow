@@ -4,6 +4,7 @@ import { CreditsService } from '../modules/credits';
 import { webhookTokenOk } from '../modules/dialog360';
 import { SetupService } from '../modules/setup';
 import { OutcomesService } from '../modules/outcomes';
+import { DashboardService } from '../modules/dashboard';
 import { ApiAuth, ApiKeysService, PublicApiReads, requireScope, WebhookEndpointsService, type ApiCaller } from '../modules/public-api';
 import { PromisesService } from '../modules/promises';
 import { PushService } from '../modules/push';
@@ -379,6 +380,12 @@ export class SettingsController {
 export class PlatformController {
   constructor(@Inject(PlatformService) private readonly platform: PlatformService) {}
 
+  /** The caller's platform role, or none (used to show the platform pages to staff only). */
+  @Get('me')
+  me(@CurrentSession() s: AuthSession) {
+    return this.platform.staffRole(s);
+  }
+
   @Get('tenants')
   async directory(@CurrentSession() s: AuthSession) {
     return this.platform.directory(await this.platform.requireStaff(s));
@@ -483,6 +490,11 @@ export class PlatformController {
   @Put('credits/unmatched-events/:id')
   async creditUnmatchedResolve(@CurrentSession() s: AuthSession, @Param('id') id: string, @Body() body: unknown) {
     return this.platform.creditUnmatchedResolve(await this.platform.requireStaff(s, 'platform_owner'), id, body);
+  }
+  /** The platform owner's dashboard: companies, subscriptions, messaging revenue and cost, partner funding, alerts. */
+  @Get('dashboard')
+  async dashboard(@CurrentSession() s: AuthSession, @Query() q: Record<string, string>) {
+    return this.platform.dashboard(await this.platform.requireStaff(s, 'platform_owner'), q);
   }
   @Get('partner/funding')
   async partnerOverview(@CurrentSession() s: AuthSession) {
@@ -666,7 +678,20 @@ export class AutomationRunsController {
 
 @Controller('v1/reports')
 export class ReportsController {
-  constructor(@Inject(ReportsService) private readonly reports: ReportsService, @Inject(OutcomesService) private readonly outcomes: OutcomesService) {}
+  constructor(@Inject(ReportsService) private readonly reports: ReportsService, @Inject(OutcomesService) private readonly outcomes: OutcomesService,
+    @Inject(DashboardService) private readonly dashboard: DashboardService) {}
+
+  /** The company dashboard: volumes, delivery, response times, people, credit and activity by destination and number. */
+  @RequirePermission('reports.read') @Get('dashboard')
+  dashboardReport(@CurrentActor() actor: TenantActor, @Query() q: Record<string, string>) {
+    return this.dashboard.company(actor, q);
+  }
+
+  /** The messages behind a dashboard figure (metadata only), with the inbox's conversation visibility. */
+  @RequirePermission('reports.read') @Get('dashboard/records')
+  dashboardRecords(@CurrentActor() actor: TenantActor, @Query() q: Record<string, string>) {
+    return this.dashboard.records(actor, q);
+  }
 
   /** Outcomes and known costs for a period (W2.9), with what is not measured yet and the assumptions used. */
   @RequirePermission('reports.read') @Get('outcomes')

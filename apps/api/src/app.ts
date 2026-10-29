@@ -45,6 +45,7 @@ import { OperatorService, QuotePortalService } from './modules/operator';
 import { CreditsService, createPaymentProvider } from './modules/credits';
 import { Dialog360Adapter } from './modules/dialog360';
 import { OutcomesService } from './modules/outcomes';
+import { DashboardService } from './modules/dashboard';
 import { ApiAuth, ApiKeysService, PublicApiReads, WebhookEndpointsService } from './modules/public-api';
 import { CustomerLinksService, CustomerPortalService } from './modules/customer-links';
 import { MembersService } from './modules/members.service';
@@ -112,7 +113,7 @@ export class AppModule {
         { provide: DEPS, useValue: deps },
         service(AuthService), service(TenantsService), service(MembersService), service(EntitlementsService),
         service(AuditService), service(FilesService), service(SettingsService), service(InboxService), service(TemplatesService), service(HealthService), service(CampaignsService),
-        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), service(PromisesService), service(SetupService), service(OperatorService), service(QuotePortalService), service(OutcomesService), service(ApiAuth), service(ApiKeysService), service(PublicApiReads), service(WebhookEndpointsService), { provide: PushService, useFactory: () => new PushService({ db: deps.db, config: deps.config, rateLimiter: deps.rateLimiter }, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
+        service(TagsService), service(SavedRepliesService), service(ContactImportService), service(AssignmentService), service(ReportsService), service(AutomationsService), service(CustomerLinksService), service(CustomerPortalService), service(PromisesService), service(SetupService), service(OperatorService), service(QuotePortalService), service(OutcomesService), service(DashboardService), service(ApiAuth), service(ApiKeysService), service(PublicApiReads), service(WebhookEndpointsService), { provide: PushService, useFactory: () => new PushService({ db: deps.db, config: deps.config, rateLimiter: deps.rateLimiter }, deps.push) }, { provide: AiService, useFactory: () => new AiService(deps, deps.ai) },
         { provide: PlatformService, useFactory: () => new PlatformService(deps.platformDb, deps.config.DIALOG360_WEBHOOK_TOKEN ? deps.keys.webhookSecrets : undefined, deps.db,
           deps.config.NODE_ENV !== 'production') },
         { provide: CreditsService, useFactory: () => new CreditsService(deps, createPaymentProvider(deps.config.CREDITS_PROVIDER, deps.keys.webhookSecrets, deps.config.APP_ORIGIN,
