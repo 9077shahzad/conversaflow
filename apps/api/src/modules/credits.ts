@@ -339,9 +339,15 @@ const EventShape = z.object({
 export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEvent, testMode = true): Promise<string> {
   return withContext(db, { tenantId: e.tenantId, userId: null }, async (tx) => {
     if (!(await lockAccount(tx))) return 'no_account';
-    const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed_minor: string }>(
-      'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed_minor FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE', [e.topupId, provider])).rows[0];
+    const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed_minor: string;
+      review_hold: boolean; failure_reason: string | null }>(
+      'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed_minor, review_hold, failure_reason FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE',
+      [e.topupId, provider])).rows[0];
     if (!t) return 'unknown_topup';
+    // A payment of this top-up is with a person (kept unmatched): nothing is credited until they decide; returned by
+    // hand: never credited (recheck of e60ef18, M1 and M2). Not recorded, so the provider's retry is harmless.
+    if (t.failure_reason === 'refunded_by_hand' && e.type === 'payment.succeeded') return 'refunded_by_hand';
+    if (t.review_hold && e.type === 'payment.succeeded') return 'held_for_review';
     const amountOk = e.type === 'dispute.lost' ? e.amountMinor <= Number(t.amount_minor) : e.amountMinor === Number(t.amount_minor);
     // The provider's reference is saved after its call returns, so its webhook can arrive first (an automatic top-up
     // with Stripe). The event names our top-up, company, amount and currency, all checked; its reference is then adopted
@@ -398,14 +404,10 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
 /**
  * After an event was applied (or not): a payment that cannot be applied will not become right if sent again (the
  * reference is adopted when it arrives first). If money may have been taken, it is kept with a platform alert for a
- * person; a failure or an expiry took no money and is only logged. When a top-up is credited, any earlier record of it
- * waiting for a person is closed, so nobody refunds a payment that was credited after all.
+ * person, and a top-up of ours is held so nothing credits it until they decide (credit it, or record a refund by hand).
+ * A failure or an expiry took no money and is only logged.
  */
 export async function settleEventOutcome(db: Db, provider: string, e: PaymentEvent, outcome: string): Promise<string> {
-  if (outcome === 'applied') {
-    await withContext(db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_unmatched_settle($1, $2)', [provider, e.topupId]));
-    return outcome;
-  }
   if (outcome !== 'mismatch' && outcome !== 'unknown_topup' && outcome !== 'no_account') return outcome;
   if (e.type === 'payment.failed') {
     console.warn('credits: a failed payment for a top-up that cannot be found or is closed; no money was taken', provider, e.id, outcome);
@@ -817,7 +819,7 @@ export class CreditWorker {
         await withContext(this.db, { tenantId: d.tenant_id, userId: null }, (tx) => tx.query('UPDATE credit_topups SET provider_ref = $2 WHERE id = $1 AND provider_ref IS NULL', [t.id, r.providerRef]));
         if (r.event) {
           const e = await this.provider.verifyEvent(r.event.raw, r.event.signature);
-          if (e) await applyPaymentEvent(this.db, this.provider.name, e, this.provider.testMode);
+          if (e) await settleEventOutcome(this.db, this.provider.name, e, await applyPaymentEvent(this.db, this.provider.name, e, this.provider.testMode));
         }
         n++;
       } catch (err) { console.error('automatic top-up failed', d.tenant_id, err instanceof Error ? err.message : err); }

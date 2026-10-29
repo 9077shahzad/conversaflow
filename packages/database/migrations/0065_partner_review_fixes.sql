@@ -257,6 +257,12 @@ BEGIN
   VALUES (left(p_provider, 30), p_event_id, left(p_type, 60), p_reason, left(p_tenant, 60), left(p_topup, 60), left(p_provider_ref, 200), p_amount, left(p_currency, 3))
   ON CONFLICT (provider, event_id) DO NOTHING;
   v_new := FOUND;
+  -- A top-up of ours paid while its account was closed: held for a person, so no later webhook or lookup credits it
+  -- while a refund by hand may be under way. (A different amount or reference is a separate payment; the top-up itself
+  -- may still be paid normally, so it is not held.)
+  IF p_reason = 'no_account' AND p_topup ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN
+    UPDATE credit_topups SET review_hold = true WHERE id = p_topup::uuid AND provider = p_provider AND tenant_id::text = p_tenant AND status <> 'succeeded';
+  END IF;
   -- Raised at once; cleared only by credit_alerts_refresh, from the open events (no race with a resolution).
   INSERT INTO platform_alerts (kind, subject, data)
   VALUES ('payment_unmatched', left(p_provider, 30), jsonb_build_object('lastEventId', p_event_id, 'reason', p_reason))
@@ -285,16 +291,22 @@ GRANT EXECUTE ON FUNCTION platform_credit_unmatched(text) TO cf_platform;
 -- Top-ups still pending (or automatic ones closed as unconfirmed in the last three days) are looked up with the provider
 -- directly, at most every ten minutes, so a payment whose webhooks were all lost is still credited, once.
 ALTER TABLE credit_topups ADD COLUMN checked_at timestamptz;
+-- Held for a person: a payment for this top-up could not be applied (closed account, different amount). Nothing credits
+-- it automatically until a platform owner decides: credit it, or record that it was refunded by hand (recheck of
+-- e60ef18, M1 and M2).
+ALTER TABLE credit_topups ADD COLUMN review_hold boolean NOT NULL DEFAULT false;
+GRANT SELECT (review_hold) ON credit_topups TO cf_app, cf_dispatch;
 GRANT UPDATE (checked_at) ON credit_topups TO cf_app;
 CREATE POLICY credit_topups_dispatch_check ON credit_topups FOR SELECT TO cf_dispatch
   USING (status = 'pending' OR (status = 'cancelled' AND failure_reason = 'not_confirmed'));
-GRANT SELECT (id, tenant_id, provider, provider_ref, kind, status, failure_reason, created_at, checked_at) ON credit_topups TO cf_dispatch;
+GRANT SELECT (id, tenant_id, provider, provider_ref, kind, status, failure_reason, created_at, checked_at, amount_minor, currency) ON credit_topups TO cf_dispatch;
 CREATE FUNCTION credit_topups_to_check(p_provider text, p_limit integer) RETURNS TABLE (topup_id uuid, tenant_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT t.id, t.tenant_id FROM credit_topups t
   -- An automatic top-up whose charge answer was lost has no reference yet: it is found at the provider by our top-up id.
   WHERE t.provider = p_provider AND (t.provider_ref IS NOT NULL OR t.kind = 'auto') AND t.created_at < now() - interval '10 minutes'
     AND (t.checked_at IS NULL OR t.checked_at < now() - interval '10 minutes')
+    AND NOT t.review_hold AND t.created_at > now() - interval '30 days'
     AND (t.status = 'pending' OR (t.status = 'cancelled' AND t.failure_reason = 'not_confirmed' AND t.created_at > now() - interval '3 days'))
   ORDER BY t.checked_at NULLS FIRST, t.created_at LIMIT least(greatest(p_limit, 1), 500)
 $$;
@@ -306,33 +318,8 @@ GRANT EXECUTE ON FUNCTION credit_topups_to_check(text, integer) TO cf_app;
 ALTER TABLE credit_unmatched_events ADD COLUMN resolution text CHECK (resolution IS NULL OR length(resolution) BETWEEN 5 AND 500);
 ALTER TABLE credit_unmatched_events ADD COLUMN resolved_by uuid;
 GRANT UPDATE (resolved_at, resolution, resolved_by) ON credit_unmatched_events TO cf_ops;
-CREATE FUNCTION platform_credit_unmatched_resolve(p_token text, p_id uuid, p_resolution text) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
-DECLARE v_staff uuid := platform_require(p_token, 'platform_owner'); v_provider text;
-BEGIN
-  IF p_resolution IS NULL OR length(btrim(p_resolution)) < 5 THEN RAISE EXCEPTION 'say what was done' USING ERRCODE = 'check_violation'; END IF;
-  UPDATE credit_unmatched_events SET resolved_at = now(), resolution = btrim(p_resolution), resolved_by = v_staff
-  WHERE id = p_id AND resolved_at IS NULL RETURNING provider INTO v_provider;
-  IF NOT FOUND THEN RAISE EXCEPTION 'no such open event' USING ERRCODE = 'check_violation'; END IF;
-  INSERT INTO platform_audit_events (actor_user_id, action, target_type, target_id, metadata)
-  VALUES (v_staff, 'credits.unmatched_resolved', 'credit_unmatched_event', p_id::text, jsonb_build_object('resolution', btrim(p_resolution)));
-END $$;
-ALTER FUNCTION platform_credit_unmatched_resolve(text, uuid, text) OWNER TO cf_ops;
-REVOKE ALL ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text) TO cf_platform;
 
 -- --- Recheck of 521e0af ---------------------------------------------------------------------------------------------
--- An unmatched event whose top-up was later credited (a reopened account, a lookup) is closed automatically, so nobody
--- refunds a payment that was credited after all (finding 2).
-CREATE FUNCTION credit_unmatched_settle(p_provider text, p_topup uuid) RETURNS void
-LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
-  UPDATE credit_unmatched_events SET resolved_at = now(), resolution = 'Credited automatically: the top-up was applied later'
-  WHERE provider = p_provider AND topup_ref = p_topup::text AND resolved_at IS NULL
-$$;
-ALTER FUNCTION credit_unmatched_settle(text, uuid) OWNER TO cf_dispatch;
-REVOKE ALL ON FUNCTION credit_unmatched_settle(text, uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION credit_unmatched_settle(text, uuid) TO cf_app;
-GRANT UPDATE (resolved_at, resolution) ON credit_unmatched_events TO cf_dispatch;
 
 -- Refunds the provider has not finished after the retry count are kept being asked about once a day (finding 3).
 ALTER TABLE credit_refunds ADD COLUMN checked_at timestamptz;
@@ -370,3 +357,55 @@ END $$;
 ALTER FUNCTION credit_alerts_refresh() OWNER TO cf_dispatch;
 REVOKE ALL ON FUNCTION credit_alerts_refresh() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION credit_alerts_refresh() TO cf_app;
+
+-- --- Recheck of e60ef18: the hand-off to a person -------------------------------------------------------------------
+GRANT UPDATE (review_hold) ON credit_topups TO cf_dispatch;
+CREATE POLICY credit_topups_dispatch_hold ON credit_topups FOR UPDATE TO cf_dispatch USING (status <> 'succeeded') WITH CHECK (status <> 'succeeded');
+CREATE POLICY credit_topups_dispatch_hold_read ON credit_topups FOR SELECT TO cf_dispatch USING (status <> 'succeeded');
+
+-- A platform owner closes a kept payment with one of three decisions:
+--   credit   the payment is genuine and the company's account is open: the hold is lifted and the next lookup (or the
+--            provider's retry) credits it, once;
+--   refunded the money was returned by hand at the provider: the top-up is closed and can never be credited;
+--   closed   no top-up of ours is involved (another environment's event, for example): recorded only.
+CREATE FUNCTION platform_credit_unmatched_resolve(p_token text, p_id uuid, p_action text, p_resolution text) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE v_staff uuid := platform_require(p_token, 'platform_owner'); u record; v_held boolean;
+BEGIN
+  IF p_action NOT IN ('credit', 'refunded', 'closed') THEN RAISE EXCEPTION 'credit, refunded or closed' USING ERRCODE = 'check_violation'; END IF;
+  IF p_resolution IS NULL OR length(btrim(p_resolution)) < 5 THEN RAISE EXCEPTION 'say what was done' USING ERRCODE = 'check_violation'; END IF;
+  SELECT * INTO u FROM credit_unmatched_events WHERE id = p_id AND resolved_at IS NULL FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'no such open event' USING ERRCODE = 'check_violation'; END IF;
+  SELECT t.review_hold INTO v_held FROM credit_topups t
+  WHERE u.topup_ref ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND t.id = u.topup_ref::uuid
+    AND t.provider = u.provider AND t.tenant_id::text = u.tenant_ref FOR UPDATE;
+  IF p_action = 'closed' AND v_held THEN
+    RAISE EXCEPTION 'this payment belongs to a top-up of ours: decide credit or refunded' USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_action IN ('credit', 'refunded') AND v_held IS NOT TRUE THEN
+    RAISE EXCEPTION 'no top-up of ours is held for this payment; use closed' USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_action = 'credit' THEN
+    IF NOT EXISTS (SELECT 1 FROM credit_accounts a WHERE a.tenant_id::text = u.tenant_ref AND a.status = 'active') THEN
+      RAISE EXCEPTION 'reopen the company''s credit account first' USING ERRCODE = 'check_violation';
+    END IF;
+    UPDATE credit_topups SET review_hold = false, checked_at = NULL WHERE id = u.topup_ref::uuid;
+  ELSIF p_action = 'refunded' THEN
+    -- Stays held (never looked up or credited again), now closed as refunded by hand.
+    UPDATE credit_topups SET status = 'cancelled', failure_reason = 'refunded_by_hand', settled_at = now(), checked_at = 'infinity'
+    WHERE id = u.topup_ref::uuid;
+  END IF;
+  -- Every open record of the same top-up is closed with it (the webhook and a lookup may both have kept one).
+  UPDATE credit_unmatched_events SET resolved_at = now(), resolution = p_action || ': ' || btrim(p_resolution), resolved_by = v_staff
+  WHERE resolved_at IS NULL AND (id = p_id OR (p_action <> 'closed' AND provider = u.provider AND topup_ref = u.topup_ref));
+  INSERT INTO platform_audit_events (actor_user_id, action, target_type, target_id, metadata)
+  VALUES (v_staff, 'credits.unmatched_resolved', 'credit_unmatched_event', p_id::text,
+          jsonb_build_object('action', p_action, 'resolution', btrim(p_resolution), 'topup', u.topup_ref, 'tenant', u.tenant_ref));
+END $$;
+ALTER FUNCTION platform_credit_unmatched_resolve(text, uuid, text, text) OWNER TO cf_ops;
+REVOKE ALL ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text, text) TO cf_platform;
+GRANT SELECT (id, tenant_id, provider, review_hold), UPDATE (review_hold, status, failure_reason, settled_at, checked_at) ON credit_topups TO cf_ops;
+CREATE POLICY credit_topups_ops_hold ON credit_topups FOR SELECT TO cf_ops USING (review_hold);
+CREATE POLICY credit_topups_ops_hold_update ON credit_topups FOR UPDATE TO cf_ops USING (review_hold) WITH CHECK (status <> 'succeeded');
+GRANT SELECT (tenant_id, status) ON credit_accounts TO cf_ops;

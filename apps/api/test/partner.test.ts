@@ -451,12 +451,14 @@ describe('fixes from the review of 0064 (migration 0065)', () => {
 
 describe('payment recovery: early, repeated, out-of-order and lost Stripe events give exactly one credit (owner point 2)', () => {
   const provider = () => new StripePaymentProvider(STRIPE_KEY, STRIPE_WHSEC, 'http://localhost', stripe.url);
-  const age = async (topupId: string, minutes: number) => {
+  /** Moves a top-up back in time; `recheck` also lets ten minutes pass since its last lookup. */
+  const age = async (topupId: string, minutes: number, recheck = false) => {
     await t.ownerDb.query('ALTER TABLE credit_topups NO FORCE ROW LEVEL SECURITY');
-    try { await t.ownerDb.query(`UPDATE credit_topups SET created_at = now() - make_interval(mins => $2), checked_at = NULL WHERE id = $1`, [topupId, minutes]); }
+    try { await t.ownerDb.query(`UPDATE credit_topups SET created_at = now() - make_interval(mins => $2),
+        checked_at = CASE WHEN $3 AND checked_at <> 'infinity' THEN NULL ELSE checked_at END WHERE id = $1`, [topupId, minutes, recheck]); }
     finally { await t.ownerDb.query('ALTER TABLE credit_topups FORCE ROW LEVEL SECURITY'); }
   };
-  const entries = (topupId: string) => app(async (tx) => (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM credit_entries WHERE topup_id = $1 AND kind = 'topup'`, [topupId])).rows[0]!.n);
+  const entries = (topupId: string, tid = tenant) => app(async (tx) => (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM credit_entries WHERE topup_id = $1 AND kind = 'topup'`, [topupId])).rows[0]!.n, tid);
   const evt = (type: string, object: unknown) => ({ id: `evt_${type}_${randomUUID().slice(0, 8)}`, type, data: { object } });
 
   it('early (before our reference is saved), repeated, a second notice for the same payment, and a late "expired": one credit', async () => {
@@ -505,7 +507,7 @@ describe('payment recovery: early, repeated, out-of-order and lost Stripe events
     expect(await worker.closeStuckAutoTopUps()).toBe(1);                                             // closed as unconfirmed, with a notice
     const before = (await account()).balanceMinor;
     stripe.intents.get(charged.providerRef)!.status = 'succeeded';
-    await age(id, 30);
+    await age(id, 30, true);
     expect(await worker.recoverTopUps()).toBe(1);
     expect(await entries(id)).toBe(1);
     expect((await account()).balanceMinor).toBe(before + 5200);
@@ -524,9 +526,11 @@ describe('payment recovery: early, repeated, out-of-order and lost Stripe events
     expect(await new CreditWorker(t.deps.db, provider()).refreshAlerts()).toContain('payment_unmatched:stripe');
     // A failure for a top-up that cannot be found took no money: logged, no alert, nothing for a person.
     expect((await stripeHook(evt('payment_intent.payment_failed', { ...pi, id: `pi_test_orphan2_${randomUUID().slice(0, 6)}` })).expect(200)).body.outcome).toBe('no_money_taken:unknown_topup');
-    await staff.put(`/v1/platform/credits/unmatched-events/${open[0]!.id}`, { resolution: 'x' }).expect(400);
+    await staff.put(`/v1/platform/credits/unmatched-events/${open[0]!.id}`, { action: 'closed', resolution: 'x' }).expect(400);
+    // No top-up of ours: only "closed" is possible.
+    expect((await staff.put(`/v1/platform/credits/unmatched-events/${open[0]!.id}`, { action: 'credit', resolution: 'Try to credit it' })).status).toBe(409);
     for (const u of (await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string }>) {
-      await staff.put(`/v1/platform/credits/unmatched-events/${u.id}`, { resolution: 'Refunded in the Stripe dashboard (test)' }).expect(200);
+      await staff.put(`/v1/platform/credits/unmatched-events/${u.id}`, { action: 'closed', resolution: 'Refunded in the Stripe dashboard (test)' }).expect(200);
     }
     expect((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body).toEqual([]);
     expect(await new CreditWorker(t.deps.db, provider()).refreshAlerts()).not.toContain('payment_unmatched:stripe');
@@ -574,26 +578,48 @@ describe('payment recovery: early, repeated, out-of-order and lost Stripe events
     expect((await account()).balanceMinor).toBe(before + 5700 + 5900);
   });
 
-  it('a payment arriving for a closed account is kept for a person; when the account is reopened and the top-up credited, the record closes itself', async () => {
+  it('a payment arriving for a closed account is held for a person: nothing credits it until they decide credit or refunded', async () => {
     const u = await newUser(t, 'pt-rec');
     const tid = await newCompany(u, 'ptrec', 'business');
     await activateSubscription(t, tid);
     await enableMfa(u);
     await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'partner_360dialog', note: 'Recovery test company' }).expect(200);
     await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
-    const r = (await u.post('/v1/credits/topups', { amountMinor: 6100 }).expect(201)).body;
-    const session = [...stripe.sessions.values()].at(-1)!;
-    await age(r.id, 3 * 24 * 60);                                                                    // an abandoned checkout no longer blocks a switch
+    const r1 = (await u.post('/v1/credits/topups', { amountMinor: 6100 }).expect(201)).body;
+    const s1 = [...stripe.sessions.values()].at(-1)!;
+    const r2 = (await u.post('/v1/credits/topups', { amountMinor: 6200 }).expect(201)).body;
+    const s2 = [...stripe.sessions.values()].at(-1)!;
+    await age(r1.id, 3 * 24 * 60);
+    await age(r2.id, 3 * 24 * 60);                                                                   // abandoned checkouts no longer block a switch
     await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'meta_direct', note: 'Back to direct' }).expect(200);
-    stripe.pay(String(session.id));
-    const e = evt('checkout.session.completed', session);
-    expect((await stripeHook(e).expect(200)).body.outcome).toBe('unmatched:no_account');
-    expect(((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ eventId: string }>).some((x) => x.eventId === e.id)).toBe(true);
+    stripe.pay(String(s1.id));
+    stripe.pay(String(s2.id));
+    const e1 = evt('checkout.session.completed', s1);
+    const e2 = evt('checkout.session.completed', s2);
+    expect((await stripeHook(e1).expect(200)).body.outcome).toBe('unmatched:no_account');
+    expect((await stripeHook(e2).expect(200)).body.outcome).toBe('unmatched:no_account');
+    const kept = (await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string; eventId: string }>;
+    const k1 = kept.find((x) => x.eventId === e1.id)!;
+    const k2 = kept.find((x) => x.eventId === e2.id)!;
+    // The account is reopened, but the held payments are not credited by a lookup or a retried webhook.
     await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'partner_360dialog', note: 'Partner again' }).expect(200);
     await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
-    await age(r.id, 3 * 24 * 60);
-    expect(await new CreditWorker(t.deps.db, provider()).recoverTopUps()).toBe(1);
+    const worker = new CreditWorker(t.deps.db, provider());
+    expect(await worker.recoverTopUps()).toBe(0);
+    expect((await stripeHook(evt('checkout.session.async_payment_succeeded', s1)).expect(200)).body.outcome).toBe('held_for_review');
+    expect((await u.get('/v1/credits').expect(200)).body.balanceMinor).toBe(0);
+    expect((await staff.put(`/v1/platform/credits/unmatched-events/${k1.id}`, { action: 'closed', resolution: 'Close without deciding' })).status).toBe(409);
+    // Decision 1: credit it. The hold is lifted and the next lookup credits it once.
+    await staff.put(`/v1/platform/credits/unmatched-events/${k1.id}`, { action: 'credit', resolution: 'Genuine payment; account reopened' }).expect(200);
+    expect(await worker.recoverTopUps()).toBe(1);
+    expect(await entries(r1.id, tid)).toBe(1);
+    // Decision 2: refunded by hand at Stripe. The top-up is closed, and a later success never credits it.
+    await staff.put(`/v1/platform/credits/unmatched-events/${k2.id}`, { action: 'refunded', resolution: 'Refunded in the Stripe dashboard (test)' }).expect(200);
+    expect((await stripeHook(evt('checkout.session.async_payment_succeeded', s2)).expect(200)).body.outcome).toBe('refunded_by_hand');
+    expect(await worker.recoverTopUps()).toBe(0);
+    expect(await entries(r2.id, tid)).toBe(0);
     expect((await u.get('/v1/credits').expect(200)).body.balanceMinor).toBe(6100);
-    expect(((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ eventId: string }>).some((x) => x.eventId === e.id)).toBe(false);
+    const left = (await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ eventId: string }>;
+    expect(left.some((x) => x.eventId === e1.id || x.eventId === e2.id)).toBe(false);
   });
 });

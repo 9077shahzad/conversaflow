@@ -146,12 +146,11 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'platform_partner_settings(text,text,jsonb)': '32752fe0b647df2323b4515e1d3bfcf1',
   'platform_set_messaging_route(text,uuid,text,text)': 'ae8dd25d63f2b2c77ac62415745e5c26',
   // 0065: payment events that cannot be applied, and recovery by lookup with the provider.
-  'credit_record_unmatched(text,text,text,text,text,text,text,bigint,text)': '0a4bccb11a02369381a2fd0acdbd7646',
-  'credit_topups_to_check(text,integer)': '5c9b7f8f691118f02d42e16e4ae2959a',
+  'credit_record_unmatched(text,text,text,text,text,text,text,bigint,text)': '95a78539ff5da1ac2b5ec67aa563743c',
+  'credit_topups_to_check(text,integer)': 'bc9ebfd827f4b4e88126ecdb555b825d',
   'platform_credit_unmatched(text)': 'f351deae43c24cc77d4bcadc96f7edcc',
-  'credit_unmatched_settle(text,uuid)': '0eaf13ef1d10a6645eeabe34e7c3bc1e',
   'credit_alerts_refresh()': 'bf1b23bc11d157c53009f2dde46abf68',
-  'platform_credit_unmatched_resolve(text,uuid,text)': 'c37629a7ea48b74d844ef856ae8ddf70',
+  'platform_credit_unmatched_resolve(text,uuid,text,text)': '2c2f7f005f2fb4bf2bc2d0f6c2a0fec6',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': '4046a5f0c06663a07319930b8af5be4c',  // re-pinned by 0064 (currency must match)

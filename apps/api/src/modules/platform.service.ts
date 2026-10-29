@@ -246,9 +246,9 @@ export class PlatformService {
   }
   async creditUnmatchedResolve(staff: StaffActor, id: string, input: unknown) {
     if (!isUuid(id)) throw Errors.notFound('Event');
-    const b = parse(z.object({ resolution: z.string().trim().min(5).max(500) }).strict(), input);
-    await this.run(staff, (tx) => tx.query('SELECT platform_credit_unmatched_resolve($1, $2, $3)', [staff.token, id, b.resolution]));
-    return { id, resolved: true };
+    const b = parse(z.object({ action: z.enum(['credit', 'refunded', 'closed']), resolution: z.string().trim().min(5).max(500) }).strict(), input);
+    await this.run(staff, (tx) => tx.query('SELECT platform_credit_unmatched_resolve($1, $2, $3, $4)', [staff.token, id, b.action, b.resolution]));
+    return { id, action: b.action, resolved: true };
   }
   /** Partner funding: the ledger totals, the monitor's figures (computed now) and open alerts. */
   async partnerOverview(staff: StaffActor) {
