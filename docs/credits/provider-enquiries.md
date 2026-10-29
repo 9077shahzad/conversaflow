@@ -3,14 +3,14 @@
 Owner approval of 29 Oct 2026: contact 360dialog sales (preferred candidate, subject to written confirmation) and
 Stripe. No account opening, paid plan or agreement.
 
-## Status (29 Oct 2026)
+## Status (29 Oct 2026, 23:30 Gulf time)
 
-| Provider | Route | Status |
-| --- | --- | --- |
-| 360dialog | Web form at start.360dialog.com ("Connect to my software" → "For many businesses" → contact details). The form takes contact details only, no written message; sales then reply by email. Their other sales channel is a WhatsApp chat. | **Not yet sent.** The form requires a phone number, which I have asked you for. The email will be shehzad_falak@yahoo.com, as you chose. |
-| Stripe | Sales form at stripe.com/contact/sales. | **Not yet sent.** The form refuses free email addresses such as Yahoo and asks for a company-domain work email. I have asked you whether one exists (for example @meronatic.com). Stripe's support contact needs a Stripe account, which I may not create. |
+| Provider | Route | Status | Exact blocker | Alternative |
+| --- | --- | --- | --- | --- |
+| 360dialog | Web form at start.360dialog.com ("Connect to my software" → "For many businesses" → contact details). The form takes contact details only; sales reply by email. | **Not sent.** | The form requires a phone number. The owner's message of 29 Oct carried the placeholder "[INSERT NUMBER WITH COUNTRY CODE]" rather than a number. | Supply the number and I submit the form. Or submit it yourself, with your own phone and email, and paste in the text below. |
+| Stripe | Sales form at stripe.com/contact/sales. | **Not sent.** | The form refuses free email addresses (Yahoo) and requires a company-domain work email. The owner's message carried the placeholder "[INSERT VERIFIED COMPANY EMAIL]". Stripe's support contact needs a signed-in Stripe account, which I may not create. | Set up a mailbox on the company's own domain (for example on meronatic.com), send me the address, and I submit the form. Opening a Stripe account to reach support is not suggested, because sign-up accepts Stripe's services agreement. |
 
-Nothing has been submitted to either provider, and no account has been created.
+Nothing has been submitted to either provider, no account has been created, and no plan or agreement has been accepted.
 
 ## Text to send to 360dialog
 

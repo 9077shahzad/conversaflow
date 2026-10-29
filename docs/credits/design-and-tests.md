@@ -89,8 +89,8 @@ Fixed in 51daa71:
 
 | Finding | Fix |
 | --- | --- |
-| H1 A credit account opened before routes existed stayed active for a company on the direct route, which would charge it twice (Meta and us) | Such accounts are moved to the partner route, or closed if the company has a live direct number. The database also checks the route when an account is reactivated, and the code checks it again before any charge |
-| H2 A Stripe automatic top-up could be paid before our reference was saved; its webhook was then dropped with a success answer, so Stripe never retried and the customer paid without receiving credit | The event names our top-up, company, amount and currency, all checked, so its reference is adopted. Any event that cannot be applied is answered with an error, so Stripe sends it again (for up to three days) |
+| H1 A credit account opened before routes existed stayed active for a company on the direct route, which would charge it twice (Meta and us) | Such accounts are closed and the company keeps direct billing; it is never moved to the partner route (that needs a platform owner's explicit switch for that company). The migration stops if such an account still holds credit or payments in progress. The database also checks the route when an account is reactivated, and the code checks it again before any charge |
+| H2 A Stripe automatic top-up could be paid before our reference was saved; its webhook was then dropped with a success answer, so Stripe never retried and the customer paid without receiving credit | The event names our top-up, company, amount and currency, all checked, so its reference is adopted. An event that still cannot be applied is kept with a platform alert (see "Payment recovery") |
 | M1 Route changes and new numbers could race | One lock per company for route changes, numbers and accounts |
 | M2 A switch back to direct ignored top-ups and refunds in progress; a closed account could never be reopened | Refused while either is in progress; a closed account can be reopened in its original currency |
 | M3 Production could still move a company to the partner route | Refused in production, as is opening a credit account |
@@ -99,6 +99,26 @@ Fixed in 51daa71:
 | Low | Consent: a change of language is checked too. Funding: the buffer covers customers' unspent credit, figures must be in the partner's currency, closed accounts' usage counts, and the check cannot be called from a company's context. Stripe: any one of several signatures (secret rotation) is accepted; live events are refused |
 
 Six new tests cover these (`apps/api/test/partner.test.ts`, "fixes from the review of 0064").
+
+A recheck of these fixes found three more Medium points, fixed in 521e0af: starting a top-up now locks the account,
+so a route switch cannot close it in between; the migration closes old accounts instead of moving them; and events
+that cannot be applied are kept rather than refused. Lows fixed there too: one lock order when opening an account,
+Stripe refunds pending for more than three days are escalated to a person, and an event from the other Stripe mode
+(live or test) is refused.
+
+## Payment recovery: exactly one credit (owner instruction of 29 Oct, point 2)
+
+| Situation | What happens | Test |
+| --- | --- | --- |
+| The webhook arrives before our reference is saved | The event's top-up, company, amount and currency are checked and its reference adopted; credited | "early, repeated…" |
+| Stripe sends the same event again | Recognised by its event id; nothing more happens (`duplicate`) | same |
+| A second notice for the same payment (for example `async_payment_succeeded` after `completed`) | The top-up is already paid (`already_applied`) | same |
+| Out of order: "expired" after "paid" | Ignored (`not_pending:succeeded`) | same |
+| Every webhook lost, or Stripe stops retrying | The worker looks each pending top-up up with Stripe directly (after 10 minutes, then at most every 10 minutes) and applies the answer through the same path; the late webhook then changes nothing | "every webhook lost…" |
+| An automatic top-up closed as unconfirmed, paid later | Looked up for three more days; credited once | "an automatic top-up closed…" |
+| An event that can never be applied (unknown top-up, different amount, account closed) | Kept once in `credit_unmatched_events` with a platform alert; a platform owner refunds or credits by hand and closes it in the console with what was done | "a payment that can never be applied…" |
+
+Each credit is one ledger entry tied to its top-up, and the tests count those entries as well as the balance.
 
 ## Test evidence (29 Oct 2026)
 
