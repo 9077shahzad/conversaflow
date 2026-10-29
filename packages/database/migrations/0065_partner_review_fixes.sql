@@ -298,6 +298,8 @@ ALTER TABLE credit_topups ADD COLUMN review_hold boolean NOT NULL DEFAULT false;
 -- Released by a person to be credited: looked up whatever its status or age, until credited.
 ALTER TABLE credit_topups ADD COLUMN released_at timestamptz;
 GRANT SELECT (review_hold) ON credit_topups TO cf_app, cf_dispatch;
+-- The hold is set by the payment-event transaction itself (cf_app, in the company's context), never released by it.
+GRANT UPDATE (review_hold) ON credit_topups TO cf_app;
 GRANT UPDATE (checked_at) ON credit_topups TO cf_app;
 CREATE POLICY credit_topups_dispatch_check ON credit_topups FOR SELECT TO cf_dispatch
   USING (status = 'pending' OR (status = 'cancelled' AND failure_reason = 'not_confirmed'));
@@ -419,3 +421,13 @@ GRANT SELECT (id, tenant_id, provider, review_hold, released_at), UPDATE (review
 CREATE POLICY credit_topups_ops_hold ON credit_topups FOR SELECT TO cf_ops USING (review_hold OR released_at IS NOT NULL);
 CREATE POLICY credit_topups_ops_hold_update ON credit_topups FOR UPDATE TO cf_ops USING (review_hold) WITH CHECK (status <> 'succeeded');
 GRANT SELECT (tenant_id, status) ON credit_accounts TO cf_ops;
+
+-- Only a platform owner's decision lifts a hold (the application can only set one).
+CREATE FUNCTION credit_topups_hold_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.review_hold AND NOT NEW.review_hold AND current_user <> 'cf_ops' THEN
+    RAISE EXCEPTION 'a held top-up is released only by a platform owner''s decision' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER credit_topups_hold_guard BEFORE UPDATE OF review_hold ON credit_topups FOR EACH ROW EXECUTE FUNCTION credit_topups_hold_guard();

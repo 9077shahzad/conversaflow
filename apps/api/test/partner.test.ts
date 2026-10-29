@@ -578,6 +578,26 @@ describe('payment recovery: early, repeated, out-of-order and lost Stripe events
     expect((await account()).balanceMinor).toBe(before + 5700 + 5900);
   });
 
+  it('a hold is set in the same step as the event, and only a platform owner lifts it; a dispute before any credit holds the top-up', async () => {
+    // A dispute lost on a payment we have not credited yet (still pending here): held at once, so a later success cannot credit it.
+    const r = (await owner.post('/v1/credits/topups', { amountMinor: 5400 }).expect(201)).body;
+    const session = [...stripe.sessions.values()].at(-1)!;
+    stripe.pay(String(session.id));
+    const pi = String(stripe.sessions.get(String(session.id))!.payment_intent);
+    const dispute = evt('charge.dispute.closed', { id: 'dp_early', status: 'lost', payment_intent: pi, amount: 5400, currency: 'sar', reason: 'fraudulent' });
+    expect((await stripeHook(dispute).expect(200)).body.outcome).toBe('unmatched:dispute_uncredited');
+    expect((await stripeHook(dispute).expect(200)).body.outcome).toBe('unmatched:dispute_uncredited');               // repeated: still kept, once
+    expect((await stripeHook(evt('checkout.session.completed', session)).expect(200)).body.outcome).toBe('held_for_review');
+    await age(r.id, 30, true);
+    expect(await new CreditWorker(t.deps.db, provider()).recoverTopUps()).toBe(0);
+    expect(await entries(r.id)).toBe(0);
+    expect(((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ topupRef: string }>).filter((x) => x.topupRef === r.id)).toHaveLength(1);
+    // The application can set a hold, never lift one.
+    await expect(app((tx) => tx.query('UPDATE credit_topups SET review_hold = false WHERE id = $1', [r.id]))).rejects.toThrow(/platform owner/);
+    const k = ((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string; topupRef: string }>).find((x) => x.topupRef === r.id)!;
+    await staff.put(`/v1/platform/credits/unmatched-events/${k.id}`, { action: 'refunded', resolution: 'Taken back by the bank (dispute lost)' }).expect(200);
+  });
+
   it('a payment arriving for a closed account is held for a person: nothing credits it until they decide credit or refunded', async () => {
     const u = await newUser(t, 'pt-rec');
     const tid = await newCompany(u, 'ptrec', 'business');

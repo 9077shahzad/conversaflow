@@ -338,7 +338,15 @@ const EventShape = z.object({
  */
 export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEvent, testMode = true): Promise<string> {
   return withContext(db, { tenantId: e.tenantId, userId: null }, async (tx) => {
-    if (!(await lockAccount(tx))) return 'no_account';
+    if (!(await lockAccount(tx))) {
+      // Paid (or taken back) while the account is closed: the top-up is held in this same transaction, so no later
+      // webhook or lookup credits it while a person decides (recheck of 3bd80a3, M-A).
+      if (e.type !== 'payment.failed') {
+        await tx.query(`UPDATE credit_topups SET review_hold = true WHERE id = $1 AND provider = $2 AND status <> 'succeeded'
+                          AND (provider_ref IS NULL OR provider_ref = $3) AND currency = $4`, [e.topupId, provider, e.providerRef, e.currency]);
+      }
+      return 'no_account';
+    }
     const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed_minor: string;
       review_hold: boolean; failure_reason: string | null }>(
       'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed_minor, review_hold, failure_reason FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE',
@@ -361,7 +369,12 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     const seen = await tx.query(`INSERT INTO credit_payment_events (tenant_id, provider, event_id, type, provider_ref, amount_minor, currency, outcome)
                                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'received') ON CONFLICT (provider, event_id) DO NOTHING RETURNING id`,
       [e.tenantId, provider, e.id, e.type, e.providerRef, e.amountMinor, e.currency]);
-    if (!seen.rowCount) return 'duplicate';
+    if (!seen.rowCount) {
+      // A repeated dispute for a payment never credited is reported again, so its record for a person is not lost if
+      // the first attempt to keep it failed (recheck of 3bd80a3, M-B).
+      const before = (await tx.query<{ outcome: string }>('SELECT outcome FROM credit_payment_events WHERE provider = $1 AND event_id = $2', [provider, e.id])).rows[0];
+      return before?.outcome === 'dispute_uncredited' ? 'dispute_uncredited' : 'duplicate';
+    }
     const outcome = async (o: string) => { await tx.query('UPDATE credit_payment_events SET outcome = $3 WHERE provider = $1 AND event_id = $2', [provider, e.id, o]); return o; };
     if (e.type === 'payment.succeeded') {
       if (t.status === 'succeeded') return outcome('already_applied');
@@ -387,8 +400,12 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
     // taken back even below zero (review M3).
     // Only refunds that went through count (a pending one may still be refused, recheck N3); earlier disputes of the
     // same payment are counted by amount, so a second partial dispute applies too (N4).
-    // The bank took back a payment we never credited (held for a person, say): it must never be credited later.
-    if (t.status !== 'succeeded') return outcome(t.status === 'pending' || t.review_hold ? 'dispute_uncredited' : 'nothing_to_reverse');
+    // The bank took back a payment we never credited: the top-up is held in this same transaction, so it can never be
+    // credited later by a webhook or a lookup, and a person closes it (recheck of 3bd80a3, M-B).
+    if (t.status !== 'succeeded') {
+      await tx.query('UPDATE credit_topups SET review_hold = true WHERE id = $1', [t.id]);
+      return outcome('dispute_uncredited');
+    }
     const refundedOk = Number((await tx.query<{ s: string }>(`SELECT coalesce(sum(amount_minor), 0) AS s FROM credit_refunds WHERE topup_id = $1 AND status = 'succeeded'`, [t.id])).rows[0]!.s);
     const take = Math.min(e.amountMinor, Number(t.amount_minor) - refundedOk - Number(t.reversed_minor));
     if (take <= 0) return outcome('nothing_to_reverse');
