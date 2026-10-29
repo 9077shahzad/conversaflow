@@ -203,7 +203,7 @@ describe('top-ups, receipts and payment events', () => {
     const forged = provider.event({ type: 'payment.succeeded', providerRef: ref, amountMinor: 10000, currency: 'SAR', tenantId: tenant, topupId: start.id });
     await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', '00'.repeat(32)).send(forged.raw).expect(400);
     const wrongAmount = provider.event({ type: 'payment.succeeded', providerRef: ref, amountMinor: 99999, currency: 'SAR', tenantId: tenant, topupId: start.id });
-    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', wrongAmount.signature).send(wrongAmount.raw).expect(200)).body.outcome).toBe('mismatch');
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', wrongAmount.signature).send(wrongAmount.raw).expect(409)).body.error.code).toBe('payment_event_mismatch');
     await http().post('/v1/webhooks/credits/stripe').set('Content-Type', 'application/json').send('{}').expect(404);
     // The real event, delivered three times: credited once.
     const ok = provider.event({ type: 'payment.succeeded', providerRef: ref, amountMinor: 10000, currency: 'SAR', tenantId: tenant, topupId: start.id });
@@ -607,7 +607,7 @@ describe('review fixes (0062)', () => {
   it('an event that does not match yet is not remembered, so the provider retry is applied (M4)', async () => {
     const start = (await owner.post('/v1/credits/topups', { amountMinor: 5000 }).expect(201)).body;
     const wrongRef = provider_.event({ id: 'evt_same', type: 'payment.succeeded', providerRef: 'pay_other', amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: start.id });
-    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', wrongRef.signature).send(wrongRef.raw).expect(200)).body.outcome).toBe('mismatch');
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', wrongRef.signature).send(wrongRef.raw).expect(409)).body.error.code).toBe('payment_event_mismatch');   // answered with an error: the provider sends it again
     const right = provider_.event({ id: 'evt_same', type: 'payment.succeeded', providerRef: `pay_test_${start.id}`, amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: start.id });
     expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', right.signature).send(right.raw).expect(200)).body.outcome).toBe('applied');
   });

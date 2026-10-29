@@ -163,7 +163,8 @@ process.on('SIGINT', () => (stopping = true));
       // Message credits: reservations never billed are given back; automatic top-ups for companies that turned them on.
       try { await credits.releaseStale(200); await credits.settlePendingRefunds(100); await credits.closeStuckAutoTopUps(100); await credits.autoTopUps(100); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
       // Partner funding: the partner's balance against what it must cover; alerts are raised or cleared (owner instruction 4).
-      try { const f = await partnerFundingCheck(appDb); if (f?.openAlerts.length) console.warn('partner funding alerts', f.openAlerts.join(', ')); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
+      // Only where the partner route is configured (never in production until approved).
+      if (env.DIALOG360_WEBHOOK_TOKEN) try { const f = await partnerFundingCheck(appDb); if (f?.openAlerts.length) console.warn('partner funding alerts', f.openAlerts.join(', ')); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
       await new Promise((r) => setTimeout(r, 60_000));
     }
   })();

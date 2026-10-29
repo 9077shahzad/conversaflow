@@ -92,14 +92,20 @@ export class StripePaymentProvider implements PaymentProvider {
       if (!paymentIntent) throw new AppError(409, 'not_refundable', 'Stripe has no payment for this top-up.');
     }
     const r = await this.api('POST', '/v1/refunds', { payment_intent: paymentIntent, amount: i.amountMinor, 'metadata[refundId]': i.idempotencyKey }, `refund-${i.idempotencyKey}`);
-    // 'pending' refunds complete without further action in the large majority of cases; 'failed' or 'canceled' did not.
-    const status = r.status === 'failed' || r.status === 'canceled' ? 'failed' as const : 'succeeded' as const;
-    return { refundRef: String(r.id), status };
+    return { refundRef: String(r.id), status: refundState(r.status) };
+  }
+
+  /** A refund Stripe reported as pending (or requiring action): its state now (review of 0064, M6). */
+  async refundStatus(refundRef: string) {
+    const r = await this.api('GET', `/v1/refunds/${encodeURIComponent(refundRef)}`);
+    return refundState(r.status);
   }
 
   async verifyEvent(raw: string, signature: string | undefined): Promise<PaymentEvent | null> {
     this.checkSignature(raw, signature);
-    const ev = JSON.parse(raw) as { id: string; type: string; data: { object: Record<string, unknown> } };
+    const ev = JSON.parse(raw) as { id: string; type: string; livemode?: boolean; data: { object: Record<string, unknown> } };
+    // Test mode only: a live event is refused even when signed (a live endpoint pointed here by mistake).
+    if (ev.livemode === true) throw new AppError(400, 'live_event_refused', 'Live payment events are not accepted while payments are in test mode.');
     const o = ev.data?.object ?? {};
     const meta = (o.metadata ?? {}) as Record<string, string>;
     const base = (type: PaymentEvent['type'], providerRef: string, amount: number, currency: string, m: Record<string, string>, reason?: string): PaymentEvent | null =>
@@ -137,13 +143,18 @@ export class StripePaymentProvider implements PaymentProvider {
   }
 
   private checkSignature(raw: string, header: string | undefined) {
-    const parts = Object.fromEntries((header ?? '').split(',').map((p) => p.trim().split('=') as [string, string]).filter((p) => p.length === 2));
-    const t = Number(parts.t);
+    // Stripe sends several v1 signatures while a webhook secret is being rolled; any one valid signature is enough.
+    const pairs = (header ?? '').split(',').map((p) => p.trim().split('=')).filter((p) => p.length === 2) as Array<[string, string]>;
+    const t = Number(pairs.find(([k]) => k === 't')?.[1]);
+    const v1s = pairs.filter(([k, v]) => k === 'v1' && /^[0-9a-f]{64}$/.test(v)).map(([, v]) => Buffer.from(v, 'hex'));
     const bad = () => new AppError(400, 'invalid_signature', 'The payment event signature is not valid.');
-    if (!Number.isInteger(t) || !parts.v1 || !/^[0-9a-f]{64}$/.test(parts.v1)) throw bad();
+    if (!Number.isInteger(t) || v1s.length === 0) throw bad();
     if (Math.abs(this.now() / 1000 - t) > TOLERANCE_SECONDS) throw bad();
     const want = createHmac('sha256', this.webhookSecret).update(`${t}.${raw}`).digest();
-    const got = Buffer.from(parts.v1, 'hex');
-    if (got.length !== want.length || !timingSafeEqual(got, want)) throw bad();
+    if (!v1s.some((got) => got.length === want.length && timingSafeEqual(got, want))) throw bad();
   }
+}
+
+function refundState(status: unknown): 'succeeded' | 'failed' | 'pending' {
+  return status === 'succeeded' ? 'succeeded' : status === 'failed' || status === 'canceled' ? 'failed' : 'pending';
 }

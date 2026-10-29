@@ -61,9 +61,15 @@ export function marketFor(prefixes: Array<{ prefix: string; market: string }>, w
 }
 
 type Account = { tenant_id: string; currency: string; balance_minor: string; reserved_minor: string; margin_bp: number | null; low_threshold_minor: string; low_alerted_at: Date | null };
+/**
+ * Prepaid credit applies only to companies on the partner route. The database already refuses an active account for any
+ * other company (migrations 0064, 0065); this is checked again here so a fault there can never charge a company that
+ * pays Meta directly (review of 0064, H1).
+ */
+export const ON_PARTNER_ROUTE = `EXISTS (SELECT 1 FROM messaging_routes r WHERE r.tenant_id = credit_accounts.tenant_id AND r.route = 'partner_360dialog')`;
 async function lockAccount(tx: Tx): Promise<Account | null> {
   return (await tx.query<Account>(`SELECT tenant_id, currency, balance_minor, reserved_minor, margin_bp, low_threshold_minor, low_alerted_at
-                                   FROM credit_accounts WHERE status = 'active' FOR UPDATE`)).rows[0] ?? null;
+                                   FROM credit_accounts WHERE status = 'active' AND ${ON_PARTNER_ROUTE} FOR UPDATE`)).rows[0] ?? null;
 }
 /**
  * The rate for a number and category. `at` picks the card in force at that moment (default now); `cardId` uses that
@@ -134,12 +140,17 @@ export function paidCategoryOf(kind: string, templateCategory: string | null): (
   return 'service';
 }
 
-export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: string; kind: string; category: string | null; to: string; connectionId: string }):
+/**
+ * `mayBePaid` is the sender's decision, made once before it took any lock (review of 0064, M4): a free-form message it
+ * judged free (within the number's monthly allowance) is not held, so no account lock is taken out of order. Several
+ * sends at the same moment can therefore pass the 1,000th message together; Meta then charges a few replies we did not
+ * hold for, and they are charged on delivery like any unreserved billable message (documented in design-and-tests.md).
+ */
+export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: string; kind: string; category: string | null; to: string; connectionId: string; mayBePaid: boolean }):
   Promise<'not_needed' | 'reserved' | 'insufficient_credit' | 'no_rate'> {
   const category = paidCategoryOf(a.kind, a.category);
   if (!category) return 'not_needed';
-  // Service replies within the number's free monthly allowance are expected to be free: no hold, no lock (M1).
-  if (category === 'service' && await serviceMessagesThisMonth(tx, a.connectionId, a.messageId) < SERVICE_FREE_PER_MONTH) return 'not_needed';
+  if (category === 'service' && !a.mayBePaid) return 'not_needed';
   const acct = await lockAccount(tx);
   if (!acct) return 'not_needed';
   const existing = (await tx.query<{ state: string }>('SELECT state FROM credit_reservations WHERE message_id = $1', [a.messageId])).rows[0];
@@ -253,7 +264,10 @@ export interface PaymentProvider {
    * event for the outcome; one that reports later by webhook returns no event.
    */
   chargeSaved(input: { tenantId: string; topupId: string; methodRef: string; amountMinor: number; currency: string; idempotencyKey: string }): Promise<{ providerRef: string; event: { raw: string; signature: string } | null }>;
-  refund(input: { providerRef: string; amountMinor: number; idempotencyKey: string }): Promise<{ refundRef: string; status: 'succeeded' | 'failed' }>;
+  /** 'pending': the provider accepted the refund but has not finished it (Stripe, some cards); asked again by refundStatus. */
+  refund(input: { providerRef: string; amountMinor: number; idempotencyKey: string }): Promise<{ refundRef: string; status: 'succeeded' | 'failed' | 'pending' }>;
+  /** The current state of a refund the provider reported as pending (review of 0064, M6). */
+  refundStatus?(refundRef: string): Promise<'succeeded' | 'failed' | 'pending'>;
   /** Verifies the signature and reads the event; null for events that need no action. May look things up with the provider. */
   verifyEvent(raw: string, signature: string | undefined): Promise<PaymentEvent | null>;
   /** The header that carries the signature. */
@@ -324,6 +338,13 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
       'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed_minor FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE', [e.topupId, provider])).rows[0];
     if (!t) return 'unknown_topup';
     const amountOk = e.type === 'dispute.lost' ? e.amountMinor <= Number(t.amount_minor) : e.amountMinor === Number(t.amount_minor);
+    // The provider's reference is saved after its call returns, so its webhook can arrive first (an automatic top-up
+    // with Stripe). The event names our top-up, company, amount and currency, all checked; its reference is then adopted
+    // (review of 0064, H2).
+    if (t.provider_ref === null && amountOk && t.currency === e.currency && e.type !== 'dispute.lost') {
+      await tx.query('UPDATE credit_topups SET provider_ref = $2 WHERE id = $1 AND provider_ref IS NULL', [t.id, e.providerRef]);
+      t.provider_ref = e.providerRef;
+    }
     if (t.provider_ref !== e.providerRef || !amountOk || t.currency !== e.currency) return 'mismatch';
     const seen = await tx.query(`INSERT INTO credit_payment_events (tenant_id, provider, event_id, type, provider_ref, amount_minor, currency, outcome)
                                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'received') ON CONFLICT (provider, event_id) DO NOTHING RETURNING id`,
@@ -374,12 +395,16 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
  * given back. No answer: it stays pending for the worker to try again. Returns the refund's status.
  */
 export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: string, refundId: string): Promise<string> {
-  const r = await withContext(db, { tenantId, userId: null }, async (tx) => (await tx.query<{ status: string; amount_minor: string; provider_ref: string; topup_id: string }>(
-    `SELECT f.status, f.amount_minor, t.provider_ref, f.topup_id FROM credit_refunds f JOIN credit_topups t ON t.id = f.topup_id WHERE f.id = $1`, [refundId])).rows[0]);
+  const r = await withContext(db, { tenantId, userId: null }, async (tx) => (await tx.query<{ status: string; amount_minor: string; provider_ref: string; topup_id: string; refund_ref: string | null }>(
+    `SELECT f.status, f.amount_minor, t.provider_ref, f.topup_id, f.provider_ref AS refund_ref FROM credit_refunds f JOIN credit_topups t ON t.id = f.topup_id WHERE f.id = $1`, [refundId])).rows[0]);
   if (!r || r.status !== 'pending') return r?.status ?? 'unknown';
-  let answer: { refundRef: string; status: 'succeeded' | 'failed' };
+  let answer: { refundRef: string; status: 'succeeded' | 'failed' | 'pending' };
   try {
-    answer = await provider.refund({ providerRef: r.provider_ref, amountMinor: Number(r.amount_minor), idempotencyKey: refundId });
+    // Already accepted by the provider and still in progress: ask for its state rather than asking again (an idempotent
+    // repeat would only replay the first answer).
+    answer = r.refund_ref && provider.refundStatus
+      ? { refundRef: r.refund_ref, status: await provider.refundStatus(r.refund_ref) }
+      : await provider.refund({ providerRef: r.provider_ref, amountMinor: Number(r.amount_minor), idempotencyKey: refundId });
   } catch (err) {
     console.error('refund: no answer from the provider; the worker will try again', refundId, err instanceof Error ? err.message : err);
     // Counted; after 30 attempts the worker stops and a person is told (recheck N6). The money stays out of the balance:
@@ -397,6 +422,12 @@ export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: 
     await lockCreditAccount(tx);
     const still = (await tx.query(`SELECT 1 FROM credit_refunds WHERE id = $1 AND status = 'pending' FOR UPDATE`, [refundId])).rowCount;
     if (!still) return (await tx.query<{ status: string }>('SELECT status FROM credit_refunds WHERE id = $1', [refundId])).rows[0]!.status;
+    if (answer.status === 'pending') {
+      // Accepted, not finished: kept pending with the provider's reference; the worker asks again. The money stays out of
+      // the balance until the provider confirms either way.
+      await tx.query(`UPDATE credit_refunds SET provider_ref = $2 WHERE id = $1`, [refundId, answer.refundRef]);
+      return 'pending';
+    }
     if (answer.status === 'succeeded') {
       await tx.query(`UPDATE credit_refunds f SET status = 'succeeded', provider_ref = $2, settled_at = now(),
                         credit_note_no = 'CN-' || CASE WHEN $3 THEN 'TEST-' ELSE '' END
@@ -519,7 +550,13 @@ export class CreditsService {
       throw new AppError(400, 'invalid_event', 'The payment event could not be read.');
     }
     if (!e) return 'ignored';
-    return applyPaymentEvent(this.deps.db, this.provider.name, e, this.provider.testMode);
+    const outcome = await applyPaymentEvent(this.deps.db, this.provider.name, e, this.provider.testMode);
+    // Not applied and not recorded: answered with an error so the provider sends it again later (review of 0064, H2).
+    // Stripe retries for up to three days.
+    if (outcome === 'mismatch' || outcome === 'unknown_topup' || outcome === 'no_account') {
+      throw new AppError(409, `payment_event_${outcome}`, 'The payment event could not be applied yet; please send it again.');
+    }
+    return outcome;
   }
 
   /** Test mode only: a saved test card for automatic top-up (…4242 succeeds, …0002 is always declined). */

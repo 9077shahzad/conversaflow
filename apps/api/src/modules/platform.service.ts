@@ -77,7 +77,11 @@ const PartnerSettings = z.object({
 export class PlatformService {
   /** Seals partner API keys before they are stored; only the 360dialog adapter can open them. */
   private readonly sealKey: ((apiKey: string) => string) | null;
-  constructor(private readonly db: Db, serverSecret?: Buffer, private readonly checkDb?: Db) {
+  /**
+   * `prepaidAllowed` is false in production until the owner approves launch: no company can be moved to the partner
+   * route and no credit account opened there (review of 0064, M3).
+   */
+  constructor(private readonly db: Db, serverSecret?: Buffer, private readonly checkDb?: Db, private readonly prepaidAllowed = true) {
     this.sealKey = serverSecret ? partnerKeySealer(serverSecret).seal : null;
   }
 
@@ -196,6 +200,7 @@ export class PlatformService {
   async setRoute(staff: StaffActor, tenantId: string, input: unknown) {
     if (!isUuid(tenantId)) throw Errors.notFound('Company');
     const b = parse(RouteRequest, input);
+    if (b.route === 'partner_360dialog' && !this.prepaidAllowed) throw Errors.conflict('not_approved', 'The partner route is not approved for production yet.');
     await this.run(staff, (tx) => tx.query('SELECT platform_set_messaging_route($1, $2, $3, $4)', [staff.token, tenantId, b.route, b.note]));
     return { tenantId, route: b.route };
   }
@@ -248,6 +253,7 @@ export class PlatformService {
   async creditOpenAccount(staff: StaffActor, tenantId: string, input: unknown) {
     if (!isUuid(tenantId)) throw Errors.notFound('Company');
     const b = parse(CreditAccountRequest, input);
+    if (!this.prepaidAllowed) throw Errors.conflict('not_approved', 'Prepaid messaging is not approved for production yet.');
     await this.run(staff, (tx) => tx.query('SELECT platform_credit_open_account($1, $2, $3, $4)', [staff.token, tenantId, b.currency, b.lowThresholdMinor]));
     return { tenantId, currency: b.currency };
   }

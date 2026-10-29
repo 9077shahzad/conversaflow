@@ -56,7 +56,9 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
   // credit_accounts, credit_entries, credit_partner_costs: opening accounts, adjustments and the monthly reconciliation (0061)
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags', 'credit_accounts', 'credit_entries', 'credit_partner_costs',
     // messaging_routes, and connecting partner numbers with their sealed keys (migration 0064)
-    'messaging_routes', 'channel_connections', 'provider_accounts', 'partner_channel_keys'],
+    'messaging_routes', 'channel_connections', 'provider_accounts', 'partner_channel_keys',
+    // pending top-ups and refunds, so a switch back to the direct route waits for them (migration 0065)
+    'credit_topups', 'credit_refunds'],
   cf_pilot: ['entitlement_overrides', 'invitations', 'pilot_enrolments'],
 };
 /**
@@ -128,21 +130,21 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // Message credits (migration 0061): worker scans (cf_dispatch) and token-bound console functions (cf_ops).
   'credit_reservations_stale(integer)': '157b05a934b72cf1d19f620ace0f5a68',
   'credit_auto_topup_due(integer)': '7fd6d910161faac1d3059eaea7a6f83b',
-  'platform_credit_open_account(text,uuid,text,bigint)': '7f189ac53de882b0f03404f5ad3c07b0',
+  'platform_credit_open_account(text,uuid,text,bigint)': 'cbf630023d656888f9c8b448a2be5f3b',  // re-pinned by 0065 (reopen)
   // Re-pinned by 0062: a card must price every paid category for the market 'other'.
   'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '21bb78a06722951c0c801b7408d13948',
   // 0062: refunds and automatic top-ups left pending, settled by the worker.
   'credit_refunds_pending(integer)': '057e61ad768e40c0ce44347f54ad8b0a',  // re-pinned by 0063 (attempt cap)
   'credit_auto_topups_stuck(integer)': 'f25a465978167db5f2133c37aa824991',
   // 0064: routes, partner numbers, consent wording, partner funding.
-  'partner_funding_check(text)': 'e4f76d96689cdfdf3e83a4ede5377fb3',
+  'partner_funding_check(text)': '68f938054ac2852753e735f4a411cc8c',
   'platform_credit_consent_add(text,text,text)': 'bec147dc80c09d0dbd165c597aeef49a',
   'platform_credit_consent_set(text,integer,text,text,text)': '987f66390266b10902fc109118215da7',
   'platform_partner_connect_channel(text,uuid,text,text,text,text,text)': '4f6000a48bd5de8f0b5084189f933286',
   'platform_partner_overview(text,text)': '024f95bbeb108e47fbb13e8bea6d361b',
-  'platform_partner_record(text,text,text,text,bigint,text,text,timestamp with time zone)': 'b01327fec571a4035f222dc0d9cf324e',
+  'platform_partner_record(text,text,text,text,bigint,text,text,timestamp with time zone)': '8fae7d32ce0d14c85f94f3d6f7b4a9da',
   'platform_partner_settings(text,text,jsonb)': '32752fe0b647df2323b4515e1d3bfcf1',
-  'platform_set_messaging_route(text,uuid,text,text)': 'b54172288c39a805237c0175fc090b40',
+  'platform_set_messaging_route(text,uuid,text,text)': '3130ecf9f74aa21979efbbbc5b9b06eb',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': '4046a5f0c06663a07319930b8af5be4c',  // re-pinned by 0064 (currency must match)

@@ -81,6 +81,8 @@ export class FakeStripe {
   readonly requests: Recorded[] = [];
   readonly sessions = new Map<string, Record<string, unknown>>();
   refundScript: Array<'succeeded' | 'failed' | 'pending'> = [];
+  /** Refunds by id; a test may move a pending one on (Stripe finishing it later). */
+  readonly refunds = new Map<string, Record<string, unknown>>();
   private seq = 0;
   private server = createServer((req, res) => void this.handle(req, res));
   url = '';
@@ -121,7 +123,13 @@ export class FakeStripe {
     }
     if (req.method === 'POST' && url.pathname === '/v1/refunds') {
       const status = this.refundScript.shift() ?? 'succeeded';
-      return json(res, 200, { id: `re_test_${++this.seq}`, object: 'refund', status, amount: Number(form.amount), payment_intent: form.payment_intent });
+      const r = { id: `re_test_${++this.seq}`, object: 'refund', status, amount: Number(form.amount), payment_intent: form.payment_intent };
+      this.refunds.set(r.id, r);
+      return json(res, 200, r);
+    }
+    if (req.method === 'GET' && url.pathname.startsWith('/v1/refunds/')) {
+      const r = this.refunds.get(decodeURIComponent(url.pathname.split('/').pop()!));
+      return r ? json(res, 200, r) : json(res, 404, { error: { type: 'invalid_request_error', code: 'resource_missing' } });
     }
     if (req.method === 'POST' && url.pathname === '/v1/payment_intents') {
       return json(res, 200, { id: `pi_test_auto_${++this.seq}`, object: 'payment_intent', status: 'processing', amount: Number(form.amount), metadata: {} });

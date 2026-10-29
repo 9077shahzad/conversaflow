@@ -10,8 +10,9 @@ import { withContext } from '@conversaflow/database';
 import { loadConfig } from '../src/core/config';
 import { Dialog360Adapter, partnerKeySealer } from '../src/modules/dialog360';
 import { Sender } from '../src/modules/sender';
-import { SERVICE_FREE_PER_MONTH, partnerFundingCheck } from '../src/modules/credits';
-import { stripeSignature } from '../src/modules/stripe';
+import { SERVICE_FREE_PER_MONTH, partnerFundingCheck, settleRefund } from '../src/modules/credits';
+import { PlatformService } from '../src/modules/platform.service';
+import { StripePaymentProvider, stripeSignature } from '../src/modules/stripe';
 import { Fake360dialog, FakeStripe } from './fakes';
 import { activateSubscription, enableMfa, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
 
@@ -343,5 +344,95 @@ describe('the database ties records together (review L6, L8)', () => {
     const month = new Date().toISOString().slice(0, 7);
     expect((await staff.put(`/v1/platform/tenants/${tenant}/credits/partner-cost`, { month, currency: 'USD', costMinor: 100, reference: 'INV-1' })).status).toBe(409);
     await staff.put(`/v1/platform/tenants/${tenant}/credits/partner-cost`, { month, currency: 'SAR', costMinor: 100, reference: 'INV-1' }).expect(200);
+  });
+});
+
+describe('fixes from the review of 0064 (migration 0065)', () => {
+  let other: Client;
+  let otherTenant: string;
+  const appOther = <T>(fn: Parameters<typeof withContext<T>>[2]) => app<T>(fn, otherTenant);
+  beforeAll(async () => {
+    other = await newUser(t, 'pt-rev');
+    otherTenant = await newCompany(other, 'ptrev', 'business');
+    await activateSubscription(t, otherTenant);
+    await enableMfa(other);
+  });
+
+  it('H1, M2: a closed account cannot be made active on the direct route; a switch back waits for pending payments; a closed account can be reopened', async () => {
+    await staff.put(`/v1/platform/tenants/${otherTenant}/messaging-route`, { route: 'partner_360dialog', note: 'Review test company' }).expect(200);
+    await staff.post(`/v1/platform/tenants/${otherTenant}/credits/account`, { currency: 'SAR' }).expect(201);
+    // A top-up in progress: the company cannot be moved back to the direct route until it finishes.
+    await other.post('/v1/credits/topups', { amountMinor: 5000 }).expect(201);
+    const sw = await staff.put(`/v1/platform/tenants/${otherTenant}/messaging-route`, { route: 'meta_direct', note: 'Back to direct' });
+    expect([sw.status, sw.body.error?.message]).toEqual([409, expect.stringMatching(/in progress/)]);
+    const session = [...stripe.sessions.values()].at(-1)!;
+    await stripeHook({ id: `evt_rev_${randomUUID().slice(0, 6)}`, type: 'checkout.session.expired', data: { object: session } }).expect(200);
+    await staff.put(`/v1/platform/tenants/${otherTenant}/messaging-route`, { route: 'meta_direct', note: 'Back to direct' }).expect(200);
+    expect((await other.get('/v1/credits').expect(200)).body).toMatchObject({ route: 'meta_direct' });
+    // The database refuses reactivating the closed account while the company pays Meta directly (the 0061 gap, H1).
+    await expect(asOwnerQ('credit_accounts', `UPDATE credit_accounts SET status = 'active' WHERE tenant_id = $1`, [otherTenant])).rejects.toThrow(/partner route/);
+    expect((await staff.post(`/v1/platform/tenants/${otherTenant}/credits/account`, { currency: 'SAR' })).status).toBe(409);
+    // Back on the partner route, the same account is reopened (it could not be before), keeping its currency.
+    await staff.put(`/v1/platform/tenants/${otherTenant}/messaging-route`, { route: 'partner_360dialog', note: 'Partner again' }).expect(200);
+    expect((await staff.post(`/v1/platform/tenants/${otherTenant}/credits/account`, { currency: 'USD' })).status).toBe(409);
+    await staff.post(`/v1/platform/tenants/${otherTenant}/credits/account`, { currency: 'SAR' }).expect(201);
+    expect((await other.get('/v1/credits').expect(200)).body).toMatchObject({ mode: 'prepaid', route: 'partner_360dialog' });
+    expect((await staff.post(`/v1/platform/tenants/${otherTenant}/credits/account`, { currency: 'SAR' })).status).toBe(409);
+  });
+
+  it('H2: an automatic top-up whose webhook arrives before our reference is saved is credited; an event we cannot apply is answered with an error so Stripe retries', async () => {
+    const topupId = (await appOther(async (tx) => (await tx.query<{ id: string }>(
+      `INSERT INTO credit_topups (tenant_id, amount_minor, currency, kind, provider) VALUES ($1, 4000, 'SAR', 'auto', 'stripe') RETURNING id`, [otherTenant])).rows[0]!)).id;
+    const before = (await other.get('/v1/credits').expect(200)).body.balanceMinor;
+    const pi = { id: `pi_test_early_${randomUUID().slice(0, 6)}`, object: 'payment_intent', amount: 4000, currency: 'sar', metadata: { tenantId: otherTenant, topupId, kind: 'auto' } };
+    expect((await stripeHook({ id: `evt_early_${randomUUID().slice(0, 6)}`, type: 'payment_intent.succeeded', data: { object: pi } }).expect(200)).body.outcome).toBe('applied');
+    expect((await other.get('/v1/credits').expect(200)).body.balanceMinor).toBe(before + 4000);
+    expect((await appOther(async (tx) => (await tx.query<{ provider_ref: string }>('SELECT provider_ref FROM credit_topups WHERE id = $1', [topupId])).rows[0]!)).provider_ref).toBe(pi.id);
+    // A wrong amount, or a top-up we do not know: not applied, not recorded, and not a 2xx.
+    const bad = await stripeHook({ id: `evt_bad_${randomUUID().slice(0, 6)}`, type: 'payment_intent.succeeded', data: { object: { ...pi, metadata: { ...pi.metadata, topupId: randomUUID() } } } });
+    expect([bad.status, bad.body.error.code]).toEqual([409, 'payment_event_unknown_topup']);
+  });
+
+  it('M6: a refund Stripe reports as pending stays pending, then is settled by asking Stripe for its state (not by refunding again)', async () => {
+    const { topupId } = await topUp(7000);
+    stripe.refundScript.push('pending');
+    const before = (await account()).balanceMinor;
+    const r = (await owner.post('/v1/credits/refunds', { topupId, amountMinor: 2000, reason: 'Unused credit' }).expect(201)).body;
+    expect(r.status).toBe('pending');
+    expect((await account()).balanceMinor).toBe(before - 2000);                 // taken out of the balance while it is in progress
+    const ref = (await app(async (tx) => (await tx.query<{ provider_ref: string }>('SELECT provider_ref FROM credit_refunds WHERE id = $1', [r.id])).rows[0]!)).provider_ref;
+    expect(ref).toMatch(/^re_test_/);
+    const provider = new StripePaymentProvider(STRIPE_KEY, STRIPE_WHSEC, 'http://localhost', stripe.url);
+    const posts = () => stripe.requests.filter((x) => x.method === 'POST' && x.path === '/v1/refunds').length;
+    const n = posts();
+    expect(await settleRefund(t.deps.db, provider, tenant, r.id)).toBe('pending');      // Stripe still processing
+    stripe.refunds.get(ref)!.status = 'succeeded';
+    expect(await settleRefund(t.deps.db, provider, tenant, r.id)).toBe('succeeded');
+    expect(posts()).toBe(n);
+    expect(stripe.requests.some((x) => x.method === 'GET' && x.path === `/v1/refunds/${ref}`)).toBe(true);
+    expect((await account()).balanceMinor).toBe(before - 2000);
+  });
+
+  it('Stripe: any one of several signatures is enough (secret being rolled); live events are refused', async () => {
+    const raw = JSON.stringify({ id: `evt_roll_${randomUUID().slice(0, 6)}`, type: 'customer.created', data: { object: {} } });
+    const at = Math.floor(Date.now() / 1000);
+    const good = stripeSignature(STRIPE_WHSEC, at, raw).split('v1=')[1];
+    const wrong = stripeSignature('whsec_old_old_old_old', at, raw).split('v1=')[1];
+    await http().post('/v1/webhooks/credits/stripe').set('Content-Type', 'application/json').set('Stripe-Signature', `t=${at},v1=${wrong},v1=${good}`).send(raw).expect(200);
+    await http().post('/v1/webhooks/credits/stripe').set('Content-Type', 'application/json').set('Stripe-Signature', `t=${at},v1=${wrong}`).send(raw).expect(400);
+    const live = await stripeHook({ id: `evt_live_${randomUUID().slice(0, 6)}`, type: 'customer.created', livemode: true, data: { object: {} } });
+    expect([live.status, live.body.error.code]).toEqual([400, 'live_event_refused']);
+  });
+
+  it('partner funding: not readable from a company\'s context; figures only in the partner\'s currency', async () => {
+    await expect(app((tx) => tx.query(`SELECT * FROM partner_funding_check('360dialog')`))).rejects.toThrow(/company context/);
+    expect((await staff.post('/v1/platform/partner/funding', { what: 'balance', amountMinor: 1000, currency: 'SAR' })).status).toBe(409);
+  });
+
+  it('M3: in production no company can be moved to the partner route and no credit account opened', async () => {
+    const prod = new PlatformService(t.deps.platformDb, undefined, t.deps.db, false);
+    const fake = { token: 'not-used', userId: randomUUID(), role: 'platform_owner' } as unknown as Parameters<PlatformService['setRoute']>[0];
+    await expect(prod.setRoute(fake, otherTenant, { route: 'partner_360dialog', note: 'Should be refused' })).rejects.toThrow(/not approved/);
+    await expect(prod.creditOpenAccount(fake, otherTenant, { currency: 'SAR' })).rejects.toThrow(/not approved/);
   });
 });

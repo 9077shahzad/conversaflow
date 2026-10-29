@@ -5,7 +5,7 @@ import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type MediaSendInput
 import { outboundTypeFor } from './media';
 import { claimCampaignSend } from './campaign-limits';
 import { stopTimerOnReply } from './sla';
-import { SERVICE_FREE_PER_MONTH, lockCreditAccount, pricingFrom, releaseReservation, reserveForSend, serviceMessagesThisMonth, settleOnStatus, type Pricing } from './credits';
+import { ON_PARTNER_ROUTE, SERVICE_FREE_PER_MONTH, lockCreditAccount, pricingFrom, releaseReservation, reserveForSend, serviceMessagesThisMonth, settleOnStatus, type Pricing } from './credits';
 
 /**
  * Reliable outbound sending (BRD v1.2 Wave 1; architecture extension AX-3).
@@ -264,7 +264,7 @@ export class Sender {
       // Prepaid message credits (migration 0061): a paid message reserves its price first, under the account lock, so
       // sends at the same time can never spend more than the balance. Companies paying Meta directly are not affected.
       const credit = await reserveForSend(tx, { tenantId, messageId: row.message_id, kind: row.kind, category: tpl?.category ?? null,
-        to: ctx.wa as string, connectionId: ctx.connection_id });
+        to: ctx.wa as string, connectionId: ctx.connection_id, mayBePaid: creditLock });
       if (credit === 'insufficient_credit' || credit === 'no_rate') {
         await this.finishFailed(tx, row, 'blocked', credit === 'no_rate' ? 'no_credit_rate' : 'insufficient_credit', 'done');
         return { done: 'failed' as const };
@@ -475,10 +475,12 @@ async function mayBePaidJob(tx: Tx, jobId: string): Promise<boolean> {
   if (!j) return false;
   if (j.kind === 'template') return true;
   if (!(await hasCreditAccount(tx))) return false;
+  // Sent again while an earlier hold is kept: treated as paid, so the hold is handled under the lock (review M4).
+  if ((await tx.query(`SELECT 1 FROM credit_reservations WHERE message_id = $1 AND state = 'held'`, [j.message_id])).rowCount) return true;
   return (await serviceMessagesThisMonth(tx, j.connection_id, j.message_id)) >= SERVICE_FREE_PER_MONTH;
 }
 async function hasCreditAccount(tx: Tx): Promise<boolean> {
-  return ((await tx.query(`SELECT 1 FROM credit_accounts WHERE status = 'active'`)).rowCount ?? 0) > 0;
+  return ((await tx.query(`SELECT 1 FROM credit_accounts WHERE status = 'active' AND ${ON_PARTNER_ROUTE}`)).rowCount ?? 0) > 0;
 }
 
 /** Serialises everything that touches one provider message id, so a status can never slip between two steps. */
