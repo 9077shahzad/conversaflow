@@ -38,3 +38,23 @@ provider is added after approval.
 - Tax invoices, VAT and expiry rules: waiting for the legal and tax answers (`docs/credits/legal-review.md`).
 - Importing the partner's invoice automatically: the partner figure is entered by a platform owner for now.
 - A platform screen for rates, margins and reconciliation: the platform API exists; the screen does not.
+
+## Independent review and fixes (migration 0062)
+
+An independent review of the first version found 2 High, 6 Medium and 9 Low issues. Fixed before anything is used:
+
+| Finding | Fix |
+| --- | --- |
+| H1 A billable delivery after the hold was released (late delivery, or after a failed status) broke a unique rule and stalled the whole webhook group | Only "one charge per message" is unique; such a delivery is charged once, with no hold to release |
+| H2 A refund called the provider while holding the company's lock; a failure after the provider paid out lost the record | Two steps: the amount is taken out (pending) first, the provider is asked with no lock held, then settled or given back; the worker retries pending refunds with the same idempotency key |
+| M1 Possible deadlocks between sending, delivery statuses and payments | One lock order everywhere: the company's credit account first; free messages take no lock |
+| M2 A hold could be released while its message still waited (campaign limit), then sent without a hold | Messages still waiting keep their hold; a message sent again is held again |
+| M3 Disputes after a partial refund took the refunded part twice; partial disputes ignored; a payment confirmed after "failed" not credited | Only the unrefunded part is taken back; partial disputes apply; late confirmations credit once |
+| M4 An event arriving before our reference was saved was lost for good; an automatic top-up never confirmed blocked automatic top-up | Unmatched events are not remembered (the provider's retry applies); unconfirmed automatic top-ups are closed with a notice |
+| M5 Statement balances could be read out of order | Each entry gets a per-company number under the lock |
+| M6 A changed category was priced at today's card; Meta sub-categories unmapped | Priced on the reserved card (or the card in force when sent); sub-categories mapped |
+| L1–L9 | Test provider off unless set explicitly; test receipts marked TEST; promotional credit not refundable as cash; closed accounts; statement months in the company's time zone; saved cards removable; return from test checkout handled |
+
+Accepted as they are (recorded, not changed): the worker's look-up functions are callable by the application role, as for every other worker job (L5); the application role can write ledger rows the database does not tie to a payment (defence in depth, L6); partner invoices in another currency than the company's balance show as a difference (L8).
+
+One consequence of M1: for a company on prepaid credit, the preparation and recording steps of its outgoing messages run one at a time (they are short database steps; the call to WhatsApp is not inside them). Companies paying Meta directly are not affected.

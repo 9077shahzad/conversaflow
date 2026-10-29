@@ -180,8 +180,9 @@ async function main() {
       await c.query('BEGIN');
       await c.query('SET LOCAL ROLE cf_ops');
       await c.query(`INSERT INTO credit_accounts (tenant_id, currency, low_threshold_minor) VALUES ($1, 'SAR', 5000)`, [tenant.id]);
-      if (!(await c.query(`SELECT 1 FROM credit_rate_cards WHERE currency = 'SAR'`)).rowCount) {
-        const card = (await c.query<{ id: string }>(`INSERT INTO credit_rate_cards (currency, effective_from, source) VALUES ('SAR', now() - interval '1 minute', 'Demo rates (not Meta prices)') RETURNING id`)).rows[0]!.id;
+      // Always a fresh, complete demo card: the newest card in force is the one used.
+      {
+        const card = (await c.query<{ id: string }>(`INSERT INTO credit_rate_cards (currency, effective_from, source) VALUES ('SAR', now(), 'Demo rates (not Meta prices)') RETURNING id`)).rows[0]!.id;
         await c.query(`INSERT INTO credit_rate_lines (card_id, market, category, unit_cost_minor) VALUES
           ($1, 'saudi_arabia', 'marketing', 17), ($1, 'saudi_arabia', 'utility', 4), ($1, 'saudi_arabia', 'authentication', 4),
           ($1, 'other', 'marketing', 25), ($1, 'other', 'utility', 6), ($1, 'other', 'authentication', 6)`, [card]);

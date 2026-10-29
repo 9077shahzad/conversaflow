@@ -17,7 +17,7 @@ type Account =
       methods: Array<{ id: string; label: string }>; notices: Array<{ id: string; kind: string; data: Record<string, unknown>; createdAt: string; readAt: string | null }> };
 type Entry = { id: string; kind: string; amountMinor: number; reservedDelta: number; balanceAfter: number; market: string | null; category: string | null; note: string | null; createdAt: string };
 type TopUp = { id: string; amountMinor: number; currency: string; kind: string; status: string; failureReason: string | null; refundedMinor: number; reversed: boolean; receiptNo: string | null; createdAt: string };
-type Doc = { type: 'receipt' | 'credit_note'; number: string; amountMinor: number; currency: string; date: string; company: string; issuer: string; description: string; forReceipt?: string };
+type Doc = { type: 'receipt' | 'credit_note'; testMode: boolean; number: string; amountMinor: number; currency: string; date: string; company: string; issuer: string; description: string; forReceipt?: string };
 type Statement = { month: string; currency: string; openingMinor: number; closingMinor: number; topupsMinor: number; chargesMinor: number; chargedMessages: number; refundsMinor: number; reversalsMinor: number; adjustmentsMinor: number };
 
 export default function CreditsPage() {
@@ -54,6 +54,12 @@ export default function CreditsPage() {
     } catch (e) { setNotice({ ok: false, text: e instanceof ApiError && e.status === 403 ? d.noPermission : t(locale).common.error }); }
   }, [locale, d]);
   useEffect(() => { void load(); }, [load]);
+  // Back from the test checkout (or reloaded): the pending test top-up is offered again for simulation.
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get('testCheckout');
+    const m = ref ? /^pay_test_([0-9a-f-]{36})$/.exec(ref) : null;
+    if (m) setPending(m[1]!);
+  }, []);
 
   async function run(fn: () => Promise<unknown>, ok: string) {
     setBusy(true); setNotice(null);
@@ -181,6 +187,7 @@ export default function CreditsPage() {
                         const r = await api<{ id: string; status: string }>('/v1/credits/refunds', { method: 'POST', body: { topupId: x.id, amountMinor: minor(refund.amount), reason: refund.reason } });
                         setRefund(null);
                         if (r.status === 'succeeded') setDoc(await api<Doc>(`/v1/credits/documents/${r.id}`));
+                        else throw new ApiError(409, r.status === 'failed' ? 'refund_refused' : 'refund_pending', '');
                       }, d.refundDone); }}>
                         <label className="flex flex-col text-xs">{fill(d.amount, { c: cur })}<input type="number" min={0.01} step="0.01" value={refund.amount} dir="ltr" onChange={(e) => setRefund({ ...refund, amount: e.target.value })} className={input} /></label>
                         <label className="flex min-w-0 flex-1 flex-col text-xs">{d.reason}<input value={refund.reason} maxLength={300} onChange={(e) => setRefund({ ...refund, reason: e.target.value })} className={input} /></label>
@@ -205,6 +212,7 @@ export default function CreditsPage() {
                 <dt className="text-slate-600">{d.amountLabel}</dt><dd><bdi>{money(doc.amountMinor)}</bdi></dd>
                 {doc.forReceipt && <><dt className="text-slate-600">{d.forReceipt}</dt><dd dir="ltr">{doc.forReceipt}</dd></>}
               </dl>
+              {doc.testMode && <p role="note" className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-sm font-semibold text-amber-900">{d.testDocument}</p>}
               <p className="mt-2 text-xs text-slate-600">{d.notTaxInvoice}</p>
               <div className="mt-2 flex gap-2"><button type="button" className="btn-secondary" onClick={() => window.print()}>{d.print}</button><button type="button" className="btn-secondary" onClick={() => setDoc(null)}>{d.close}</button></div>
             </section>
@@ -234,7 +242,7 @@ export default function CreditsPage() {
           <section className={card} aria-labelledby="cr-history">
             <h2 id="cr-history" className="text-lg font-semibold text-navy">{d.historyTitle}</h2>
             {entries.length === 0 ? <p className="mt-1 text-sm text-slate-600">{d.noEntries}</p> : (
-              <div className="mt-2 overflow-x-auto">
+              <div className="mt-2 overflow-x-auto" tabIndex={0} role="region" aria-labelledby="cr-history">
                 <table className="w-full min-w-[32rem] text-start text-sm">
                   <thead><tr className="border-b text-xs text-slate-600"><th className="py-1 text-start">{d.date}</th><th className="text-start">{d.what}</th><th className="text-end">{d.amountLabel}</th><th className="text-end">{d.balanceAfter}</th></tr></thead>
                   <tbody>

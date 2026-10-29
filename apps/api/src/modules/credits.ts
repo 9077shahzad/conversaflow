@@ -57,9 +57,16 @@ async function lockAccount(tx: Tx): Promise<Account | null> {
   return (await tx.query<Account>(`SELECT tenant_id, currency, balance_minor, reserved_minor, margin_bp, low_threshold_minor, low_alerted_at
                                    FROM credit_accounts WHERE status = 'active' FOR UPDATE`)).rows[0] ?? null;
 }
-async function rateFor(tx: Tx, currency: string, waNumber: string, category: string) {
-  const card = (await tx.query<{ id: string }>(
-    `SELECT id FROM credit_rate_cards WHERE currency = $1 AND effective_from <= now() ORDER BY effective_from DESC LIMIT 1`, [currency])).rows[0];
+/**
+ * The rate for a number and category. `at` picks the card in force at that moment (default now); `cardId` uses that
+ * exact card. Lines fall back to the market 'other' of the same card.
+ */
+async function rateFor(tx: Tx, currency: string, waNumber: string, category: string, opts: { at?: Date; cardId?: string } = {}) {
+  const card = opts.cardId
+    ? { id: opts.cardId }
+    : (await tx.query<{ id: string }>(
+        `SELECT id FROM credit_rate_cards WHERE currency = $1 AND effective_from <= coalesce($2::timestamptz, now()) ORDER BY effective_from DESC LIMIT 1`,
+        [currency, opts.at ?? null])).rows[0];
   if (!card) return null;
   const prefixes = (await tx.query<{ prefix: string; market: string }>('SELECT prefix, market FROM credit_rate_markets WHERE card_id = $1', [card.id])).rows;
   const market = marketFor(prefixes, waNumber);
@@ -68,6 +75,14 @@ async function rateFor(tx: Tx, currency: string, waNumber: string, category: str
      ORDER BY (market = $3) DESC LIMIT 1`, [card.id, category, market])).rows[0];
   if (!line) return null;
   return { cardId: card.id, market: line.market, cost: Number(line.unit_cost_minor) };
+}
+/** Meta's pricing categories mapped to ours ('authentication_international' → authentication, 'marketing_lite' → marketing). */
+export function categoryOf(metaCategory: string | null): (typeof BILLABLE_CATEGORIES)[number] | 'service' | null {
+  if (!metaCategory) return null;
+  const c = metaCategory.toLowerCase();
+  if (c === 'service' || c.startsWith('service')) return 'service';
+  for (const b of BILLABLE_CATEGORIES) if (c === b || c.startsWith(`${b}_`)) return b;
+  return null;
 }
 async function marginOf(tx: Tx, a: Account) {
   return a.margin_bp ?? (await tx.query<{ m: number }>('SELECT default_margin_bp AS m FROM credit_settings')).rows[0]!.m;
@@ -96,13 +111,14 @@ async function checkLowBalance(tx: Tx, tenantId: string) {
  */
 export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: string; kind: string; category: string | null; to: string; lastInboundAt: Date | null }):
   Promise<'not_needed' | 'reserved' | 'insufficient_credit' | 'no_rate'> {
-  const acct = await lockAccount(tx);
-  if (!acct) return 'not_needed';
+  // Free messages are decided before any lock, so they never wait on the account (review of 0061, M1).
   if (a.kind !== 'template' || !a.category || !(BILLABLE_CATEGORIES as readonly string[]).includes(a.category)) return 'not_needed';
   const windowOpen = !!a.lastInboundAt && Date.now() - a.lastInboundAt.getTime() < WINDOW_MS;
   if (a.category === 'utility' && windowOpen) return 'not_needed';          // utility templates in an open window are free
-  const existing = (await tx.query('SELECT 1 FROM credit_reservations WHERE message_id = $1', [a.messageId])).rowCount;
-  if (existing) return 'reserved';
+  const acct = await lockAccount(tx);
+  if (!acct) return 'not_needed';
+  const existing = (await tx.query<{ state: string }>('SELECT state FROM credit_reservations WHERE message_id = $1', [a.messageId])).rows[0];
+  if (existing && existing.state !== 'released') return 'reserved';
   const rate = await rateFor(tx, acct.currency, a.to, a.category);
   if (!rate) return 'no_rate';
   const margin = await marginOf(tx, acct);
@@ -111,8 +127,15 @@ export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: s
     await checkLowBalance(tx, a.tenantId);
     return 'insufficient_credit';
   }
-  await tx.query(`INSERT INTO credit_reservations (message_id, tenant_id, rate_card_id, market, category, cost_minor, price_minor, margin_bp)
-                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [a.messageId, a.tenantId, rate.cardId, rate.market, a.category, rate.cost, amount, margin]);
+  if (existing) {
+    // Sent again after its hold was given back (review M2): held again at today's price, under the same lock.
+    await tx.query(`UPDATE credit_reservations SET state = 'held', settled_at = NULL, rate_card_id = $2, market = $3, category = $4, cost_minor = $5,
+                      price_minor = $6, margin_bp = $7, created_at = now() WHERE message_id = $1 AND state = 'released'`,
+      [a.messageId, rate.cardId, rate.market, a.category, rate.cost, amount, margin]);
+  } else {
+    await tx.query(`INSERT INTO credit_reservations (message_id, tenant_id, rate_card_id, market, category, cost_minor, price_minor, margin_bp)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [a.messageId, a.tenantId, rate.cardId, rate.market, a.category, rate.cost, amount, margin]);
+  }
   if (amount > 0) {
     await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, reserved_delta, message_id, rate_card_id, market, category, cost_minor, margin_bp)
                     VALUES ($1, 'reserve', 0, $2, $3, $4, $5, $6, $7, $8)`, [a.tenantId, amount, a.messageId, rate.cardId, rate.market, a.category, rate.cost, margin]);
@@ -121,10 +144,18 @@ export async function reserveForSend(tx: Tx, a: { tenantId: string; messageId: s
   return 'reserved';
 }
 
+/**
+ * Takes the company's credit account lock, if it has an account. Every transaction that may write credit entries takes
+ * it first, before any other row it locks (sender steps, incoming webhook groups, status re-application), so the lock
+ * order is the same everywhere (review of 0061, M1). No-op for companies paying Meta directly.
+ */
+export async function lockCreditAccount(tx: Tx): Promise<void> {
+  await tx.query(`SELECT 1 FROM credit_accounts WHERE status = 'active' FOR UPDATE`);
+}
+
 /** Gives back a held reservation (the message failed, was not sent, or turned out free). Safe to call repeatedly. */
 export async function releaseReservation(tx: Tx, messageId: string, why: string) {
-  if (!(await tx.query('SELECT 1 FROM credit_accounts')).rowCount) return;
-  await lockAccount(tx);
+  if (!(await lockAccount(tx))) return;                                    // no open account: nothing to give back (L4)
   const r = (await tx.query<{ price_minor: string; tenant_id: string }>(
     `UPDATE credit_reservations SET state = 'released', settled_at = now() WHERE message_id = $1 AND state = 'held' RETURNING price_minor, tenant_id`, [messageId])).rows[0];
   if (!r) return;
@@ -137,7 +168,8 @@ export async function releaseReservation(tx: Tx, messageId: string, why: string)
 }
 
 /**
- * A delivery status with Meta's pricing. Billable and delivered (or read): charged once. Not billable: released.
+ * A delivery status with Meta's pricing. Billable and delivered (or read): charged once, also when the hold had already
+ * been given back (a late delivery after the stale release or a failed status; review H1). Not billable: released.
  * A billable message nobody reserved for (for example a utility template Meta did charge) is still charged, so the
  * balance can go below zero; paid sends then stop until a top-up.
  */
@@ -145,7 +177,8 @@ export async function settleOnStatus(tx: Tx, tenantId: string, messageId: string
   if (!(await tx.query('SELECT 1 FROM credit_accounts')).rowCount) return;
   if (status === 'failed') { await releaseReservation(tx, messageId, 'message_failed'); return; }
   if (!pricing || (status !== 'delivered' && status !== 'read' && status !== 'sent')) return;
-  if (pricing.billable === false || pricing.category === 'service' || (pricing.type && pricing.type.startsWith('free'))) {
+  const mapped = categoryOf(pricing.category);
+  if (pricing.billable === false || mapped === 'service' || (pricing.type && pricing.type.startsWith('free'))) {
     await releaseReservation(tx, messageId, `free:${pricing.type ?? pricing.category ?? 'not_billable'}`);
     return;
   }
@@ -155,15 +188,17 @@ export async function settleOnStatus(tx: Tx, tenantId: string, messageId: string
   if ((await tx.query(`SELECT 1 FROM credit_entries WHERE message_id = $1 AND kind = 'charge'`, [messageId])).rowCount) return;
   const res = (await tx.query<{ rate_card_id: string; market: string; category: string; cost_minor: string; price_minor: string; margin_bp: number; state: string }>(
     'SELECT rate_card_id, market, category, cost_minor, price_minor, margin_bp, state FROM credit_reservations WHERE message_id = $1', [messageId])).rows[0];
-  const category = (BILLABLE_CATEGORIES as readonly string[]).includes(pricing.category ?? '') ? pricing.category! : (res?.category ?? 'marketing');
+  const category = mapped ?? res?.category ?? 'marketing';
   let charge: { cardId: string; market: string; cost: number; price: number; margin: number };
   if (res && res.category === category) {
     charge = { cardId: res.rate_card_id, market: res.market, cost: Number(res.cost_minor), price: Number(res.price_minor), margin: res.margin_bp };
   } else {
-    const to = (await tx.query<{ wa: string | null }>(
-      `SELECT (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = c.contact_id AND ci.kind = 'whatsapp' LIMIT 1) AS wa
-       FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = $1`, [messageId])).rows[0]?.wa ?? '';
-    const rate = await rateFor(tx, acct.currency, to, category);
+    // Another category than reserved, or never reserved: priced on the card it was reserved with, or the card in force
+    // when the message was created (review M6), never today's card.
+    const m = (await tx.query<{ wa: string | null; created_at: Date }>(
+      `SELECT (SELECT value FROM contact_identifiers ci WHERE ci.contact_id = c.contact_id AND ci.kind = 'whatsapp' LIMIT 1) AS wa, m.created_at
+       FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE m.id = $1`, [messageId])).rows[0];
+    const rate = await rateFor(tx, acct.currency, m?.wa ?? '', category, res ? { cardId: res.rate_card_id } : { at: m?.created_at });
     if (!rate) { console.error('credits: no rate for a billable message', messageId, category); return; }
     const margin = res?.margin_bp ?? await marginOf(tx, acct);
     charge = { cardId: rate.cardId, market: rate.market, cost: rate.cost, price: price(rate.cost, margin), margin };
@@ -215,7 +250,13 @@ export class TestPaymentProvider implements PaymentProvider {
     return { providerRef: ref, event: this.event({ type: declined ? 'payment.failed' : 'payment.succeeded', providerRef: ref, amountMinor: i.amountMinor,
       currency: i.currency, tenantId: i.tenantId, topupId: i.topupId, ...(declined ? { reason: 'card_declined' } : {}) }) };
   }
-  async refund(i: { providerRef: string }) { return { refundRef: `re_test_${i.providerRef}_${randomUUID().slice(0, 8)}`, status: 'succeeded' as const }; }
+  /** Tests script refund outcomes: 'fail' (the provider refuses), 'throw' (no answer). Empty means success. */
+  refundScript: Array<'ok' | 'fail' | 'throw'> = [];
+  async refund(i: { idempotencyKey: string }) {
+    const step = this.refundScript.shift() ?? 'ok';
+    if (step === 'throw') throw new Error('test provider: no answer');
+    return { refundRef: `re_test_${i.idempotencyKey}`, status: step === 'fail' ? 'failed' as const : 'succeeded' as const };
+  }
   verifyEvent(raw: string, signature: string | undefined): PaymentEvent {
     const want = Buffer.from(this.sign(raw), 'hex');
     const got = Buffer.from(signature ?? '', 'hex');
@@ -232,29 +273,38 @@ const EventShape = z.object({
   amountMinor: z.number().int().positive(), currency: z.string().regex(/^[A-Z]{3}$/), tenantId: z.string().uuid(), topupId: z.string().uuid(), reason: z.string().max(200).optional(),
 });
 
-/** Applies a verified provider event to the company's top-up, once. Amount, currency and reference must all match. */
+/** Receipt and credit-note numbers; test-mode documents say TEST so they can never pass for real ones (review L2). */
+const receiptNo = (prefix: 'CR' | 'CN', seq: string, providerExpr: string) =>
+  `'${prefix}-' || CASE WHEN ${providerExpr} = 'test' THEN 'TEST-' ELSE '' END || to_char(now(), 'YYYY') || '-' || lpad(nextval('${seq}')::text, 6, '0')`;
+
+/**
+ * Applies a verified provider event to the company's top-up, once. Payment events must match the top-up's reference,
+ * amount and currency exactly; a dispute may be for part of it. An event that does not match is not recorded, so the
+ * provider's retry (once our reference is saved) is applied normally (review M4).
+ */
 export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEvent): Promise<string> {
   return withContext(db, { tenantId: e.tenantId, userId: null }, async (tx) => {
+    if (!(await lockAccount(tx))) return 'no_account';
+    const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed: boolean; refunded_minor: string }>(
+      'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed, refunded_minor FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE', [e.topupId, provider])).rows[0];
+    if (!t) return 'unknown_topup';
+    const amountOk = e.type === 'dispute.lost' ? e.amountMinor <= Number(t.amount_minor) : e.amountMinor === Number(t.amount_minor);
+    if (t.provider_ref !== e.providerRef || !amountOk || t.currency !== e.currency) return 'mismatch';
     const seen = await tx.query(`INSERT INTO credit_payment_events (tenant_id, provider, event_id, type, provider_ref, amount_minor, currency, outcome)
                                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'received') ON CONFLICT (provider, event_id) DO NOTHING RETURNING id`,
       [e.tenantId, provider, e.id, e.type, e.providerRef, e.amountMinor, e.currency]);
     if (!seen.rowCount) return 'duplicate';
     const outcome = async (o: string) => { await tx.query('UPDATE credit_payment_events SET outcome = $3 WHERE provider = $1 AND event_id = $2', [provider, e.id, o]); return o; };
-    if (!(await lockAccount(tx))) return outcome('no_account');
-    const t = (await tx.query<{ id: string; amount_minor: string; currency: string; status: string; provider_ref: string | null; kind: string; reversed: boolean }>(
-      'SELECT id, amount_minor, currency, status, provider_ref, kind, reversed FROM credit_topups WHERE id = $1 AND provider = $2 FOR UPDATE', [e.topupId, provider])).rows[0];
-    if (!t) return outcome('unknown_topup');
-    if (t.provider_ref !== e.providerRef || Number(t.amount_minor) !== e.amountMinor || t.currency !== e.currency) return outcome('mismatch');
     if (e.type === 'payment.succeeded') {
       if (t.status === 'succeeded') return outcome('already_applied');
-      if (t.status !== 'pending') return outcome(`not_pending:${t.status}`);
-      await tx.query(`UPDATE credit_topups SET status = 'succeeded', settled_at = now(),
-                        receipt_no = 'CR-' || to_char(now(), 'YYYY') || '-' || lpad(nextval('credit_receipt_seq')::text, 6, '0') WHERE id = $1`, [t.id]);
+      // A payment reported failed (or given up on) and then confirmed is credited: the money was taken (review M3).
+      await tx.query(`UPDATE credit_topups SET status = 'succeeded', failure_reason = NULL, settled_at = now(),
+                        receipt_no = ${receiptNo('CR', 'credit_receipt_seq', 'provider')} WHERE id = $1`, [t.id]);
       await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, topup_id, note) VALUES ($1, 'topup', $2, $3, $4)`,
-        [e.tenantId, e.amountMinor, t.id, t.kind === 'auto' ? 'automatic top-up' : null]);
+        [e.tenantId, e.amountMinor, t.id, t.kind === 'auto' ? 'automatic top-up' : t.status !== 'pending' ? `confirmed after ${t.status}` : null]);
       await checkLowBalance(tx, e.tenantId);
       await AuditService.record(tx, { tenantId: e.tenantId, actorUserId: null, action: 'credits.topup_succeeded', ip: undefined, targetType: 'credit_topup', targetId: t.id,
-        metadata: { amountMinor: e.amountMinor, currency: e.currency, provider, kind: t.kind } });
+        metadata: { amountMinor: e.amountMinor, currency: e.currency, provider, kind: t.kind, previousStatus: t.status } });
       return outcome('applied');
     }
     if (e.type === 'payment.failed') {
@@ -264,15 +314,55 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
         [e.tenantId, t.kind === 'auto' ? 'auto_topup_failed' : 'topup_failed', JSON.stringify({ topupId: t.id, amountMinor: e.amountMinor, reason: e.reason ?? null })]);
       return outcome('failed_recorded');
     }
-    // dispute.lost: the bank took the payment back. The credit is taken back too, even below zero.
+    // dispute.lost: the bank took (part of) the payment back. What was already refunded is not taken twice; the rest is
+    // taken back even below zero (review M3).
     if (t.status !== 'succeeded' || t.reversed) return outcome('nothing_to_reverse');
+    const take = Math.min(e.amountMinor, Number(t.amount_minor) - Number(t.refunded_minor));
     await tx.query('UPDATE credit_topups SET reversed = true WHERE id = $1', [t.id]);
+    if (take <= 0) return outcome('nothing_to_reverse');
     await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, topup_id, note) VALUES ($1, 'reversal', $2, $3, $4)`,
-      [e.tenantId, -e.amountMinor, t.id, (e.reason ?? 'dispute lost').slice(0, 300)]);
-    await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'reversal', $2)`, [e.tenantId, JSON.stringify({ topupId: t.id, amountMinor: e.amountMinor })]);
+      [e.tenantId, -take, t.id, (e.reason ?? 'dispute lost').slice(0, 300)]);
+    await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'reversal', $2)`, [e.tenantId, JSON.stringify({ topupId: t.id, amountMinor: take })]);
     await checkLowBalance(tx, e.tenantId);
-    await AuditService.record(tx, { tenantId: e.tenantId, actorUserId: null, action: 'credits.topup_reversed', ip: undefined, targetType: 'credit_topup', targetId: t.id, metadata: { amountMinor: e.amountMinor } });
+    await AuditService.record(tx, { tenantId: e.tenantId, actorUserId: null, action: 'credits.topup_reversed', ip: undefined, targetType: 'credit_topup', targetId: t.id,
+      metadata: { disputedMinor: e.amountMinor, reversedMinor: take } });
     return outcome('reversed');
+  });
+}
+
+/**
+ * Asks the provider for a pending refund (idempotent by the refund's id) and settles it: a credit note, or the amount
+ * given back. No answer: it stays pending for the worker to try again. Returns the refund's status.
+ */
+export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: string, refundId: string): Promise<string> {
+  const r = await withContext(db, { tenantId, userId: null }, async (tx) => (await tx.query<{ status: string; amount_minor: string; provider_ref: string; topup_id: string }>(
+    `SELECT f.status, f.amount_minor, t.provider_ref, f.topup_id FROM credit_refunds f JOIN credit_topups t ON t.id = f.topup_id WHERE f.id = $1`, [refundId])).rows[0]);
+  if (!r || r.status !== 'pending') return r?.status ?? 'unknown';
+  let answer: { refundRef: string; status: 'succeeded' | 'failed' };
+  try {
+    answer = await provider.refund({ providerRef: r.provider_ref, amountMinor: Number(r.amount_minor), idempotencyKey: refundId });
+  } catch (err) {
+    console.error('refund: no answer from the provider; the worker will try again', refundId, err instanceof Error ? err.message : err);
+    return 'pending';
+  }
+  return withContext(db, { tenantId, userId: null }, async (tx) => {
+    await lockCreditAccount(tx);
+    const still = (await tx.query(`SELECT 1 FROM credit_refunds WHERE id = $1 AND status = 'pending' FOR UPDATE`, [refundId])).rowCount;
+    if (!still) return (await tx.query<{ status: string }>('SELECT status FROM credit_refunds WHERE id = $1', [refundId])).rows[0]!.status;
+    if (answer.status === 'succeeded') {
+      await tx.query(`UPDATE credit_refunds f SET status = 'succeeded', provider_ref = $2, settled_at = now(),
+                        credit_note_no = ${receiptNo('CN', 'credit_note_seq', '(SELECT t.provider FROM credit_topups t WHERE t.id = f.topup_id)')} WHERE f.id = $1`, [refundId, answer.refundRef]);
+      await AuditService.record(tx, { tenantId, actorUserId: null, action: 'credits.refunded', ip: undefined, targetType: 'credit_refund', targetId: refundId, metadata: { amountMinor: Number(r.amount_minor) } });
+      return 'succeeded';
+    }
+    await tx.query(`UPDATE credit_refunds SET status = 'failed', provider_ref = $2, settled_at = now() WHERE id = $1`, [refundId, answer.refundRef]);
+    await tx.query('UPDATE credit_topups SET refunded_minor = refunded_minor - $2 WHERE id = $1', [r.topup_id, Number(r.amount_minor)]);
+    await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, refund_id, note) VALUES ($1, 'refund_failed', $2, $3, 'the provider refused the refund')`,
+      [tenantId, Number(r.amount_minor), refundId]);
+    await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'refund_failed', $2)`, [tenantId, JSON.stringify({ refundId, amountMinor: Number(r.amount_minor) })]);
+    await checkLowBalance(tx, tenantId);
+    await AuditService.record(tx, { tenantId, actorUserId: null, action: 'credits.refund_failed', ip: undefined, targetType: 'credit_refund', targetId: refundId, metadata: { amountMinor: Number(r.amount_minor) } });
+    return 'failed';
   });
 }
 
@@ -419,38 +509,38 @@ export class CreditsService {
   }
 
   /**
-   * A refund of unused credit from one successful top-up. The account stays locked while the provider is asked, so the
-   * money cannot be spent and refunded at the same time; the balance is reduced only when the provider confirms.
+   * A refund of unused credit from one successful top-up, in two steps (review H2). Step 1, under the account lock: the
+   * amount is taken out of the balance and the refund recorded as pending. Step 2, with no lock held: the provider is
+   * asked, with the refund's id as its idempotency key. Step 3: settled (credit note) or, if the provider refused, the
+   * amount is given back. A refund left pending (no answer, a crash) is settled by the worker with the same key.
+   * Only cash credit can be refunded: credit given as an adjustment is not paid out (review L3).
    */
   async refund(actor: TenantActor, input: unknown) {
     const body = parse(RefundInput, input);
-    if (!this.provider) throw Errors.conflict('payments_unavailable', 'Online payments are not connected yet.');
-    return withContext(this.deps.db, actor, async (tx) => {
+    const provider = this.provider;
+    if (!provider) throw Errors.conflict('payments_unavailable', 'Online payments are not connected yet.');
+    const id = await withContext(this.deps.db, actor, async (tx) => {
       const a = await lockAccount(tx);
       if (!a) throw Errors.conflict('no_credit_account', 'This company has no message-credit balance.');
-      const t = (await tx.query<{ amount_minor: string; refunded_minor: string; status: string; reversed: boolean; provider_ref: string; provider: string }>(
-        'SELECT amount_minor, refunded_minor, status, reversed, provider_ref, provider FROM credit_topups WHERE id = $1 FOR UPDATE', [body.topupId])).rows[0];
+      const t = (await tx.query<{ amount_minor: string; refunded_minor: string; status: string; reversed: boolean; provider: string }>(
+        'SELECT amount_minor, refunded_minor, status, reversed, provider FROM credit_topups WHERE id = $1 FOR UPDATE', [body.topupId])).rows[0];
       if (!t || t.status !== 'succeeded' || t.reversed) throw Errors.conflict('not_refundable', 'Only a completed top-up can be refunded.');
-      if (t.provider !== this.provider!.name) throw Errors.conflict('not_refundable', 'This top-up was paid through another provider.');
+      if (t.provider !== provider.name) throw Errors.conflict('not_refundable', 'This top-up was paid through another provider.');
       if (body.amountMinor > Number(t.amount_minor) - Number(t.refunded_minor)) throw Errors.badRequest('More than the unrefunded part of this top-up.');
-      if (body.amountMinor > Number(a.balance_minor) - Number(a.reserved_minor)) throw Errors.conflict('balance_in_use', 'Only unused credit can be refunded.');
-      const id = (await tx.query<{ id: string }>(`INSERT INTO credit_refunds (tenant_id, topup_id, amount_minor, reason, requested_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      const cash = Number((await tx.query<{ c: string }>(
+        `SELECT coalesce(sum(amount_minor) FILTER (WHERE kind IN ('topup', 'refund', 'refund_failed', 'reversal', 'charge')), 0) AS c FROM credit_entries`)).rows[0]!.c);
+      if (body.amountMinor > Math.min(Number(a.balance_minor) - Number(a.reserved_minor), cash)) throw Errors.conflict('balance_in_use', 'Only unused credit can be refunded.');
+      const refundId = (await tx.query<{ id: string }>(`INSERT INTO credit_refunds (tenant_id, topup_id, amount_minor, reason, requested_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [actor.tenantId, body.topupId, body.amountMinor, body.reason, actor.userId])).rows[0]!.id;
-      const r = await this.provider!.refund({ providerRef: t.provider_ref, amountMinor: body.amountMinor, idempotencyKey: id });
-      if (r.status !== 'succeeded') {
-        await tx.query(`UPDATE credit_refunds SET status = 'failed', provider_ref = $2, settled_at = now() WHERE id = $1`, [id, r.refundRef]);
-        return { id, status: 'failed' };
-      }
-      await tx.query(`UPDATE credit_refunds SET status = 'succeeded', provider_ref = $2, settled_at = now(),
-                        credit_note_no = 'CN-' || to_char(now(), 'YYYY') || '-' || lpad(nextval('credit_note_seq')::text, 6, '0') WHERE id = $1`, [id, r.refundRef]);
       await tx.query('UPDATE credit_topups SET refunded_minor = refunded_minor + $2 WHERE id = $1', [body.topupId, body.amountMinor]);
       await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, refund_id, note, created_by) VALUES ($1, 'refund', $2, $3, $4, $5)`,
-        [actor.tenantId, -body.amountMinor, id, body.reason, actor.userId]);
+        [actor.tenantId, -body.amountMinor, refundId, body.reason, actor.userId]);
       await checkLowBalance(tx, actor.tenantId);
-      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'credits.refunded', ip: actor.ip, targetType: 'credit_refund', targetId: id,
+      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'credits.refund_requested', ip: actor.ip, targetType: 'credit_refund', targetId: refundId,
         metadata: { topupId: body.topupId, amountMinor: body.amountMinor, reason: body.reason } });
-      return { id, status: 'succeeded' };
+      return refundId;
     });
+    return { id, status: await settleRefund(this.deps.db, provider, actor.tenantId, id) };
   }
 
   /** A receipt (top-up) or credit note (refund), with what a printed document needs. */
@@ -465,29 +555,47 @@ export class CreditsService {
                                          FROM credit_refunds f JOIN credit_topups t ON t.id = f.topup_id WHERE f.id = $1 AND f.status = 'succeeded'`, [id])).rows[0];
       const doc = t ?? r;
       if (!doc) throw Errors.notFound('Receipt');
-      return { ...doc, company: company.legal_name, issuer: 'MERONATIC SOLUTIONS GROUP, LLC', description: 'Prepaid WhatsApp message credit (not a tax invoice; tax treatment pending legal review)' };
+      const testMode = String((doc as { number?: string }).number ?? '').includes('-TEST-');
+      return { ...doc, testMode, company: company.legal_name, issuer: 'MERONATIC SOLUTIONS GROUP, LLC',
+        description: testMode ? 'TEST MODE: no money was taken. Not a receipt.' : 'Prepaid WhatsApp message credit (not a tax invoice; tax treatment pending legal review)' };
     });
   }
 
   /** The month's statement: opening and closing balance and the totals in between. */
+  /** The month's statement, in the company's own time zone (review L7), balances read in ledger order (review M5). */
   async statement(actor: TenantActor, month: string) {
-    if (!/^\d{4}-\d{2}$/.test(month)) throw Errors.badRequest('Month as YYYY-MM.');
+    const m = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(month);
+    if (!m) throw Errors.badRequest('Month as YYYY-MM.');
     return withContext(this.deps.db, actor, async (tx) => {
-      const from = `${month}-01`;
-      const r = (await tx.query<{ opening: string | null; closing: string | null; topups: string; charges: string; charge_count: number; refunds: string; reversals: string; adjustments: string }>(
-        `SELECT (SELECT balance_after FROM credit_entries WHERE created_at < $1::date ORDER BY created_at DESC, id DESC LIMIT 1) AS opening,
-                (SELECT balance_after FROM credit_entries WHERE created_at < ($1::date + interval '1 month') ORDER BY created_at DESC, id DESC LIMIT 1) AS closing,
-                coalesce(sum(amount_minor) FILTER (WHERE kind = 'topup'), 0) AS topups,
-                coalesce(-sum(amount_minor) FILTER (WHERE kind = 'charge'), 0) AS charges, count(*) FILTER (WHERE kind = 'charge')::int AS charge_count,
-                coalesce(-sum(amount_minor) FILTER (WHERE kind = 'refund'), 0) AS refunds,
-                coalesce(-sum(amount_minor) FILTER (WHERE kind = 'reversal'), 0) AS reversals,
-                coalesce(sum(amount_minor) FILTER (WHERE kind = 'adjustment'), 0) AS adjustments
-         FROM credit_entries WHERE created_at >= $1::date AND created_at < ($1::date + interval '1 month')`, [from])).rows[0]!;
       const a = (await tx.query<{ currency: string }>('SELECT currency FROM credit_accounts')).rows[0];
       if (!a) throw Errors.conflict('no_credit_account', 'This company has no message-credit balance.');
-      return { month, currency: a.currency, openingMinor: Number(r.opening ?? 0), closingMinor: Number(r.closing ?? r.opening ?? 0),
+      const tz = (await tx.query<{ timezone: string }>('SELECT timezone FROM tenants WHERE id = $1', [actor.tenantId])).rows[0]!.timezone;
+      const r = (await tx.query<{ opening: string | null; closing: string | null; topups: string; charges: string; charge_count: number; refunds: string; reversals: string; adjustments: string }>(
+        `WITH b AS (SELECT ($1::date)::timestamp AT TIME ZONE $2 AS s, ($1::date + interval '1 month')::timestamp AT TIME ZONE $2 AS e)
+         SELECT (SELECT balance_after FROM credit_entries, b WHERE created_at < b.s ORDER BY seq DESC LIMIT 1) AS opening,
+                (SELECT balance_after FROM credit_entries, b WHERE created_at < b.e ORDER BY seq DESC LIMIT 1) AS closing,
+                coalesce(sum(amount_minor) FILTER (WHERE kind = 'topup'), 0) AS topups,
+                coalesce(-sum(amount_minor) FILTER (WHERE kind = 'charge'), 0) AS charges, count(*) FILTER (WHERE kind = 'charge')::int AS charge_count,
+                coalesce(-sum(amount_minor) FILTER (WHERE kind IN ('refund', 'refund_failed')), 0) AS refunds,
+                coalesce(-sum(amount_minor) FILTER (WHERE kind = 'reversal'), 0) AS reversals,
+                coalesce(sum(amount_minor) FILTER (WHERE kind = 'adjustment'), 0) AS adjustments
+         FROM credit_entries, b WHERE created_at >= b.s AND created_at < b.e`, [`${month}-01`, tz])).rows[0]!;
+      return { month, currency: a.currency, timezone: tz, openingMinor: Number(r.opening ?? 0), closingMinor: Number(r.closing ?? r.opening ?? 0),
         topupsMinor: Number(r.topups), chargesMinor: Number(r.charges), chargedMessages: r.charge_count, refundsMinor: Number(r.refunds),
         reversalsMinor: Number(r.reversals), adjustmentsMinor: Number(r.adjustments) };
+    });
+  }
+
+  /** Removes a saved card; automatic top-up using it is turned off (review L9). */
+  async removeMethod(actor: TenantActor, id: string) {
+    if (!isUuid(id)) throw Errors.notFound('Card');
+    return withContext(this.deps.db, actor, async (tx) => {
+      await lockCreditAccount(tx);
+      const r = await tx.query('UPDATE credit_payment_methods SET removed_at = now() WHERE id = $1 AND removed_at IS NULL', [id]);
+      if (!r.rowCount) throw Errors.notFound('Card');
+      await tx.query('UPDATE credit_accounts SET auto_enabled = false WHERE auto_method_id = $1 AND auto_enabled', [id]);
+      await AuditService.record(tx, { tenantId: actor.tenantId, actorUserId: actor.userId, action: 'credits.method_removed', ip: actor.ip, targetType: 'credit_payment_method', targetId: id, metadata: {} });
+      return { ok: true };
     });
   }
 
@@ -513,8 +621,15 @@ export class CreditWorker {
     let n = 0;
     for (const d of due) {
       try {
-        await withContext(this.db, { tenantId: d.tenant_id, userId: null }, (tx) => releaseReservation(tx, d.message_id, 'not_billed_in_time'));
-        n++;
+        const released = await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => {
+          await lockCreditAccount(tx);
+          // A message still waiting to be sent (held by a campaign limit, say) keeps its hold (review M2).
+          const m = (await tx.query<{ status: string }>('SELECT status FROM messages WHERE id = $1', [d.message_id])).rows[0];
+          if (m && (m.status === 'queued' || m.status === 'submitting')) return false;
+          await releaseReservation(tx, d.message_id, 'not_billed_in_time');
+          return true;
+        });
+        if (released) n++;
       } catch (err) { console.error('credit release failed', d.message_id, err instanceof Error ? err.message : err); }
     }
     return n;
@@ -539,7 +654,7 @@ export class CreditWorker {
                                                         AND created_at > now() - interval '24 hours'`)).rows[0]!.s;
           if (Number(today) + Number(a.auto_amount_minor) > Number(a.auto_daily_limit_minor)) return null;
           // The last automatic attempt failed: wait for a person (no retry loop on a declined card).
-          const lastFailed = (await tx.query(`SELECT 1 FROM credit_topups WHERE kind = 'auto' AND status = 'failed' AND created_at > now() - interval '24 hours'`)).rowCount;
+          const lastFailed = (await tx.query(`SELECT 1 FROM credit_topups WHERE kind = 'auto' AND status IN ('failed', 'cancelled') AND created_at > now() - interval '24 hours'`)).rowCount;
           if (lastFailed) return null;
           const id = (await tx.query<{ id: string }>(`INSERT INTO credit_topups (tenant_id, amount_minor, currency, kind, provider) VALUES ($1, $2, $3, 'auto', $4) RETURNING id`,
             [d.tenant_id, Number(a.auto_amount_minor), a.currency, this.provider!.name])).rows[0]!.id;
@@ -551,6 +666,43 @@ export class CreditWorker {
         await applyPaymentEvent(this.db, this.provider.name, this.provider.verifyEvent(r.event.raw, r.event.signature));
         n++;
       } catch (err) { console.error('automatic top-up failed', d.tenant_id, err instanceof Error ? err.message : err); }
+    }
+    return n;
+  }
+
+  /** Refunds left pending (no answer from the provider, or a crash between the steps): asked again, same key. */
+  async settlePendingRefunds(limit = 100): Promise<number> {
+    if (!this.provider) return 0;
+    const due = await withContext(this.db, { tenantId: null, userId: null }, async (tx) =>
+      (await tx.query<{ refund_id: string; tenant_id: string }>('SELECT * FROM credit_refunds_pending($1)', [limit])).rows);
+    let n = 0;
+    for (const d of due) {
+      try { if ((await settleRefund(this.db, this.provider, d.tenant_id, d.refund_id)) !== 'pending') n++; }
+      catch (err) { console.error('refund settle failed', d.refund_id, err instanceof Error ? err.message : err); }
+    }
+    return n;
+  }
+
+  /**
+   * Automatic top-ups never confirmed (a crash after recording, a lost answer) are closed as not confirmed, with a
+   * notice, so automatic top-up is not blocked for good (review M4). A confirmation arriving later still credits it.
+   */
+  async closeStuckAutoTopUps(limit = 100): Promise<number> {
+    const due = await withContext(this.db, { tenantId: null, userId: null }, async (tx) =>
+      (await tx.query<{ topup_id: string; tenant_id: string }>('SELECT * FROM credit_auto_topups_stuck($1)', [limit])).rows);
+    let n = 0;
+    for (const d of due) {
+      try {
+        n += await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => {
+          await lockCreditAccount(tx);
+          const t = (await tx.query<{ amount_minor: string }>(`UPDATE credit_topups SET status = 'cancelled', failure_reason = 'not_confirmed', settled_at = now()
+                                                               WHERE id = $1 AND status = 'pending' RETURNING amount_minor`, [d.topup_id])).rows[0];
+          if (!t) return 0;
+          await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'auto_topup_failed', $2)`,
+            [d.tenant_id, JSON.stringify({ topupId: d.topup_id, amountMinor: Number(t.amount_minor), reason: 'not_confirmed' })]);
+          return 1;
+        });
+      } catch (err) { console.error('stuck top-up close failed', d.topup_id, err instanceof Error ? err.message : err); }
     }
     return n;
   }

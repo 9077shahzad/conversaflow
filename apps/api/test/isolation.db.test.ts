@@ -137,7 +137,8 @@ async function populate(owner: Client, label: string, tenantId: string) {
   // test card, a reservation for a sent message, a low-balance notice and the partner's monthly figure.
   await staff.post(`/v1/platform/tenants/${tenantId}/credits/account`, { currency: 'SAR', lowThresholdMinor: 100000 }).expect(201);
   const card = (await staff.post('/v1/platform/credits/rate-cards', { currency: 'SAR', effectiveFrom: new Date(Date.now() + 300).toISOString(), source: `Isolation ${label}`,
-    lines: [{ market: 'other', category: 'marketing', unitCostMinor: 50 }], markets: [] }).expect(201)).body;
+    lines: [{ market: 'other', category: 'marketing', unitCostMinor: 50 }, { market: 'other', category: 'utility', unitCostMinor: 10 },
+      { market: 'other', category: 'authentication', unitCostMinor: 10 }], markets: [] }).expect(201)).body;
   const top = (await owner.post('/v1/credits/topups', { amountMinor: 10000 }).expect(201)).body;
   await owner.post(`/v1/credits/test/topups/${top.id}/complete`, { outcome: 'succeeded' }).expect(200);
   await owner.post('/v1/credits/refunds', { topupId: top.id, amountMinor: 1000, reason: 'Isolation fixture' }).expect(201);

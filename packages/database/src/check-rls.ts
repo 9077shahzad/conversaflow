@@ -47,7 +47,9 @@ const COMPANY_TABLE_READERS: Record<string, string[]> = {
   cf_dispatch: ['send_jobs', 'media_jobs', 'campaigns', 'import_batches', 'webhook_events', 'workflow_runs', 'push_jobs', 'promises', 'webhook_deliveries', 'op_quotes',
     // credit_reservations: held reservations, to give back those never billed; credit_accounts: accounts with automatic
     // top-up on, to find those under their threshold (migration 0061, message credits)
-    'credit_reservations', 'credit_accounts'],
+    'credit_reservations', 'credit_accounts',
+    // credit_refunds: pending refunds; credit_topups: pending automatic top-ups (migration 0062)
+    'credit_refunds', 'credit_topups'],
   cf_identity: ['memberships'],
   // credit_accounts, credit_entries, credit_partner_costs: opening accounts, adjustments and the monthly reconciliation (0061)
   cf_ops: ['audit_events', 'files', 'memberships', 'subscriptions', 'support_access_grants', 'tenant_feature_flags', 'credit_accounts', 'credit_entries', 'credit_partner_costs'],
@@ -123,7 +125,11 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'credit_reservations_stale(integer)': '157b05a934b72cf1d19f620ace0f5a68',
   'credit_auto_topup_due(integer)': '7fd6d910161faac1d3059eaea7a6f83b',
   'platform_credit_open_account(text,uuid,text,bigint)': '7f189ac53de882b0f03404f5ad3c07b0',
-  'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '0314fbcb05e0a1d2402a9506e939cf06',
+  // Re-pinned by 0062: a card must price every paid category for the market 'other'.
+  'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '21bb78a06722951c0c801b7408d13948',
+  // 0062: refunds and automatic top-ups left pending, settled by the worker.
+  'credit_refunds_pending(integer)': '974d133ebb87fbdae70b6818d46177b9',
+  'credit_auto_topups_stuck(integer)': 'f25a465978167db5f2133c37aa824991',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': 'd7bbfabe109450e56094143dfd2ad04a',

@@ -66,8 +66,9 @@ const Schema = z.object({
   VAPID_SUBJECT: z.string().regex(/^(mailto:|https:\/\/)/).default('mailto:support@conversaflow.io'),
   /**
    * Payment provider for prepaid message-credit top-ups (migration 0061). `test`: a clearly labelled stand-in where
-   * no money moves (default outside production; refused in production). `none`: top-ups are unavailable. A real
-   * provider is added only after the owner approves the payment account.
+   * no money moves; on only when set explicitly (or in the test suite), refused in production, because anyone with
+   * billing permission could add credit with it (review of 0061, L1). `none` (the default): top-ups are unavailable.
+   * A real provider is added only after the owner approves the payment account.
    */
   CREDITS_PROVIDER: z.enum(['none', 'test']).optional(),
   /** Secret used to sign sandbox webhooks (HMAC-SHA256, Meta's scheme). Generated per process when not set. */
@@ -105,7 +106,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (parsed.data.NODE_ENV === 'production' && inbound !== 'worker') {
     throw new Error('Invalid configuration: production requires INBOUND_APPLY=worker (incoming events are applied by the worker).');
   }
-  const credits = parsed.data.CREDITS_PROVIDER ?? (parsed.data.NODE_ENV === 'production' ? 'none' : 'test');
+  const credits = parsed.data.CREDITS_PROVIDER ?? (parsed.data.NODE_ENV === 'test' ? 'test' : 'none');
   if (parsed.data.NODE_ENV === 'production' && credits === 'test') {
     throw new Error('Invalid configuration: production refuses CREDITS_PROVIDER=test (the test payment provider moves no money).');
   }

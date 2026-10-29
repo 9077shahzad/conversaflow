@@ -4,7 +4,7 @@ import { Errors } from '../core/errors';
 import { AuditService } from './audit.service';
 import { isUuid } from './members.service';
 import { applyStatus } from './sender';
-import { pricingFrom } from './credits';
+import { lockCreditAccount, pricingFrom } from './credits';
 import { InboundProcessor } from './inbound';
 
 /**
@@ -132,6 +132,7 @@ export class HealthService {
   /** Re-applies delivery statuses that arrived before their message was recorded. Safe to repeat. */
   async reapplyStatuses(actor: TenantActor) {
     return withContext(this.deps.db, actor, async (tx) => {
+      await lockCreditAccount(tx);
       const waiting = (await tx.query<{ id: string; wamid: string; status: string; code: string | null; ref: string | null; pricing: unknown }>(
         `SELECT id, payload->>'id' AS wamid, payload->>'status' AS status, payload#>>'{errors,0,code}' AS code,
                 payload->>'biz_opaque_callback_data' AS ref, payload->'pricing' AS pricing

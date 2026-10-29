@@ -69,7 +69,7 @@ const env = z
 if (env.AI_PROVIDER === 'anthropic' && (!env.AI_API_KEY || env.AI_PRICE_INPUT_PER_MTOK_USD === undefined || env.AI_PRICE_OUTPUT_PER_MTOK_USD === undefined)) {
   throw new Error('AI_PROVIDER=anthropic needs AI_API_KEY and both AI prices.');
 }
-const creditsProvider = env.CREDITS_PROVIDER ?? (env.NODE_ENV === 'production' ? 'none' : 'test');
+const creditsProvider = env.CREDITS_PROVIDER ?? (env.NODE_ENV === 'test' ? 'test' : 'none');
 if (env.NODE_ENV === 'production' && creditsProvider === 'test') throw new Error('Production refuses CREDITS_PROVIDER=test.');
 if (env.NODE_ENV === 'production' && !env.SMTP_URL) throw new Error('SMTP_URL is required in production.');
 if (env.NODE_ENV === 'production' && (env.SCANNER !== 'clamd' || !env.SCANNER_REQUIRE_OFFICIAL_SIGNATURES)) {
@@ -150,7 +150,7 @@ process.on('SIGINT', () => (stopping = true));
       // Operator quotes past their validity (slice 1).
       try { await quoteExpiry.dispatchDue(200); } catch (err) { console.error('quote expiry error', err instanceof Error ? err.message : err); }
       // Message credits: reservations never billed are given back; automatic top-ups for companies that turned them on.
-      try { await credits.releaseStale(200); await credits.autoTopUps(100); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
+      try { await credits.releaseStale(200); await credits.settlePendingRefunds(100); await credits.closeStuckAutoTopUps(100); await credits.autoTopUps(100); } catch (err) { console.error('credits error', err instanceof Error ? err.message : err); }
       await new Promise((r) => setTimeout(r, 60_000));
     }
   })();

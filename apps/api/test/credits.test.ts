@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { withContext } from '@conversaflow/database';
 import { loadConfig } from '../src/core/config';
 import { signBody, type SandboxAdapter } from '../src/modules/channels';
-import { AUTO_TOPUP_CONSENT, CreditWorker, TestPaymentProvider, marketFor } from '../src/modules/credits';
+import { AUTO_TOPUP_CONSENT, CreditWorker, CreditsService, TestPaymentProvider, categoryOf, marketFor } from '../src/modules/credits';
 import { Sender } from '../src/modules/sender';
 import { activateSubscription, addMember, enableMfa, newCompany, newStaff, newUser, startApp, type Client, type TestApp } from './helpers';
 
@@ -22,6 +22,8 @@ let tenant: string;
 let otherTenant: string;
 let ownerMembership: string;
 let provider: TestPaymentProvider;
+/** The provider instance the app itself uses (its refund outcomes can be scripted). */
+let provider_: TestPaymentProvider;
 let marketing: { id: string; providerTemplateId: string };
 let utility: { id: string; providerTemplateId: string };
 const NUMBER = `pn${randomUUID().slice(0, 8)}`;
@@ -101,6 +103,7 @@ beforeAll(async () => {
   t = await startApp();
   sandbox = t.deps.channels.sandbox as SandboxAdapter;
   provider = new TestPaymentProvider(t.deps.keys.webhookSecrets, t.deps.config.APP_ORIGIN);
+  provider_ = (t.app.get(CreditsService) as unknown as { provider: TestPaymentProvider }).provider;
   owner = await newUser(t, 'cr-owner');
   tenant = await newCompany(owner, 'cr', 'business');
   await activateSubscription(t, tenant);
@@ -145,6 +148,9 @@ describe('platform set-up: accounts, versioned rates, margins', () => {
     const noOther = RATES(new Date(Date.now() + 60_000));
     noOther.lines = noOther.lines.filter((l) => l.market !== 'other');
     await staff.post('/v1/platform/credits/rate-cards', noOther).expect(409);
+    const incomplete = RATES(new Date(Date.now() + 60_000));
+    incomplete.lines = incomplete.lines.filter((l) => !(l.market === 'other' && l.category === 'utility'));
+    await staff.post('/v1/platform/credits/rate-cards', incomplete).expect(409);
     await staff.post('/v1/platform/credits/rate-cards', RATES(new Date(Date.now() + 800))).expect(201);
     await staff.put('/v1/platform/credits/margin', { tenantId: null, marginBp: 2000 }).expect(200);
     await sleep(900);
@@ -163,6 +169,10 @@ describe('platform set-up: accounts, versioned rates, margins', () => {
     expect(marketFor(p, '966551234567')).toBe('saudi_mobile');
     expect(marketFor(p, '966111234567')).toBe('saudi_arabia');
     expect(marketFor(p, '+44 7700 900000')).toBe('other');
+    expect(categoryOf('authentication_international')).toBe('authentication');
+    expect(categoryOf('marketing_lite')).toBe('marketing');
+    expect(categoryOf('SERVICE')).toBe('service');
+    expect(categoryOf('something_new')).toBeNull();
   });
 });
 
@@ -193,9 +203,10 @@ describe('top-ups, receipts and payment events', () => {
     expect((await account()).balanceMinor).toBe(10000);
     const top = (await owner.get('/v1/credits/topups').expect(200)).body.find((x: { id: string }) => x.id === start.id);
     expect(top).toMatchObject({ status: 'succeeded', amountMinor: 10000 });
-    expect(top.receiptNo).toMatch(/^CR-\d{4}-\d{6}$/);
+    expect(top.receiptNo).toMatch(/^CR-TEST-\d{4}-\d{6}$/);
     const doc = (await owner.get(`/v1/credits/documents/${start.id}`).expect(200)).body;
-    expect(doc).toMatchObject({ type: 'receipt', number: top.receiptNo, amountMinor: 10000, currency: 'SAR' });
+    expect(doc).toMatchObject({ type: 'receipt', number: top.receiptNo, amountMinor: 10000, currency: 'SAR', testMode: true });
+    expect(doc.description).toMatch(/TEST MODE/);
     await otherOwner.get(`/v1/credits/documents/${start.id}`).expect(404);
   });
 
@@ -368,7 +379,7 @@ describe('refunds, reversals and adjustments', () => {
     expect((await account()).availableMinor).toBe(1000);
     const doc = (await owner.get(`/v1/credits/documents/${r.id}`).expect(200)).body;
     expect(doc).toMatchObject({ type: 'credit_note', amountMinor: 2000 });
-    expect(doc.number).toMatch(/^CN-\d{4}-\d{6}$/);
+    expect(doc.number).toMatch(/^CN-TEST-\d{4}-\d{6}$/);
     await setAvailable(10000);
     await owner.post('/v1/credits/refunds', { topupId: id, amountMinor: 6001, reason: 'Unused credit' }).expect(400);  // 8000 - 2000 left
     await agent.post('/v1/credits/refunds', { topupId: id, amountMinor: 100, reason: 'x y z' }).expect(403);
@@ -448,6 +459,157 @@ describe('automatic top-up is opt-in', () => {
   });
 });
 
+describe('review fixes (0062)', () => {
+  it('a billable delivery after the hold was given back is still charged once, without failing the webhook (H1)', async () => {
+    await setAvailable(5000);
+    const id = await queueTemplate(await customer(saudi()), marketing);
+    await send();
+    const wamid = (await msg(id)).provider_message_id!;
+    await status(wamid, 'failed').expect(200);
+    expect(await reservation(id)).toMatchObject({ state: 'released' });
+    // Meta then reports it delivered and billable, bundled with a customer message in the same delivery.
+    const wa = saudi();
+    const raw = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: NUMBER },
+      contacts: [{ wa_id: wa, profile: { name: 'Bundled' } }],
+      messages: [{ from: wa, id: `wamid.in.${randomUUID()}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'Hi' } }],
+      statuses: [{ id: wamid, status: 'delivered', timestamp: String(Math.floor(Date.now() / 1000)), recipient_id: '1', pricing: { billable: true, category: 'marketing', pricing_model: 'PMP', type: 'regular' } }] } }] }] });
+    await post(raw).expect(200);
+    expect(await charges(id)).toBe(1);
+    const failed = await app(async (tx) => (await tx.query<{ n: number }>(`SELECT count(*)::int AS n FROM webhook_events WHERE failed_at IS NOT NULL AND received_at > now() - interval '1 minute'`)).rows[0]!.n);
+    expect(failed).toBe(0);
+    expect(await app(async (tx) => (await tx.query('SELECT 1 FROM contact_identifiers WHERE value = $1', [wa])).rowCount)).toBe(1);
+    expect(await account()).toMatchObject({ availableMinor: 5000 - 60, reservedMinor: 0 });
+  });
+
+  it('refunds: the provider refusing gives the amount back; no answer leaves it pending until the worker settles it (H2)', async () => {
+    await setAvailable(0);
+    const top = await topUp(8000);
+    provider_.refundScript.push('fail');
+    const refused = (await owner.post('/v1/credits/refunds', { topupId: top, amountMinor: 1000, reason: 'Refused test' }).expect(201)).body;
+    expect(refused.status).toBe('failed');
+    expect((await account()).availableMinor).toBe(8000);
+    expect((await owner.get('/v1/credits/topups').expect(200)).body.find((x: { id: string }) => x.id === top).refundedMinor).toBe(0);
+    provider_.refundScript.push('throw');
+    const pending = (await owner.post('/v1/credits/refunds', { topupId: top, amountMinor: 2000, reason: 'No answer test' }).expect(201)).body;
+    expect(pending.status).toBe('pending');
+    expect((await account()).availableMinor).toBe(6000);                       // taken out while waiting: cannot be spent twice
+    await t.ownerDb.query('ALTER TABLE credit_refunds NO FORCE ROW LEVEL SECURITY');
+    try { await t.ownerDb.query(`UPDATE credit_refunds SET created_at = now() - interval '10 minutes' WHERE id = $1`, [pending.id]); }
+    finally { await t.ownerDb.query('ALTER TABLE credit_refunds FORCE ROW LEVEL SECURITY'); }
+    await new CreditWorker(t.deps.db, provider_).settlePendingRefunds(500);
+    const doc = (await owner.get(`/v1/credits/documents/${pending.id}`).expect(200)).body;
+    expect(doc).toMatchObject({ type: 'credit_note', amountMinor: 2000 });
+    expect((await account()).availableMinor).toBe(6000);
+  });
+
+  it('partial disputes, refunds before a dispute, and payments confirmed after failing (M3)', async () => {
+    await setAvailable(0);
+    const top = await topUp(6000);
+    await owner.post('/v1/credits/refunds', { topupId: top, amountMinor: 2000, reason: 'Partly unused' }).expect(201);
+    const before = (await account()).balanceMinor;
+    const ev = provider_.event({ type: 'dispute.lost', providerRef: `pay_test_${top}`, amountMinor: 6000, currency: 'SAR', tenantId: tenant, topupId: top });
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', ev.signature).send(ev.raw).expect(200)).body.outcome).toBe('reversed');
+    expect((await account()).balanceMinor).toBe(before - 4000);                // the refunded 2000 is not taken twice
+    // A partial dispute of another top-up takes only that part.
+    const top2 = await topUp(5000);
+    const b2 = (await account()).balanceMinor;
+    const part = provider_.event({ type: 'dispute.lost', providerRef: `pay_test_${top2}`, amountMinor: 1500, currency: 'SAR', tenantId: tenant, topupId: top2 });
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', part.signature).send(part.raw).expect(200)).body.outcome).toBe('reversed');
+    expect((await account()).balanceMinor).toBe(b2 - 1500);
+    // Reported failed, then confirmed: credited once.
+    const start = (await owner.post('/v1/credits/topups', { amountMinor: 5000 }).expect(201)).body;
+    await owner.post(`/v1/credits/test/topups/${start.id}/complete`, { outcome: 'failed' }).expect(200);
+    const b3 = (await account()).balanceMinor;
+    const late = provider_.event({ type: 'payment.succeeded', providerRef: `pay_test_${start.id}`, amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: start.id });
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', late.signature).send(late.raw).expect(200)).body.outcome).toBe('applied');
+    expect((await account()).balanceMinor).toBe(b3 + 5000);
+  });
+
+  it('an event that does not match yet is not remembered, so the provider retry is applied (M4)', async () => {
+    const start = (await owner.post('/v1/credits/topups', { amountMinor: 5000 }).expect(201)).body;
+    const wrongRef = provider_.event({ id: 'evt_same', type: 'payment.succeeded', providerRef: 'pay_other', amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: start.id });
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', wrongRef.signature).send(wrongRef.raw).expect(200)).body.outcome).toBe('mismatch');
+    const right = provider_.event({ id: 'evt_same', type: 'payment.succeeded', providerRef: `pay_test_${start.id}`, amountMinor: 5000, currency: 'SAR', tenantId: tenant, topupId: start.id });
+    expect((await http().post('/v1/webhooks/credits/test').set('Content-Type', 'application/json').set('X-CF-Payment-Signature', right.signature).send(right.raw).expect(200)).body.outcome).toBe('applied');
+  });
+
+  it('a hold stays while the message still waits to be sent; a message sent again is held again (M2)', async () => {
+    await setAvailable(5000);
+    const c = await customer(saudi());
+    const id = await app(async (tx) => {
+      const m = (await tx.query<{ id: string }>(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status, template_id, template_params)
+         VALUES ($1, $2, 'out', 'template', 'x', $3, $4, clock_timestamp(), 'queued', $5, '["Sara"]') RETURNING id`, [tenant, c, randomUUID(), ownerMembership, marketing.id])).rows[0]!;
+      return m.id;
+    });
+    // Held as if a campaign limit had kept it queued, for longer than the stale time.
+    const card = (await app(async (tx) => (await tx.query<{ id: string }>(`SELECT id FROM credit_rate_cards WHERE currency = 'SAR' AND effective_from <= now() ORDER BY effective_from DESC LIMIT 1`)).rows[0]!.id));
+    await app(async (tx) => {
+      await tx.query(`INSERT INTO credit_reservations (message_id, tenant_id, rate_card_id, market, category, cost_minor, price_minor, margin_bp, created_at)
+                      VALUES ($1, $2, $3, 'saudi_arabia', 'marketing', 50, 60, 2000, now() - interval '80 hours')`, [id, tenant, card]);
+      await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, reserved_delta, message_id) VALUES ($1, 'reserve', 0, 60, $2)`, [tenant, id]);
+    });
+    await new CreditWorker(t.deps.db, null).releaseStale(500);
+    expect(await reservation(id)).toMatchObject({ state: 'held' });
+    // Released (as a failure would), then sent again: held again, once.
+    await app(async (tx) => {
+      await tx.query(`UPDATE credit_reservations SET state = 'released' WHERE message_id = $1`, [id]);
+      await tx.query(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, reserved_delta, message_id) VALUES ($1, 'release', 0, -60, $2)`, [tenant, id]);
+      await tx.query('INSERT INTO send_jobs (tenant_id, message_id) VALUES ($1, $2)', [tenant, id]);
+    });
+    await send();
+    expect(await reservation(id)).toMatchObject({ state: 'held' });
+    expect((await account()).reservedMinor).toBe(60);
+    await status((await msg(id)).provider_message_id!, 'failed').expect(200);
+  });
+
+  it('Meta sub-categories map to ours and a changed category is priced on the reserved card (M6)', async () => {
+    await setAvailable(5000);
+    const id = await queueTemplate(await customer(saudi()), marketing);
+    await send();
+    const res = await reservation(id);
+    await status((await msg(id)).provider_message_id!, 'delivered', { billable: true, category: 'authentication_international' }).expect(200);
+    const e = await app(async (tx) => (await tx.query<{ category: string; rate_card_id: string; amount_minor: string }>(
+      `SELECT category, rate_card_id, amount_minor FROM credit_entries WHERE message_id = $1 AND kind = 'charge'`, [id])).rows[0]!);
+    expect(e.category).toBe('authentication');
+    expect(e.rate_card_id).toBe(res!.rate_card_id);
+    expect(await account()).toMatchObject({ reservedMinor: 0 });
+  });
+
+  it('statements: months in the company time zone, invalid months refused; entries numbered in order (M5, L7)', async () => {
+    await owner.get('/v1/credits/statements/2026-13').expect(400);
+    const st = (await owner.get(`/v1/credits/statements/${new Date().toISOString().slice(0, 7)}`).expect(200)).body;
+    expect(st.timezone).toBeTruthy();
+    const seqs = await app(async (tx) => (await tx.query<{ seq: string }>('SELECT seq FROM credit_entries ORDER BY seq')).rows.map((r) => Number(r.seq)));
+    expect(seqs).toEqual(seqs.map((_, i) => i + 1));
+    const a = await account();
+    const last = await app(async (tx) => (await tx.query<{ b: string }>('SELECT balance_after AS b FROM credit_entries ORDER BY seq DESC LIMIT 1')).rows[0]!.b);
+    expect(Number(last)).toBe(a.balanceMinor);
+  });
+
+  it('removing the saved card turns automatic top-up off (L9)', async () => {
+    const card = (await owner.post('/v1/credits/test/methods', { last4: '4242' }).expect(201)).body;
+    await owner.put('/v1/credits/auto-topup', { enabled: true, thresholdMinor: 100, amountMinor: 5000, dailyLimitMinor: 5000, methodId: card.id, consentText: AUTO_TOPUP_CONSENT }).expect(200);
+    await owner.delete(`/v1/credits/methods/${card.id}`).expect(200);
+    expect((await owner.get('/v1/credits').expect(200)).body.auto.enabled).toBe(false);
+    await otherOwner.delete(`/v1/credits/methods/${card.id}`).expect(404);
+  });
+
+  it('automatic top-ups never confirmed are closed with a notice instead of blocking automatic top-up (M4)', async () => {
+    const c = await newUser(t, 'cr-stuck');
+    const tid = await newCompany(c, 'crstuck', 'business');
+    await activateSubscription(t, tid);
+    await enableMfa(c);
+    await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
+    const id = await withContext(t.deps.db, { tenantId: tid, userId: null }, async (tx) => (await tx.query<{ id: string }>(
+      `INSERT INTO credit_topups (tenant_id, amount_minor, currency, kind, provider, created_at) VALUES ($1, 5000, 'SAR', 'auto', 'test', now() - interval '1 hour') RETURNING id`, [tid])).rows[0]!.id);
+    await new CreditWorker(t.deps.db, provider_).closeStuckAutoTopUps(500);
+    const tops = (await c.get('/v1/credits/topups').expect(200)).body;
+    expect(tops.find((x: { id: string }) => x.id === id)).toMatchObject({ status: 'cancelled', failureReason: 'not_confirmed' });
+    expect((await c.get('/v1/credits').expect(200)).body.notices.some((n: { kind: string }) => n.kind === 'auto_topup_failed')).toBe(true);
+  });
+});
+
 describe('monthly statement and reconciliation', () => {
   it('the company statement and the platform reconciliation agree with the ledger and flag partner differences', async () => {
     const month = new Date().toISOString().slice(0, 7);
@@ -484,5 +646,7 @@ describe('configuration', () => {
       SMTP_URL: 'smtp://example.test', INBOUND_APPLY: 'worker', CREDITS_PROVIDER: undefined };
     expect(() => loadConfig({ ...prod, CREDITS_PROVIDER: 'test' })).toThrow(/CREDITS_PROVIDER=test/);
     expect(loadConfig(prod).CREDITS_PROVIDER).toBe('none');
+    // Outside the test suite the test provider is off unless set explicitly (review L1).
+    expect(loadConfig({ ...process.env, NODE_ENV: 'development', CREDITS_PROVIDER: undefined }).CREDITS_PROVIDER).toBe('none');
   });
 });

@@ -3,6 +3,7 @@ import type { TenantActor } from '../core/context';
 import { AuditService } from './audit.service';
 import { parseWebhook, type ParsedEvent, type Provider } from './channels';
 import { applyStatus } from './sender';
+import { lockCreditAccount } from './credits';
 import { applyTemplateEvent } from './templates.service';
 import { lockAssignmentIfOn } from './auto-assign';
 import { applyInboundMessage } from './inbox.service';
@@ -159,6 +160,9 @@ export class InboundProcessor {
       }
       const items = rows.filter((r) => r.parsed).map((r) => ({ row: r, e: fromStored(r.parsed!) }));
       if (items.length === 0) return counts;
+      // Delivery statuses may write message-credit entries: the company's credit account is locked first, before any
+      // customer or conversation row, the same order as the sender (review of 0061, M1).
+      if (items.some((i) => i.e.kind === 'status')) await lockCreditAccount(tx);
       // Oldest first, so a delivery that bundles several events applies them in the provider's order.
       items.sort((a, b) => a.e.occurredAt.getTime() - b.e.occurredAt.getTime() || a.row.id.localeCompare(b.row.id));
       const results: Array<{ id: string; outcome: string }> = [];

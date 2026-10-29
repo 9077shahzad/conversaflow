@@ -26,7 +26,8 @@ export default defineConfig({
     {
       command: `node ../api/dist/main.js`,
       url: `http://127.0.0.1:${API}/health`,
-      env: { PORT: String(API), APP_ORIGIN: `http://127.0.0.1:${WEB}` },
+      // Browser checks run the labelled test payment provider for message credits (no money moves).
+      env: { PORT: String(API), APP_ORIGIN: `http://127.0.0.1:${WEB}`, CREDITS_PROVIDER: 'test' },
       reuseExistingServer: false,
       timeout: 60_000,
     },

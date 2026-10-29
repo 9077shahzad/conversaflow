@@ -514,6 +514,8 @@ export class CreditsController {
   }
   @RequirePermission('billing.manage') @Post('test/methods') @HttpCode(201)
   testMethod(@CurrentActor() actor: TenantActor, @Body() body: unknown) { return this.credits.addTestMethod(actor, body); }
+  @RequirePermission('billing.manage') @Delete('methods/:id')
+  removeMethod(@CurrentActor() actor: TenantActor, @Param('id') id: string) { return this.credits.removeMethod(actor, id); }
 }
 
 /** Payment provider events for credit top-ups: the signature over the exact bytes is checked before anything else. */

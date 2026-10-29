@@ -5,7 +5,7 @@ import { ChannelSendError, STATUS_RANK, type ChannelAdapter, type MediaSendInput
 import { outboundTypeFor } from './media';
 import { claimCampaignSend } from './campaign-limits';
 import { stopTimerOnReply } from './sla';
-import { pricingFrom, releaseReservation, reserveForSend, settleOnStatus, type Pricing } from './credits';
+import { lockCreditAccount, pricingFrom, releaseReservation, reserveForSend, settleOnStatus, type Pricing } from './credits';
 
 /**
  * Reliable outbound sending (BRD v1.2 Wave 1; architecture extension AX-3).
@@ -117,6 +117,9 @@ export class Sender {
   async processJob(tenantId: string, jobId: string): Promise<JobOutcome> {
     // Step 1: decide and mark `submitting`, committed before anything leaves.
     const prepared = await withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      // Message credits: the company's credit account (if any) is locked before anything else, the same order as every
+      // other transaction that writes credit entries (review of 0061, M1). Companies paying Meta directly: no-op.
+      await lockCreditAccount(tx);
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0];
       if (!row || row.job_state === 'done' || row.job_state === 'dead') return { done: 'nothing_to_do' as const };
       // Only the holder of a live lease may process a job (leaseNow or dispatch_claim). Explicit, as the review noted.
@@ -328,6 +331,7 @@ export class Sender {
 
     // Step 3: record the outcome, and the evidence for it.
     return withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      await lockCreditAccount(tx);
       const row = (await tx.query<JobRow>(JOB_SELECT, [jobId])).rows[0]!;
       if (providerMessageId) {
         await lockProviderId(tx, providerMessageId);
@@ -387,6 +391,7 @@ export class Sender {
    */
   private async recordLateAnswer(tenantId: string, messageId: string, attempt: number, providerMessageId: string) {
     await withContext(this.db, { tenantId, userId: null }, async (tx) => {
+      await lockCreditAccount(tx);
       await lockProviderId(tx, providerMessageId);
       await recordAttempt(tx, tenantId, messageId, attempt, 'late_accepted', null, providerMessageId);
       if (!(await keepProviderId(tx, messageId, providerMessageId))) return;
