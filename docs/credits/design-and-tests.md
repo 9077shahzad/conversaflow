@@ -127,9 +127,15 @@ Stripe refunds pending for more than three days are escalated to a person, and a
 
 Each credit is one ledger entry tied to its top-up, and the tests count those entries as well as the balance.
 
-## Test evidence (29 Oct 2026)
+## Test evidence (29 Oct 2026, final)
 
-- Clean checkout of a1093b8, built and tested from nothing (`docs/reports/evidence/clean-checkout-a1093b8.txt`): install from the lock file, strict dependency audit with no advisories, build, lint, type check, migrations 0001–0063, the isolation guard, 684 of 684 API tests and 16 of 16 browser checks (English and Arabic at three sizes, including the credits screen). Result: all checks passed.
-- `apps/api/test/credits.test.ts` holds the 32 message-credit tests; `isolation.db.test.ts` fills every credit table for two companies and confirms neither can see the other's rows.
-- Screens: `docs/reports/evidence/ui/*-credits.png`.
-- Not tested, because they don't exist yet: a real payment provider, the Solution Partner's API, Meta's live pricing webhooks (the tests use Meta's documented `pricing` fields through the sandbox) and hosting.
+- **Code tested:** commit 37e3fe9 (the same code as 517cd35, which adds documents only).
+- **Full local run on 37e3fe9:** build, lint, type check, migrations 0001–0065, the isolation guard (passed),
+  714 of 714 API tests, and 16 of 16 browser checks (English and Arabic at three sizes, including the credits screen).
+- **Clean checkout of 517cd35:** `docs/reports/evidence/clean-checkout-517cd35.txt` (see that file for its result).
+- **Message credits and partner route tests:** `apps/api/test/credits.test.ts` (34), `partner.test.ts` (31) and
+  `demo-flow.test.ts`. The payment recovery tests are in `partner.test.ts` under "payment recovery".
+- **Independent rechecks:** seven rounds on the partner route and payment recovery. The last (on cdfc8a8) found no
+  High or Medium issue left; its small points are listed in `open-findings.md`.
+- **Not tested, because they don't exist yet:** live Stripe, the 360dialog API (a local stand-in is used), Meta's live
+  pricing webhooks, and hosting.
