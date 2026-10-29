@@ -246,7 +246,7 @@ GRANT SELECT, UPDATE (resolved_at) ON credit_unmatched_events TO cf_ops;
 GRANT SELECT, INSERT ON credit_unmatched_events TO cf_dispatch;
 ALTER TABLE platform_alerts DROP CONSTRAINT platform_alerts_kind_check;
 ALTER TABLE platform_alerts ADD CONSTRAINT platform_alerts_kind_check
-  CHECK (kind IN ('partner_balance_low', 'partner_cover_short', 'partner_below_buffer', 'partner_balance_stale', 'payment_unmatched'));
+  CHECK (kind IN ('partner_balance_low', 'partner_cover_short', 'partner_below_buffer', 'partner_balance_stale', 'payment_unmatched', 'refund_stuck'));
 
 CREATE FUNCTION credit_record_unmatched(p_provider text, p_event_id text, p_type text, p_reason text, p_tenant text, p_topup text,
                                         p_provider_ref text, p_amount bigint, p_currency text) RETURNS boolean
@@ -257,6 +257,7 @@ BEGIN
   VALUES (left(p_provider, 30), p_event_id, left(p_type, 60), p_reason, left(p_tenant, 60), left(p_topup, 60), left(p_provider_ref, 200), p_amount, left(p_currency, 3))
   ON CONFLICT (provider, event_id) DO NOTHING;
   v_new := FOUND;
+  -- Raised at once; cleared only by credit_alerts_refresh, from the open events (no race with a resolution).
   INSERT INTO platform_alerts (kind, subject, data)
   VALUES ('payment_unmatched', left(p_provider, 30), jsonb_build_object('lastEventId', p_event_id, 'reason', p_reason))
   ON CONFLICT DO NOTHING;
@@ -287,11 +288,12 @@ ALTER TABLE credit_topups ADD COLUMN checked_at timestamptz;
 GRANT UPDATE (checked_at) ON credit_topups TO cf_app;
 CREATE POLICY credit_topups_dispatch_check ON credit_topups FOR SELECT TO cf_dispatch
   USING (status = 'pending' OR (status = 'cancelled' AND failure_reason = 'not_confirmed'));
-GRANT SELECT (id, tenant_id, provider, provider_ref, status, failure_reason, created_at, checked_at) ON credit_topups TO cf_dispatch;
+GRANT SELECT (id, tenant_id, provider, provider_ref, kind, status, failure_reason, created_at, checked_at) ON credit_topups TO cf_dispatch;
 CREATE FUNCTION credit_topups_to_check(p_provider text, p_limit integer) RETURNS TABLE (topup_id uuid, tenant_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT t.id, t.tenant_id FROM credit_topups t
-  WHERE t.provider = p_provider AND t.provider_ref IS NOT NULL AND t.created_at < now() - interval '10 minutes'
+  -- An automatic top-up whose charge answer was lost has no reference yet: it is found at the provider by our top-up id.
+  WHERE t.provider = p_provider AND (t.provider_ref IS NOT NULL OR t.kind = 'auto') AND t.created_at < now() - interval '10 minutes'
     AND (t.checked_at IS NULL OR t.checked_at < now() - interval '10 minutes')
     AND (t.status = 'pending' OR (t.status = 'cancelled' AND t.failure_reason = 'not_confirmed' AND t.created_at > now() - interval '3 days'))
   ORDER BY t.checked_at NULLS FIRST, t.created_at LIMIT least(greatest(p_limit, 1), 500)
@@ -312,12 +314,59 @@ BEGIN
   UPDATE credit_unmatched_events SET resolved_at = now(), resolution = btrim(p_resolution), resolved_by = v_staff
   WHERE id = p_id AND resolved_at IS NULL RETURNING provider INTO v_provider;
   IF NOT FOUND THEN RAISE EXCEPTION 'no such open event' USING ERRCODE = 'check_violation'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM credit_unmatched_events WHERE provider = v_provider AND resolved_at IS NULL) THEN
-    UPDATE platform_alerts SET resolved_at = now() WHERE kind = 'payment_unmatched' AND subject = v_provider AND resolved_at IS NULL;
-  END IF;
   INSERT INTO platform_audit_events (actor_user_id, action, target_type, target_id, metadata)
   VALUES (v_staff, 'credits.unmatched_resolved', 'credit_unmatched_event', p_id::text, jsonb_build_object('resolution', btrim(p_resolution)));
 END $$;
 ALTER FUNCTION platform_credit_unmatched_resolve(text, uuid, text) OWNER TO cf_ops;
 REVOKE ALL ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION platform_credit_unmatched_resolve(text, uuid, text) TO cf_platform;
+
+-- --- Recheck of 521e0af ---------------------------------------------------------------------------------------------
+-- An unmatched event whose top-up was later credited (a reopened account, a lookup) is closed automatically, so nobody
+-- refunds a payment that was credited after all (finding 2).
+CREATE FUNCTION credit_unmatched_settle(p_provider text, p_topup uuid) RETURNS void
+LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  UPDATE credit_unmatched_events SET resolved_at = now(), resolution = 'Credited automatically: the top-up was applied later'
+  WHERE provider = p_provider AND topup_ref = p_topup::text AND resolved_at IS NULL
+$$;
+ALTER FUNCTION credit_unmatched_settle(text, uuid) OWNER TO cf_dispatch;
+REVOKE ALL ON FUNCTION credit_unmatched_settle(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION credit_unmatched_settle(text, uuid) TO cf_app;
+GRANT UPDATE (resolved_at, resolution) ON credit_unmatched_events TO cf_dispatch;
+
+-- Refunds the provider has not finished after the retry count are kept being asked about once a day (finding 3).
+ALTER TABLE credit_refunds ADD COLUMN checked_at timestamptz;
+GRANT UPDATE (checked_at) ON credit_refunds TO cf_app;
+GRANT SELECT (provider_ref, checked_at, attempts) ON credit_refunds TO cf_dispatch;
+CREATE OR REPLACE FUNCTION credit_refunds_pending(p_limit integer) RETURNS TABLE (refund_id uuid, tenant_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT r.id, r.tenant_id FROM credit_refunds r
+  WHERE r.status = 'pending' AND r.created_at < now() - interval '5 minutes'
+    AND (r.attempts < 30 OR (r.provider_ref IS NOT NULL AND (r.checked_at IS NULL OR r.checked_at < now() - interval '1 day')))
+  ORDER BY r.created_at LIMIT least(greatest(p_limit, 1), 500)
+$$;
+
+-- Platform alerts worked out from the current state, every minute by the worker (findings 3 and 5): a payment event
+-- waiting for a person, or a refund stuck past its retries. Raised while true, cleared when no longer true.
+CREATE FUNCTION credit_alerts_refresh() RETURNS text[]
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE p text;
+BEGIN
+  IF coalesce(current_setting('app.tenant_id', true), '') <> '' THEN
+    RAISE EXCEPTION 'not available in a company context' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  INSERT INTO platform_alerts (kind, subject, data)
+  SELECT 'payment_unmatched', u.provider, jsonb_build_object('open', count(*)) FROM credit_unmatched_events u WHERE u.resolved_at IS NULL GROUP BY u.provider
+  ON CONFLICT DO NOTHING;
+  UPDATE platform_alerts a SET resolved_at = now() WHERE a.kind = 'payment_unmatched' AND a.resolved_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM credit_unmatched_events u WHERE u.provider = a.subject AND u.resolved_at IS NULL);
+  INSERT INTO platform_alerts (kind, subject, data)
+  SELECT 'refund_stuck', 'refunds', jsonb_build_object('count', count(*)) FROM credit_refunds r WHERE r.status = 'pending' AND r.attempts >= 30 HAVING count(*) > 0
+  ON CONFLICT DO NOTHING;
+  UPDATE platform_alerts a SET resolved_at = now() WHERE a.kind = 'refund_stuck' AND a.resolved_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM credit_refunds r WHERE r.status = 'pending' AND r.attempts >= 30);
+  RETURN ARRAY(SELECT a.kind || ':' || a.subject FROM platform_alerts a WHERE a.kind IN ('payment_unmatched', 'refund_stuck') AND a.resolved_at IS NULL ORDER BY 1);
+END $$;
+ALTER FUNCTION credit_alerts_refresh() OWNER TO cf_dispatch;
+REVOKE ALL ON FUNCTION credit_alerts_refresh() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION credit_alerts_refresh() TO cf_app;

@@ -134,7 +134,7 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   // Re-pinned by 0062: a card must price every paid category for the market 'other'.
   'platform_credit_publish_rates(text,text,timestamp with time zone,text,jsonb,jsonb)': '21bb78a06722951c0c801b7408d13948',
   // 0062: refunds and automatic top-ups left pending, settled by the worker.
-  'credit_refunds_pending(integer)': '057e61ad768e40c0ce44347f54ad8b0a',  // re-pinned by 0063 (attempt cap)
+  'credit_refunds_pending(integer)': '50ba577a7103df71eb7f294d7ec2ccbd',  // re-pinned by 0065 (daily check after the retry count)
   'credit_auto_topups_stuck(integer)': 'f25a465978167db5f2133c37aa824991',
   // 0064: routes, partner numbers, consent wording, partner funding.
   'partner_funding_check(text)': '68f938054ac2852753e735f4a411cc8c',
@@ -146,10 +146,12 @@ const REVIEWED_DEFINERS: Record<string, string> = {
   'platform_partner_settings(text,text,jsonb)': '32752fe0b647df2323b4515e1d3bfcf1',
   'platform_set_messaging_route(text,uuid,text,text)': 'ae8dd25d63f2b2c77ac62415745e5c26',
   // 0065: payment events that cannot be applied, and recovery by lookup with the provider.
-  'credit_record_unmatched(text,text,text,text,text,text,text,bigint,text)': '4da69669e78d651e08956fa36eeb1d74',
-  'credit_topups_to_check(text,integer)': 'fa615c7812b540d3cfc5cf5cacd15f6a',
+  'credit_record_unmatched(text,text,text,text,text,text,text,bigint,text)': '0a4bccb11a02369381a2fd0acdbd7646',
+  'credit_topups_to_check(text,integer)': '5c9b7f8f691118f02d42e16e4ae2959a',
   'platform_credit_unmatched(text)': 'f351deae43c24cc77d4bcadc96f7edcc',
-  'platform_credit_unmatched_resolve(text,uuid,text)': '874f71643e1af547adead44f4c33adee',
+  'credit_unmatched_settle(text,uuid)': '0eaf13ef1d10a6645eeabe34e7c3bc1e',
+  'credit_alerts_refresh()': 'bf1b23bc11d157c53009f2dde46abf68',
+  'platform_credit_unmatched_resolve(text,uuid,text)': 'c37629a7ea48b74d844ef856ae8ddf70',
   'platform_credit_set_margin(text,uuid,integer)': '4166cf81bb35064e5764461938336285',
   'platform_credit_adjust(text,uuid,bigint,text)': '5505a208a52f7c27ee505d5a5159d47d',
   'platform_credit_record_partner_cost(text,uuid,date,text,bigint,integer,text)': '4046a5f0c06663a07319930b8af5be4c',  // re-pinned by 0064 (currency must match)

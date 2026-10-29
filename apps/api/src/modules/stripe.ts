@@ -95,23 +95,36 @@ export class StripePaymentProvider implements PaymentProvider {
     return { refundRef: String(r.id), status: refundState(r.status) };
   }
 
-  /** A checkout session (manual top-up) or payment intent (automatic top-up), read directly from Stripe. */
-  async lookupPayment(providerRef: string) {
-    if (providerRef.startsWith('cs_')) {
-      const o = await this.api('GET', `/v1/checkout/sessions/${encodeURIComponent(providerRef)}`);
-      const base = { amountMinor: Number(o.amount_total), currency: String(o.currency).toUpperCase() };
-      if (o.payment_status === 'paid') return { status: 'succeeded' as const, ...base };
-      if (o.status === 'expired') return { status: 'failed' as const, ...base, reason: 'checkout_expired' };
+  /**
+   * A top-up's payment read directly from Stripe: the checkout session (manual), or the payment intent (automatic),
+   * found by our top-up id when the charge answer was lost. The object must carry our top-up id.
+   */
+  async lookupPayment(q: { providerRef: string | null; topupId: string }) {
+    let o: Record<string, unknown> | undefined;
+    if (q.providerRef?.startsWith('cs_')) {
+      const cs = await this.api('GET', `/v1/checkout/sessions/${encodeURIComponent(q.providerRef)}`);
+      if ((cs.metadata as Record<string, string> | undefined)?.topupId !== q.topupId) return null;
+      const base = { providerRef: q.providerRef, amountMinor: Number(cs.amount_total), currency: String(cs.currency).toUpperCase() };
+      if (cs.payment_status === 'paid') return { status: 'succeeded' as const, ...base };
+      if (cs.status === 'expired') return { status: 'failed' as const, ...base, reason: 'checkout_expired' };
+      // Completed but unpaid: an asynchronous method still settling, or failed (seen on its payment intent).
+      if (cs.status === 'complete' && cs.payment_intent) {
+        const pi = await this.api('GET', `/v1/payment_intents/${encodeURIComponent(String(cs.payment_intent))}`);
+        if (pi.status === 'canceled' || pi.status === 'requires_payment_method') return { status: 'failed' as const, ...base, reason: 'payment_failed' };
+      }
       return { status: 'pending' as const, ...base };
     }
-    if (providerRef.startsWith('pi_')) {
-      const o = await this.api('GET', `/v1/payment_intents/${encodeURIComponent(providerRef)}`);
-      const base = { amountMinor: Number(o.amount), currency: String(o.currency).toUpperCase() };
-      if (o.status === 'succeeded') return { status: 'succeeded' as const, ...base };
-      if (o.status === 'canceled' || o.status === 'requires_payment_method') return { status: 'failed' as const, ...base, reason: 'payment_failed' };
-      return { status: 'pending' as const, ...base };
+    if (q.providerRef?.startsWith('pi_')) o = await this.api('GET', `/v1/payment_intents/${encodeURIComponent(q.providerRef)}`);
+    else if (!q.providerRef) {
+      const found = await this.api('GET', `/v1/payment_intents/search?query=${encodeURIComponent(`metadata['topupId']:'${q.topupId}'`)}&limit=1`);
+      o = ((found.data ?? []) as Array<Record<string, unknown>>)[0];
+      if (!o) return null;
     }
-    return null;
+    if (!o || (o.metadata as Record<string, string> | undefined)?.topupId !== q.topupId) return null;
+    const base = { providerRef: String(o.id), amountMinor: Number(o.amount), currency: String(o.currency).toUpperCase() };
+    if (o.status === 'succeeded') return { status: 'succeeded' as const, ...base };
+    if (o.status === 'canceled' || o.status === 'requires_payment_method') return { status: 'failed' as const, ...base, reason: 'payment_failed' };
+    return { status: 'pending' as const, ...base };
   }
 
   /** A refund Stripe reported as pending (or requiring action): its state now (review of 0064, M6). */

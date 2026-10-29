@@ -521,11 +521,79 @@ describe('payment recovery: early, repeated, out-of-order and lost Stripe events
     expect(open).toHaveLength(1);
     const alerts = await t.ownerDb.query(`SELECT 1 FROM platform_alerts WHERE kind = 'payment_unmatched' AND subject = 'stripe' AND resolved_at IS NULL`);
     expect(alerts.rowCount).toBe(1);
+    expect(await new CreditWorker(t.deps.db, provider()).refreshAlerts()).toContain('payment_unmatched:stripe');
+    // A failure for a top-up that cannot be found took no money: logged, no alert, nothing for a person.
+    expect((await stripeHook(evt('payment_intent.payment_failed', { ...pi, id: `pi_test_orphan2_${randomUUID().slice(0, 6)}` })).expect(200)).body.outcome).toBe('no_money_taken:unknown_topup');
     await staff.put(`/v1/platform/credits/unmatched-events/${open[0]!.id}`, { resolution: 'x' }).expect(400);
     for (const u of (await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ id: string }>) {
       await staff.put(`/v1/platform/credits/unmatched-events/${u.id}`, { resolution: 'Refunded in the Stripe dashboard (test)' }).expect(200);
     }
     expect((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body).toEqual([]);
+    expect(await new CreditWorker(t.deps.db, provider()).refreshAlerts()).not.toContain('payment_unmatched:stripe');
     expect((await t.ownerDb.query(`SELECT 1 FROM platform_alerts WHERE kind = 'payment_unmatched' AND subject = 'stripe' AND resolved_at IS NULL`)).rowCount).toBe(0);
+  });
+
+  it('the charge answer for an automatic top-up is lost: found at Stripe by our top-up id and credited once', async () => {
+    const before = (await account()).balanceMinor;
+    const id = (await app(async (tx) => (await tx.query<{ id: string }>(
+      `INSERT INTO credit_topups (tenant_id, amount_minor, currency, kind, provider) VALUES ($1, 5300, 'SAR', 'auto', 'stripe') RETURNING id`, [tenant])).rows[0]!)).id;
+    stripe.dropNextIntentAnswer = true;
+    await expect(provider().chargeSaved({ tenantId: tenant, topupId: id, methodRef: 'cus_9:pm_9', amountMinor: 5300, currency: 'SAR', idempotencyKey: id })).rejects.toThrow();
+    const pi = [...stripe.intents.values()].find((x) => (x.metadata as Record<string, string>).topupId === id)!;
+    pi.status = 'succeeded';                                                                           // charged at Stripe; we never heard
+    await age(id, 20);
+    const worker = new CreditWorker(t.deps.db, provider());
+    expect(await worker.closeStuckAutoTopUps()).toBeGreaterThanOrEqual(1);                            // closed as unconfirmed first
+    await age(id, 30);
+    expect(await worker.recoverTopUps()).toBe(1);
+    expect((await app(async (tx) => (await tx.query<{ provider_ref: string; status: string }>('SELECT provider_ref, status FROM credit_topups WHERE id = $1', [id])).rows[0]!)))
+      .toEqual({ provider_ref: pi.id, status: 'succeeded' });
+    expect(await entries(id)).toBe(1);
+    expect((await account()).balanceMinor).toBe(before + 5300);
+  });
+
+  it('a lookup says failed, then the real payment succeeds: credited once; a lookup and a webhook at the same moment: credited once', async () => {
+    const before = (await account()).balanceMinor;
+    const r = (await owner.post('/v1/credits/topups', { amountMinor: 5700 }).expect(201)).body;
+    const session = [...stripe.sessions.values()].at(-1)!;
+    session.status = 'expired';
+    await age(r.id, 30);
+    const worker = new CreditWorker(t.deps.db, provider());
+    expect(await worker.recoverTopUps()).toBe(1);                                                    // recorded as failed
+    stripe.pay(String(session.id));                                                                  // then paid after all (asynchronous method)
+    expect((await stripeHook(evt('checkout.session.async_payment_succeeded', session)).expect(200)).body.outcome).toBe('applied');
+    expect(await entries(r.id)).toBe(1);
+    // Racing: a paid top-up looked up while its webhook arrives.
+    const r2 = (await owner.post('/v1/credits/topups', { amountMinor: 5900 }).expect(201)).body;
+    const s2 = [...stripe.sessions.values()].at(-1)!;
+    stripe.pay(String(s2.id));
+    await age(r2.id, 30);
+    const [, hook] = await Promise.all([worker.recoverTopUps(), stripeHook(evt('checkout.session.completed', s2))]);
+    expect(hook.status).toBe(200);
+    expect(await entries(r2.id)).toBe(1);
+    expect((await account()).balanceMinor).toBe(before + 5700 + 5900);
+  });
+
+  it('a payment arriving for a closed account is kept for a person; when the account is reopened and the top-up credited, the record closes itself', async () => {
+    const u = await newUser(t, 'pt-rec');
+    const tid = await newCompany(u, 'ptrec', 'business');
+    await activateSubscription(t, tid);
+    await enableMfa(u);
+    await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'partner_360dialog', note: 'Recovery test company' }).expect(200);
+    await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
+    const r = (await u.post('/v1/credits/topups', { amountMinor: 6100 }).expect(201)).body;
+    const session = [...stripe.sessions.values()].at(-1)!;
+    await age(r.id, 3 * 24 * 60);                                                                    // an abandoned checkout no longer blocks a switch
+    await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'meta_direct', note: 'Back to direct' }).expect(200);
+    stripe.pay(String(session.id));
+    const e = evt('checkout.session.completed', session);
+    expect((await stripeHook(e).expect(200)).body.outcome).toBe('unmatched:no_account');
+    expect(((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ eventId: string }>).some((x) => x.eventId === e.id)).toBe(true);
+    await staff.put(`/v1/platform/tenants/${tid}/messaging-route`, { route: 'partner_360dialog', note: 'Partner again' }).expect(200);
+    await staff.post(`/v1/platform/tenants/${tid}/credits/account`, { currency: 'SAR' }).expect(201);
+    await age(r.id, 3 * 24 * 60);
+    expect(await new CreditWorker(t.deps.db, provider()).recoverTopUps()).toBe(1);
+    expect((await u.get('/v1/credits').expect(200)).body.balanceMinor).toBe(6100);
+    expect(((await staff.get('/v1/platform/credits/unmatched-events').expect(200)).body as Array<{ eventId: string }>).some((x) => x.eventId === e.id)).toBe(false);
   });
 });

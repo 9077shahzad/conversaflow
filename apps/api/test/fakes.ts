@@ -85,6 +85,7 @@ export class FakeStripe {
   readonly refunds = new Map<string, Record<string, unknown>>();
   /** Payment intents created for automatic top-ups; a test moves their status on. */
   readonly intents = new Map<string, Record<string, unknown>>();
+  dropNextIntentAnswer = false;
   private seq = 0;
   private server = createServer((req, res) => void this.handle(req, res));
   url = '';
@@ -133,10 +134,16 @@ export class FakeStripe {
       const r = this.refunds.get(decodeURIComponent(url.pathname.split('/').pop()!));
       return r ? json(res, 200, r) : json(res, 404, { error: { type: 'invalid_request_error', code: 'resource_missing' } });
     }
+    if (req.method === 'GET' && url.pathname === '/v1/payment_intents/search') {
+      const m = /metadata\['topupId'\]:'([^']+)'/.exec(url.searchParams.get('query') ?? '');
+      return json(res, 200, { object: 'search_result', data: [...this.intents.values()].filter((pi) => (pi.metadata as Record<string, string>).topupId === m?.[1]) });
+    }
     if (req.method === 'POST' && url.pathname === '/v1/payment_intents') {
       const pi = { id: `pi_test_auto_${++this.seq}`, object: 'payment_intent', status: 'processing', amount: Number(form.amount), currency: form.currency,
         metadata: { tenantId: form['metadata[tenantId]'], topupId: form['metadata[topupId]'], kind: form['metadata[kind]'] } };
       this.intents.set(pi.id, pi);
+      // The charge was made but its answer never reaches us (timeout, crash).
+      if (this.dropNextIntentAnswer) { this.dropNextIntentAnswer = false; req.socket.destroy(); return; }
       return json(res, 200, pi);
     }
     if (req.method === 'GET' && url.pathname.startsWith('/v1/payment_intents/')) {

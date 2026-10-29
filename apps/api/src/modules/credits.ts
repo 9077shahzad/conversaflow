@@ -270,7 +270,7 @@ export interface PaymentProvider {
    * Looks a payment up directly with the provider (our own authenticated call, not a webhook), for recovery when its
    * notices never arrive. Null when the provider cannot say.
    */
-  lookupPayment?(providerRef: string): Promise<{ status: 'succeeded' | 'failed' | 'pending'; amountMinor: number; currency: string; reason?: string } | null>;
+  lookupPayment?(q: { providerRef: string | null; topupId: string }): Promise<{ status: 'succeeded' | 'failed' | 'pending'; providerRef: string; amountMinor: number; currency: string; reason?: string } | null>;
   /** The current state of a refund the provider reported as pending (review of 0064, M6). */
   refundStatus?(refundRef: string): Promise<'succeeded' | 'failed' | 'pending'>;
   /** Verifies the signature and reads the event; null for events that need no action. May look things up with the provider. */
@@ -396,6 +396,28 @@ export async function applyPaymentEvent(db: Db, provider: string, e: PaymentEven
 }
 
 /**
+ * After an event was applied (or not): a payment that cannot be applied will not become right if sent again (the
+ * reference is adopted when it arrives first). If money may have been taken, it is kept with a platform alert for a
+ * person; a failure or an expiry took no money and is only logged. When a top-up is credited, any earlier record of it
+ * waiting for a person is closed, so nobody refunds a payment that was credited after all.
+ */
+export async function settleEventOutcome(db: Db, provider: string, e: PaymentEvent, outcome: string): Promise<string> {
+  if (outcome === 'applied') {
+    await withContext(db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_unmatched_settle($1, $2)', [provider, e.topupId]));
+    return outcome;
+  }
+  if (outcome !== 'mismatch' && outcome !== 'unknown_topup' && outcome !== 'no_account') return outcome;
+  if (e.type === 'payment.failed') {
+    console.warn('credits: a failed payment for a top-up that cannot be found or is closed; no money was taken', provider, e.id, outcome);
+    return `no_money_taken:${outcome}`;
+  }
+  await withContext(db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+    [provider, e.id, e.type, outcome, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]));
+  console.error('credits: payment event not applied; kept for a person to check', provider, e.id, outcome);
+  return `unmatched:${outcome}`;
+}
+
+/**
  * Asks the provider for a pending refund (idempotent by the refund's id) and settles it: a credit note, or the amount
  * given back. No answer: it stays pending for the worker to try again. Returns the refund's status.
  */
@@ -432,7 +454,7 @@ export async function settleRefund(db: Db, provider: PaymentProvider, tenantId: 
       // the balance until the provider confirms either way.
       // Counted only after three days, so the worker keeps asking for about three days and then tells a person
       // (refund_stuck), as for a refund that is never answered (recheck finding 5).
-      const n = (await tx.query<{ attempts: number }>(`UPDATE credit_refunds SET provider_ref = $2,
+      const n = (await tx.query<{ attempts: number }>(`UPDATE credit_refunds SET provider_ref = $2, checked_at = now(),
           attempts = attempts + CASE WHEN created_at < now() - interval '3 days' THEN 1 ELSE 0 END WHERE id = $1 RETURNING attempts`, [refundId, answer.refundRef])).rows[0]!.attempts;
       if (n === 30) {
         await tx.query(`INSERT INTO credit_notices (tenant_id, kind, data) VALUES ($1, 'refund_stuck', $2)`, [tenantId, JSON.stringify({ refundId, amountMinor: Number(r.amount_minor) })]);
@@ -563,17 +585,7 @@ export class CreditsService {
       throw new AppError(400, 'invalid_event', 'The payment event could not be read.');
     }
     if (!e) return 'ignored';
-    const outcome = await applyPaymentEvent(this.deps.db, this.provider.name, e, this.provider.testMode);
-    // An event that cannot be applied will not become right if sent again (the reference is adopted when it arrives first,
-    // review of 0064 H2). It is kept and raises a platform alert: the money may have been taken and a person refunds it
-    // (recheck of 0065, finding 2).
-    if (outcome === 'mismatch' || outcome === 'unknown_topup' || outcome === 'no_account') {
-      await withContext(this.deps.db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
-        [this.provider!.name, e.id, e.type, outcome, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]));
-      console.error('credits: payment event not applied; recorded for a person to check', this.provider.name, e.id, outcome);
-      return `unmatched:${outcome}`;
-    }
-    return outcome;
+    return settleEventOutcome(this.deps.db, this.provider.name, e, await applyPaymentEvent(this.deps.db, this.provider.name, e, this.provider.testMode));
   }
 
   /** Test mode only: a saved test card for automatic top-up (…4242 succeeds, …0002 is always declined). */
@@ -843,24 +855,29 @@ export class CreditWorker {
     let n = 0;
     for (const d of due) {
       try {
-        const t = await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => (await tx.query<{ provider_ref: string; amount_minor: string; currency: string }>(
-          `UPDATE credit_topups SET checked_at = now() WHERE id = $1 RETURNING provider_ref, amount_minor, currency`, [d.topup_id])).rows[0]);
+        const t = await withContext(this.db, { tenantId: d.tenant_id, userId: null }, async (tx) => (await tx.query<{ provider_ref: string | null }>(
+          `UPDATE credit_topups SET checked_at = now() WHERE id = $1 RETURNING provider_ref`, [d.topup_id])).rows[0]);
         if (!t) continue;
-        const found = await provider.lookupPayment(t.provider_ref);
+        // Found by our reference, or, for an automatic top-up whose charge answer was lost, by our top-up id.
+        const found = await provider.lookupPayment({ providerRef: t.provider_ref, topupId: d.topup_id });
         if (!found || found.status === 'pending') continue;
-        const e: PaymentEvent = { id: `lookup:${t.provider_ref}:${found.status}`, type: found.status === 'succeeded' ? 'payment.succeeded' : 'payment.failed',
-          providerRef: t.provider_ref, amountMinor: found.amountMinor, currency: found.currency, tenantId: d.tenant_id, topupId: d.topup_id,
+        const e: PaymentEvent = { id: `lookup:${found.providerRef}:${found.status}`, type: found.status === 'succeeded' ? 'payment.succeeded' : 'payment.failed',
+          providerRef: found.providerRef, amountMinor: found.amountMinor, currency: found.currency, tenantId: d.tenant_id, topupId: d.topup_id,
           ...(found.reason ? { reason: found.reason } : {}) };
-        const outcome = await applyPaymentEvent(this.db, provider.name, e, provider.testMode);
-        if (outcome === 'mismatch' || outcome === 'unknown_topup' || outcome === 'no_account') {
-          await withContext(this.db, { tenantId: null, userId: null }, (tx) => tx.query('SELECT credit_record_unmatched($1, $2, $3, $4, $5, $6, $7, $8, $9)',
-            [provider.name, e.id, e.type, outcome, e.tenantId, e.topupId, e.providerRef, e.amountMinor, e.currency]));
-          // Nothing more a lookup can do: stop looking; the alert brings it to a person.
+        const outcome = await settleEventOutcome(this.db, provider.name, e, await applyPaymentEvent(this.db, provider.name, e, provider.testMode));
+        if (outcome === 'applied' || outcome === 'failed_recorded') n++;
+        else {
+          // A final answer (already applied, failed, not pending, kept for a person): no need to ask again.
           await withContext(this.db, { tenantId: d.tenant_id, userId: null }, (tx) => tx.query(`UPDATE credit_topups SET checked_at = 'infinity' WHERE id = $1`, [d.topup_id]));
-        } else if (outcome === 'applied' || outcome === 'failed_recorded') n++;
+        }
       } catch (err) { console.error('top-up recovery failed', d.topup_id, err instanceof Error ? err.message : err); }
     }
     return n;
+  }
+
+  /** Platform alerts for payments waiting for a person and refunds stuck past their retries, from the current state. */
+  async refreshAlerts(): Promise<string[]> {
+    return withContext(this.db, { tenantId: null, userId: null }, async (tx) => (await tx.query<{ a: string[] }>('SELECT credit_alerts_refresh() AS a')).rows[0]!.a);
   }
 
   async closeStuckAutoTopUps(limit = 100): Promise<number> {
