@@ -17,9 +17,10 @@ export const useSession = () => {
   return v;
 };
 
-type Item = { href: string; key: keyof ReturnType<typeof t>['nav']; later?: boolean; icon: string };
+type Item = { href: string; key: keyof ReturnType<typeof t>['nav']; later?: boolean; icon: string; staff?: boolean };
 const ITEMS: Item[] = [
   { href: '', key: 'dashboard', icon: 'M4 13h6V4H4zm10 7h6V11h-6zM4 20h6v-5H4zm10-11h6V4h-6z' },
+  { href: '/insights', key: 'insights', icon: 'M4 19h16M7 16V9m5 7V5m5 11v-4' },
   { href: '/inbox', key: 'inbox', icon: 'M4 5h16v10h-5l-3 3-3-3H4z' },
   { href: '/setup', key: 'setup', icon: 'M4 6h2m4 0h10M4 12h10m4 0h2M4 18h6m4 0h6' },
   { href: '/templates', key: 'templates', icon: 'M6 3h9l3 3v15H6zm3 7h6m-6 4h6m-6 4h4' },
@@ -36,6 +37,7 @@ const ITEMS: Item[] = [
   { href: '/developers', key: 'developers', icon: 'M8 9l-4 3 4 3m8-6l4 3-4 3M14 5l-4 14' },
   { href: '/notifications', key: 'notifications', icon: 'M6 16V11a6 6 0 0112 0v5l2 2H4zm4 4h4' },
   { href: '/settings/company', key: 'company', icon: 'M4 21V5l8-3 8 3v16M9 21v-5h6v5' },
+  { href: '/platform', key: 'platform', staff: true, icon: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5' },
   { href: '/settings/team', key: 'team', icon: 'M8 11a3 3 0 100-6 3 3 0 000 6zm8 0a3 3 0 100-6 3 3 0 000 6zM2 20a6 6 0 0112 0m-2 0a6 6 0 0110 0' },
 ];
 
@@ -45,6 +47,9 @@ export function AppShell({ locale, children }: { locale: Locale; children: React
   const path = usePathname() ?? '';
   const [state, setState] = useState<{ me: Me; workspace: Workspace | null } | null>(null);
   const [open, setOpen] = useState(false);
+  // The platform overview link is shown to platform owners only (the API checks it again on every request).
+  const [platformOwner, setPlatformOwner] = useState(false);
+  useEffect(() => { api<{ role: string | null }>('/v1/platform/me').then((r) => setPlatformOwner(r.role === 'platform_owner')).catch(() => undefined); }, []);
 
   useEffect(() => {
     (async () => {
@@ -68,7 +73,7 @@ export function AppShell({ locale, children }: { locale: Locale; children: React
   const base = `/${locale}/app`;
   const nav = (
     <nav aria-label={d.nav.main} className="flex flex-col gap-1 p-3">
-      {ITEMS.map((it) => {
+      {ITEMS.filter((it) => !it.staff || platformOwner).map((it) => {
         const href = base + it.href;
         const current = it.href === '' ? path === base : path === href || path.startsWith(`${href}/`);
         const cls = `flex items-center gap-3 rounded-lg px-3 py-2.5 text-[15px] ${current ? 'bg-teal text-white' : 'text-slate-200 hover:bg-white/10'}`;

@@ -3,12 +3,27 @@
  * readability (IBM Plex Sans Arabic actually used, minimum text size, line height), right-to-left layout
  * (direction, mirrored navigation), nothing cut off or scrolling sideways, and an automated accessibility scan.
  */
+import { createHmac } from 'node:crypto';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test, type Page } from '@playwright/test';
+import { chromium, expect, test, type Page } from '@playwright/test';
+import { existsSync } from 'node:fs';
 
-const demo = () => JSON.parse(readFileSync(join(__dirname, '.demo.json'), 'utf8')) as { ownerEmail: string; password: string };
+const demo = () => JSON.parse(readFileSync(join(__dirname, '.demo.json'), 'utf8')) as { ownerEmail: string; password: string; staffEmail?: string; staffTotpSecret?: string };
+
+/** RFC 6238 authenticator code (SHA-1, 6 digits, 30 s), for signing the demo platform owner in. */
+function totp(secretBase32: string, at = Date.now()) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let bits = '';
+  for (const ch of secretBase32.replace(/=+$/, '').toUpperCase()) bits += alphabet.indexOf(ch).toString(2).padStart(5, '0');
+  const key = Buffer.from(bits.match(/.{8}/g)!.map((b) => parseInt(b, 2)));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(at / 1000 / 30)));
+  const h = createHmac('sha1', key).update(counter).digest();
+  const o = h[h.length - 1]! & 0xf;
+  return String(((h.readUInt32BE(o) & 0x7fffffff) % 1_000_000)).padStart(6, '0');
+}
 const SHOTS = join(__dirname, '../../../docs/reports/evidence/ui');
 mkdirSync(SHOTS, { recursive: true });
 
@@ -196,6 +211,18 @@ for (const locale of ['en', 'ar'] as const) {
       await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? /النتائج والتكاليف/ : /Outcomes and costs/ })).toBeVisible();
       await checkPage(page, locale, 'reports', view);
 
+      // Insights (owner request of 30 Oct 2026): sample data labelled, figures, drill-down, 3D view or its fallback.
+      await page.goto(`/${locale}/app/insights`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'المؤشرات' : 'Insights');
+      await expect(page.getByText(locale === 'ar' ? /بيانات تجريبية/ : /Test data: every number here/)).toBeVisible();
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'النشاط حسب الوجهة والرقم' : 'Activity by destination and number' })).toBeVisible();
+      // The 3D view loads (or, without WebGL, the standard chart is shown); either way the figures are reachable.
+      await expect(page.getByText(locale === 'ar' ? 'جارٍ تحميل العرض ثلاثي الأبعاد…' : 'Loading the 3D view…')).toHaveCount(0, { timeout: 15_000 });
+      await page.getByRole('region', { name: locale === 'ar' ? 'الفريق' : 'Team' }).getByRole('button').first().click();
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'الرسائل وراء هذا الرقم' : 'Messages behind this figure' })).toBeVisible();
+      await expect(page.getByRole('region', { name: locale === 'ar' ? 'الرسائل وراء هذا الرقم' : 'Messages behind this figure' }).getByRole('row').nth(1)).toBeVisible();
+      await checkPage(page, locale, 'insights', view);
+
       await page.goto(`/${locale}/app/channel-health`);
       await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'حالة القناة' : 'Channel health');
       await expect(page.getByText(locale === 'ar' ? 'رسائل تحتاج إلى متابعة' : 'Messages needing a person')).toBeVisible();
@@ -220,6 +247,68 @@ for (const locale of ['en', 'ar'] as const) {
       await context.close();
     });
   }
+}
+
+for (const locale of ['en', 'ar'] as const) {
+  for (const view of ['mobile', 'desktop'] as const) {
+    test(`${locale} ${view}: platform overview for a platform owner`, async ({ browser }) => {
+      const { staffEmail, password, staffTotpSecret } = demo();
+      test.skip(!staffEmail || !staffTotpSecret, 'the demo seed has no platform owner');
+      const context = await browser.newContext({ viewport: VIEWPORTS[view], locale: locale === 'ar' ? 'ar-SA' : 'en-GB' });
+      await context.addInitScript(RECORD_CSP);
+      const page = await context.newPage();
+      const h = { 'X-Requested-With': 'conversaflow' };
+      expect((await page.request.post('/v1/auth/login', { headers: h, data: { email: staffEmail, password } })).ok()).toBe(true);
+      // An authenticator code works once: if the previous test used this 30-second code, wait for the next one.
+      let ok = false;
+      for (let tries = 0; tries < 3 && !ok; tries++) {
+        ok = (await page.request.post('/v1/auth/mfa/challenge', { headers: h, data: { code: totp(staffTotpSecret!) } })).status() === 204;
+        if (!ok) await page.waitForTimeout(31_000 - (Date.now() % 30_000));
+      }
+      expect(ok).toBe(true);
+      await page.goto(`/${locale}/app/platform`);
+      await expect(page.getByRole('heading', { level: 1 })).toContainText(locale === 'ar' ? 'نظرة عامة على المنصة' : 'Platform overview');
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'الشركات ذات الرصيد المدفوع مسبقًا' : 'Companies with prepaid credit' })).toBeVisible();
+      await page.getByRole('region', { name: locale === 'ar' ? 'الشركات ذات الرصيد المدفوع مسبقًا' : 'Companies with prepaid credit' }).getByRole('button').first().click();
+      await expect(page.getByRole('heading', { level: 3, name: locale === 'ar' ? /المطابقة لشهر/ : /Reconciliation for/ })).toBeVisible();
+      await checkPage(page, locale, 'platform', view);
+      await context.close();
+    });
+  }
+}
+
+for (const [locale, view] of [['en', 'desktop'], ['ar', 'mobile']] as const) {
+  test(`${locale} ${view}: the 3D activity view draws with software WebGL, works by keyboard, and opens the drill-down`, async () => {
+    // This build machine has no graphics card: Chromium's software renderer stands in, as on a device without one.
+    const exe = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+    const b = await chromium.launch({ ...(existsSync(exe) ? { executablePath: exe } : {}), args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
+    const context = await b.newContext({ viewport: VIEWPORTS[view], locale: locale === 'ar' ? 'ar-SA' : 'en-GB', reducedMotion: 'reduce', baseURL: test.info().project.use.baseURL });
+    await context.addInitScript(RECORD_CSP);
+    const page = await context.newPage();
+    const { ownerEmail, password } = demo();
+    expect((await page.request.post('/v1/auth/login', { headers: { 'X-Requested-With': 'conversaflow' }, data: { email: ownerEmail, password } })).ok()).toBe(true);
+    await page.goto(`/${locale}/app/insights`);
+    await page.getByRole('button', { name: locale === 'ar' ? 'عرض ثلاثي الأبعاد' : '3D view' }).click();
+    const chart = page.getByRole('group', { name: locale === 'ar' ? /النشاط حسب الوجهة والرقم/ : /Activity by destination and number/ }).last();
+    const fallback = page.getByRole('status').filter({ hasText: locale === 'ar' ? /الرسم البياني العادي/ : /standard chart is shown/ });
+    await expect(page.locator('canvas').or(fallback)).toBeVisible({ timeout: 20_000 });
+    const drew = await page.locator('canvas').count() > 0 && !(await fallback.count());
+    test.info().annotations.push({ type: '3d', description: drew ? 'drawn with software WebGL' : 'fell back to the standard chart' });
+    if (drew) {
+      await chart.focus();
+      const live = page.locator('#activity-3d-selected');
+      const first = await live.textContent();
+      await page.keyboard.press('ArrowRight');
+      await expect(live).not.toHaveText(first ?? '');
+      await page.keyboard.press('q');
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'الرسائل وراء هذا الرقم' : 'Messages behind this figure' })).toBeVisible();
+      await page.getByRole('heading', { level: 2, name: locale === 'ar' ? 'النشاط حسب الوجهة والرقم' : 'Activity by destination and number' }).scrollIntoViewIfNeeded();
+    }
+    expect(await page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? null)).toEqual([]);
+    await page.screenshot({ path: join(SHOTS, `${locale}-${view}-insights-3d.png`), fullPage: true });
+    await b.close();
+  });
 }
 
 test('the app can be installed: manifest, service worker and offline page are served with a strict policy', async ({ page, request }) => {

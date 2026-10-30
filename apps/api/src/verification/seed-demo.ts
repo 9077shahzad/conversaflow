@@ -196,7 +196,106 @@ async function main() {
     await credits.simulateCheckout(actor, top.id, 'succeeded');
   }
 
-  console.log(JSON.stringify({ ownerEmail, password: PASSWORD, tenantId: tenant.id }));
+  // SAMPLE history for the dashboards (owner request of 30 Oct 2026): four weeks of invented traffic on two sandbox
+  // numbers, customers in several countries, replies by the demo team with mixed delivery results, and a few charged
+  // messages. Inbound messages go through the real service and are then dated back; the dashboards label all of it as
+  // test data because every number is a sandbox number.
+  let staff: { staffEmail: string; staffTotpSecret: string } | null = null;
+  if (process.env.DATABASE_URL && sandbox) {
+    const ownerActor = (await loadActor(deps.db, tenant.id, owner.userId))!;
+    const branch = `branch${suffix}`;
+    await inbox.connectChannel(ownerActor, { provider: 'sandbox', providerNumberId: branch, displayPhone: '+966 50 000 0001', label: 'Riyadh branch (sandbox)' });
+    const main = `demo${suffix}`;
+    const ownerPool = createPool(process.env.DATABASE_URL, 1);
+    const c = await ownerPool.connect();
+    try {
+      const prefixes = ['9665', '9665', '9665', '9715', '9715', '2010', '9230', '9198', '4477', '9656'];
+      let k = 0;
+      const plan: Array<{ wa: string; number: string; daysAgo: number }> = [];
+      for (let day = 27; day >= 1; day--) {
+        const count = 3 + ((day * 7) % 5);
+        for (let i = 0; i < count; i++) {
+          k++;
+          const wa = `${prefixes[k % prefixes.length]}${String(1000000 + k * 37).slice(-8)}`;
+          plan.push({ wa, number: k % 3 === 0 ? branch : main, daysAgo: day });
+        }
+      }
+      for (const p of plan) {
+        await inbox.ingest('sandbox', { object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value: { metadata: { phone_number_id: p.number },
+          contacts: [{ wa_id: p.wa, profile: { name: 'Sample customer' } }],
+          messages: [{ from: p.wa, id: `wamid.sample.${suffix}.${p.wa}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: 'Sample message' } }] } }] }] });
+      }
+      const ms = (await c.query<{ id: string; email: string }>(`SELECT m.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.tenant_id = $1`, [tenant.id])).rows;
+      const team = ms.map((m) => m.id);
+      await c.query('BEGIN');
+      for (const t of ['messages', 'conversations', 'conversation_events', 'contact_identifiers', 'contacts']) await c.query(`ALTER TABLE ${t} NO FORCE ROW LEVEL SECURITY`);
+      let j = 0;
+      const charges: Array<{ messageId: string; at: string; category: 'service' | 'utility' | 'marketing' }> = [];
+      for (const p of plan) {
+        j++;
+        const conv = (await c.query<{ id: string }>(
+          `SELECT cv.id FROM conversations cv JOIN contact_identifiers ci ON ci.contact_id = cv.contact_id AND ci.tenant_id = cv.tenant_id
+           WHERE cv.tenant_id = $1 AND ci.value = $2 ORDER BY cv.created_at DESC LIMIT 1`, [tenant.id, p.wa])).rows[0];
+        if (!conv) continue;
+        const at = `now() - make_interval(days => ${p.daysAgo}, hours => ${(j * 5) % 9}, mins => ${(j * 13) % 50})`;
+        await c.query(`UPDATE messages SET created_at = ${at}, occurred_at = ${at} WHERE conversation_id = $1`, [conv.id]);
+        await c.query(`UPDATE conversations SET created_at = ${at}, first_inbound_at = ${at}, last_inbound_at = ${at}, last_message_at = ${at} WHERE id = $1`, [conv.id]);
+        await c.query(`UPDATE contacts SET created_at = ${at} WHERE id = (SELECT contact_id FROM conversations WHERE id = $1)`, [conv.id]);
+        if (j % 6 === 0) continue;                                         // some conversations are not answered
+        const who = team[j % team.length]!;
+        const status = j % 17 === 0 ? 'failed' : j % 3 === 0 ? 'delivered' : 'read';
+        const reply = `${at} + make_interval(mins => ${[2, 4, 9, 22, 48, 95, 260][j % 7]})`;
+        const out = (await c.query<{ id: string }>(`INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status, failure_kind,
+                         provider_message_id, created_at)
+                       VALUES ($1, $2, 'out', 'text', 'Sample reply', gen_random_uuid(), $3, ${reply}, $4, $5, $6, ${reply}) RETURNING id`,
+          [tenant.id, conv.id, who, status, status === 'failed' ? 'provider_reported' : null, `wamid.sample.out.${suffix}.${j}`])).rows[0]!;
+        if (status !== 'failed' && j % 2 === 0) charges.push({ messageId: out.id, at: reply, category: (['service', 'utility', 'marketing'] as const)[j % 3]! });
+        if (j % 4 === 0) {
+          await c.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data, created_at)
+                         VALUES ($1, $2, 'status_changed', $3, '{"to":"resolved","sample":true}', ${reply} + interval '30 minutes')`, [tenant.id, conv.id, who]);
+          await c.query(`UPDATE conversations SET status = 'resolved' WHERE id = $1`, [conv.id]);
+        }
+      }
+      // Sample charges for some of those replies (demo rates plus a 20% margin), dated with their messages.
+      const card = (await c.query<{ id: string }>(`SELECT id FROM credit_rate_cards WHERE currency = 'SAR' ORDER BY effective_from DESC LIMIT 1`)).rows[0];
+      if (card) {
+        await c.query('ALTER TABLE credit_entries NO FORCE ROW LEVEL SECURITY');
+        await c.query('ALTER TABLE credit_accounts NO FORCE ROW LEVEL SECURITY');
+        await c.query('ALTER TABLE credit_entries DISABLE TRIGGER credit_entries_append_only');
+        for (const ch of charges) {
+          const cost = ch.category === 'marketing' ? 17 : 4;
+          const id = (await c.query<{ id: string }>(`INSERT INTO credit_entries (tenant_id, kind, amount_minor, message_id, rate_card_id, market, category, cost_minor, margin_bp)
+                                   VALUES ($1, 'charge', $2, $3, $4, 'saudi_arabia', $5, $6, 2000) RETURNING id`,
+            [tenant.id, -Math.round(cost * 1.2), ch.messageId, card.id, ch.category, cost])).rows[0]!.id;
+          await c.query(`UPDATE credit_entries SET created_at = (SELECT created_at FROM messages WHERE id = $2) WHERE id = $1`, [id, ch.messageId]);
+        }
+        await c.query('ALTER TABLE credit_entries ENABLE TRIGGER credit_entries_append_only');
+        await c.query('ALTER TABLE credit_accounts FORCE ROW LEVEL SECURITY');
+        await c.query('ALTER TABLE credit_entries FORCE ROW LEVEL SECURITY');
+      }
+      for (const t of ['messages', 'conversations', 'conversation_events', 'contact_identifiers', 'contacts']) await c.query(`ALTER TABLE ${t} FORCE ROW LEVEL SECURITY`);
+      await c.query('COMMIT');
+    } catch (err) {
+      await c.query('ROLLBACK').catch(() => undefined);
+      console.error('sample history skipped:', err instanceof Error ? err.message : err);
+    } finally { c.release(); await ownerPool.end(); }
+
+    // A platform owner for the platform dashboard (authenticator set up through the real service).
+    const staffEmail = `platform.${suffix}@demo.example`;
+    const s = await person(staffEmail, 'Platform Owner (Demo)', 'en');
+    const { secret } = await auth.beginTotpSetup(s);
+    const { authenticator } = await import('otplib');
+    await auth.confirmTotp(s, authenticator.generate(secret));
+    await notifier.processPending();
+    const m = /confirmation code is (\d{4}) (\d{4})/.exec(mailer.lastTo(staffEmail)!.text)!;
+    await auth.activateTotp(s, `${m[1]}${m[2]}`);
+    const sp = createPool(process.env.DATABASE_URL, 1);
+    await sp.query(`INSERT INTO platform_staff (user_id, role, added_by) VALUES ($1, 'platform_owner', 'demo-seed')`, [s.userId]);
+    await sp.end();
+    staff = { staffEmail, staffTotpSecret: secret };
+  }
+
+  console.log(JSON.stringify({ ownerEmail, password: PASSWORD, tenantId: tenant.id, ...(staff ?? {}) }));
   await deps.db.end(); await deps.identityDb.end(); await deps.platformDb.end(); await notify.end(); deps.redis.disconnect();
 }
 

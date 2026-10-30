@@ -154,8 +154,15 @@ export class DashboardService {
 
       const credits = await this.credits(tx, actor, range, prev, tz);
       const sandbox = channels.length > 0 && channels.every((c) => c.provider === 'sandbox');
+      // The period before, day by day, for drawing it alongside (day 1 against day 1).
+      const previousDaily = prev ? (await tx.query<{ day: string; inbound: number; outbound: number }>(
+        `SELECT to_char(d, 'YYYY-MM-DD') AS day,
+                (SELECT count(*) FROM messages m WHERE m.direction = 'in' AND m.created_at >= d::timestamp AT TIME ZONE $3 AND m.created_at < (d + interval '1 day')::timestamp AT TIME ZONE $3)::int AS inbound,
+                (SELECT count(*) FROM messages m WHERE m.direction = 'out' AND m.created_at >= d::timestamp AT TIME ZONE $3 AND m.created_at < (d + interval '1 day')::timestamp AT TIME ZONE $3)::int AS outbound
+         FROM generate_series($1::date, $2::date, interval '1 day') d ORDER BY d`, [prev.from, prev.to, tz])).rows : null;
       return {
         period: { from: range.from, to: range.to, timeZone: tz, days: range.days },
+        previousDaily,
         // Messages through the sandbox are test traffic, not real customers: the page labels them as such.
         dataSource: channels.length === 0 ? 'none' : sandbox ? 'sandbox' : channels.some((c) => c.provider === 'sandbox') ? 'mixed' : 'live',
         totals, previous, daily: series, responseBuckets,

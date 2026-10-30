@@ -55,7 +55,7 @@ const en = {
   nav: {
     dashboard: 'Dashboard', inbox: 'Inbox', contacts: 'Contacts', campaigns: 'Campaigns', automations: 'Automations',
     reports: 'Reports', settings: 'Settings', company: 'Company', team: 'Team and roles', menu: 'Menu', main: 'Main navigation',
-    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', setup: 'Getting started', notifications: 'Notifications', promises: 'Promises', operator: 'Operator', credits: 'Message credits', developers: 'API and webhooks',
+    templates: 'Templates', health: 'Channel health', inboxSetup: 'Inbox setup', ai: 'AI assistant', setup: 'Getting started', notifications: 'Notifications', promises: 'Promises', operator: 'Operator', credits: 'Message credits', developers: 'API and webhooks', insights: 'Insights', platform: 'Platform overview',
   },
   dashboard: {
     welcome: 'Welcome, {name}',
@@ -708,7 +708,7 @@ const ar: typeof en = {
   nav: {
     dashboard: 'لوحة التحكم', inbox: 'صندوق الوارد', contacts: 'جهات الاتصال', campaigns: 'الحملات', automations: 'الأتمتة',
     reports: 'التقارير', settings: 'الإعدادات', company: 'الشركة', team: 'الفريق والأدوار', menu: 'القائمة', main: 'التنقل الرئيسي',
-    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', setup: 'البدء', notifications: 'الإشعارات', promises: 'الوعود', operator: 'Operator', credits: 'رصيد الرسائل', developers: 'الواجهة البرمجية',
+    templates: 'القوالب', health: 'حالة القناة', inboxSetup: 'إعداد صندوق الوارد', ai: 'مساعد الذكاء الاصطناعي', setup: 'البدء', notifications: 'الإشعارات', promises: 'الوعود', operator: 'Operator', credits: 'رصيد الرسائل', developers: 'الواجهة البرمجية', insights: 'المؤشرات', platform: 'نظرة عامة على المنصة',
   },
   dashboard: {
     welcome: 'مرحبًا، {name}',
