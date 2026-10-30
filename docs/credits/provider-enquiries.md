@@ -12,6 +12,22 @@ Stripe. No account opening, paid plan or agreement.
 
 No account was created by me, no plan activated and no agreement accepted.
 
+### Stripe sales (Ahmed, Sales | Growth), written reply received 30 Oct 2026
+
+The first written answer from a Stripe person (by email to admin@meronatic.com, after the case above):
+
+1. **Prepaid usage credit:** "supportable with Stripe": customers pay or top up through Checkout; Stripe suggested
+   holding the credit as a Stripe customer balance. ConversaFlow keeps the balance in its own ledger instead and only
+   uses Checkout and saved cards, which fits the same answer; no change needed, to be mentioned on the call.
+2. **Fees:** the standard published US pricing: 2.9% + 30¢ for cards and wallets, +0.5% for manually entered cards,
+   +1.5% for international cards, +1% when currency conversion is needed. A Saudi or UAE card paying in SAR or AED
+   therefore costs about 5.4% + 30¢ (2.9 + 1.5 + 1).
+3. **Currencies:** SAR (and AED) can be used as charge currencies on the US account; settlement is in USD.
+4. **Reserve:** not answered for our account; Stripe sent its general articles on reserves and rolling reserves.
+5. **Next step on Stripe's side:** a standard risk review, for which Stripe asks for a ConversaFlow website or at
+   least a social media page. ConversaFlow has no public website yet (conversaflow.io is registered but not
+   connected), so this is now a decision for you (see launch decisions).
+
 ### Stripe's support assistant: preliminary answers (AI assistant, 29 Oct 2026; not a written confirmation)
 
 1. **Eligibility:** a Delaware LLC with an EIN and a US bank account is eligible whether or not its owners live in the
