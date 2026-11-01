@@ -58,6 +58,11 @@ async function rangeOf(tx: Tx, tz: string, from?: string, to?: string): Promise<
   return r;
 }
 
+// Fixed filter text for the records list; every value is a parameter ($1-$8).
+const RECORDS_WHERE = `m.created_at >= $1 AND m.created_at < $2 AND ($3::text IS NULL OR m.direction = $3) AND ($4::text[] IS NULL OR m.status = ANY($4))
+        AND ($5::uuid IS NULL OR m.sent_by_membership_id = $5) AND ($6::uuid IS NULL OR c.connection_id = $6)`;
+const RECORDS_VISIBLE = `($7::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $8::uuid)`;
+
 export class DashboardService {
   constructor(private readonly deps: Deps) {}
 
@@ -245,9 +250,6 @@ export class DashboardService {
       const seeAll = actor.permissions.has('inbox.read_all');
       const showNames = actor.permissions.has('members.read');
       const params: unknown[] = [range.start, range.end, q.direction ?? null, statusSet, q.agent ?? null, q.channel ?? null, seeAll, actor.membershipId];
-      const where = `m.created_at >= $1 AND m.created_at < $2 AND ($3::text IS NULL OR m.direction = $3) AND ($4::text[] IS NULL OR m.status = ANY($4))
-        AND ($5::uuid IS NULL OR m.sent_by_membership_id = $5) AND ($6::uuid IS NULL OR c.connection_id = $6)`;
-      const visible = `($7::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $8::uuid)`;
       const rows = (await tx.query<{ id: string; conversation_id: string; created_at: Date; direction: string; status: string; kind: string;
         pricing_category: string | null; failure_kind: string | null; prefix: string | null; channel: string; channel_label: string; sender: string | null; sender_id: string | null }>(
         `SELECT m.id, m.conversation_id, m.created_at, m.direction, m.status, m.kind, m.pricing_category, m.failure_kind,
@@ -256,14 +258,14 @@ export class DashboardService {
          FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN channel_connections cc ON cc.id = c.connection_id
          LEFT JOIN LATERAL (SELECT value FROM contact_identifiers x WHERE x.contact_id = c.contact_id AND x.kind = 'whatsapp' ORDER BY x.created_at LIMIT 1) ci ON true
          LEFT JOIN memberships ms ON ms.id = m.sent_by_membership_id LEFT JOIN users u ON u.id = ms.user_id
-         WHERE ${where} AND ${visible} AND ($10::uuid IS NULL OR m.id < $10)
+         WHERE ${RECORDS_WHERE} AND ${RECORDS_VISIBLE} AND ($10::uuid IS NULL OR m.id < $10)
          ORDER BY m.id DESC LIMIT $11`, [...params, showNames, q.before ?? null, q.country ? 500 : (q.limit ?? 50) + 1])).rows;
       // Country is derived from the number, so it is filtered here (the number itself never leaves the server).
       const filtered = q.country ? rows.filter((r) => countryOf(r.prefix) === q.country) : rows;
       const limit = q.limit ?? 50;
       const page = filtered.slice(0, limit);
       const hidden = seeAll ? 0 : Number((await tx.query<{ n: string }>(
-        `SELECT count(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${where} AND NOT ${visible}`, params)).rows[0]!.n);
+        `SELECT count(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${RECORDS_WHERE} AND NOT ${RECORDS_VISIBLE}`, params)).rows[0]!.n);
       return {
         period: { from: range.from, to: range.to, timeZone: tz },
         records: page.map((r) => ({

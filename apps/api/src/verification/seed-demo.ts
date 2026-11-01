@@ -21,6 +21,11 @@ import { Sender } from '../modules/sender';
 import { Notifier } from '../worker/notifier';
 import { CreditsService, createPaymentProvider } from '../modules/credits';
 
+// Tables whose sample rows are backdated by the demo seed (owner connection only).
+const SAMPLE_TABLE_LIST = ['messages', 'conversations', 'conversation_events', 'contact_identifiers', 'contacts'];
+const SAMPLE_NO_FORCE = SAMPLE_TABLE_LIST.map((t) => 'ALTER TABLE ' + t + ' NO FORCE ROW LEVEL SECURITY');
+const SAMPLE_FORCE = SAMPLE_TABLE_LIST.map((t) => 'ALTER TABLE ' + t + ' FORCE ROW LEVEL SECURITY');
+
 const PASSWORD = 'Demo-Only-Password-2026';
 
 async function main() {
@@ -228,31 +233,32 @@ async function main() {
       const ms = (await c.query<{ id: string; email: string }>(`SELECT m.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.tenant_id = $1`, [tenant.id])).rows;
       const team = ms.map((m) => m.id);
       await c.query('BEGIN');
-      for (const t of ['messages', 'conversations', 'conversation_events', 'contact_identifiers', 'contacts']) await c.query(`ALTER TABLE ${t} NO FORCE ROW LEVEL SECURITY`);
+      for (const sql of SAMPLE_NO_FORCE) await c.query(sql);
       let j = 0;
-      const charges: Array<{ messageId: string; at: string; category: 'service' | 'utility' | 'marketing' }> = [];
+      const charges: Array<{ messageId: string; category: 'service' | 'utility' | 'marketing' }> = [];
       for (const p of plan) {
         j++;
         const conv = (await c.query<{ id: string }>(
           `SELECT cv.id FROM conversations cv JOIN contact_identifiers ci ON ci.contact_id = cv.contact_id AND ci.tenant_id = cv.tenant_id
            WHERE cv.tenant_id = $1 AND ci.value = $2 ORDER BY cv.created_at DESC LIMIT 1`, [tenant.id, p.wa])).rows[0];
         if (!conv) continue;
-        const at = `now() - make_interval(days => ${p.daysAgo}, hours => ${(j * 5) % 9}, mins => ${(j * 13) % 50})`;
-        await c.query(`UPDATE messages SET created_at = ${at}, occurred_at = ${at} WHERE conversation_id = $1`, [conv.id]);
-        await c.query(`UPDATE conversations SET created_at = ${at}, first_inbound_at = ${at}, last_inbound_at = ${at}, last_message_at = ${at} WHERE id = $1`, [conv.id]);
-        await c.query(`UPDATE contacts SET created_at = ${at} WHERE id = (SELECT contact_id FROM conversations WHERE id = $1)`, [conv.id]);
+        const agoMins = p.daysAgo * 1440 + ((j * 5) % 9) * 60 + ((j * 13) % 50);   // when the sample customer wrote
+        await c.query(`UPDATE messages SET created_at = now() - make_interval(mins => $2), occurred_at = now() - make_interval(mins => $2) WHERE conversation_id = $1`, [conv.id, agoMins]);
+        await c.query(`UPDATE conversations SET created_at = now() - make_interval(mins => $2), first_inbound_at = now() - make_interval(mins => $2),
+                         last_inbound_at = now() - make_interval(mins => $2), last_message_at = now() - make_interval(mins => $2) WHERE id = $1`, [conv.id, agoMins]);
+        await c.query(`UPDATE contacts SET created_at = now() - make_interval(mins => $2) WHERE id = (SELECT contact_id FROM conversations WHERE id = $1)`, [conv.id, agoMins]);
         if (j % 6 === 0) continue;                                         // some conversations are not answered
         const who = team[j % team.length]!;
         const status = j % 17 === 0 ? 'failed' : j % 3 === 0 ? 'delivered' : 'read';
-        const reply = `${at} + make_interval(mins => ${[2, 4, 9, 22, 48, 95, 260][j % 7]})`;
+        const replyAgo = agoMins - [2, 4, 9, 22, 48, 95, 260][j % 7]!;     // minutes ago the team replied
         const out = (await c.query<{ id: string }>(`INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, sent_by_membership_id, occurred_at, status, failure_kind,
                          provider_message_id, created_at)
-                       VALUES ($1, $2, 'out', 'text', 'Sample reply', gen_random_uuid(), $3, ${reply}, $4, $5, $6, ${reply}) RETURNING id`,
-          [tenant.id, conv.id, who, status, status === 'failed' ? 'provider_reported' : null, `wamid.sample.out.${suffix}.${j}`])).rows[0]!;
-        if (status !== 'failed' && j % 2 === 0) charges.push({ messageId: out.id, at: reply, category: (['service', 'utility', 'marketing'] as const)[j % 3]! });
+                       VALUES ($1, $2, 'out', 'text', 'Sample reply', gen_random_uuid(), $3, now() - make_interval(mins => $7), $4, $5, $6, now() - make_interval(mins => $7)) RETURNING id`,
+          [tenant.id, conv.id, who, status, status === 'failed' ? 'provider_reported' : null, `wamid.sample.out.${suffix}.${j}`, replyAgo])).rows[0]!;
+        if (status !== 'failed' && j % 2 === 0) charges.push({ messageId: out.id, category: (['service', 'utility', 'marketing'] as const)[j % 3]! });
         if (j % 4 === 0) {
           await c.query(`INSERT INTO conversation_events (tenant_id, conversation_id, kind, actor_membership_id, data, created_at)
-                         VALUES ($1, $2, 'status_changed', $3, '{"to":"resolved","sample":true}', ${reply} + interval '30 minutes')`, [tenant.id, conv.id, who]);
+                         VALUES ($1, $2, 'status_changed', $3, '{"to":"resolved","sample":true}', now() - make_interval(mins => $4) + interval '30 minutes')`, [tenant.id, conv.id, who, replyAgo]);
           await c.query(`UPDATE conversations SET status = 'resolved' WHERE id = $1`, [conv.id]);
         }
       }
@@ -273,7 +279,7 @@ async function main() {
         await c.query('ALTER TABLE credit_accounts FORCE ROW LEVEL SECURITY');
         await c.query('ALTER TABLE credit_entries FORCE ROW LEVEL SECURITY');
       }
-      for (const t of ['messages', 'conversations', 'conversation_events', 'contact_identifiers', 'contacts']) await c.query(`ALTER TABLE ${t} FORCE ROW LEVEL SECURITY`);
+      for (const sql of SAMPLE_FORCE) await c.query(sql);
       await c.query('COMMIT');
     } catch (err) {
       await c.query('ROLLBACK').catch(() => undefined);
