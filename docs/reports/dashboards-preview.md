@@ -77,6 +77,20 @@ Two rounds by a separate reviewer who read the code only.
 6. A message whose delivery is unconfirmed ("uncertain") counts in the delivery-rate base and under "pending".
 7. The database allows a 367-day platform period; the API limits it to 366.
 
-## Validation
+## Validation (1 Nov 2026)
 
-See "Test evidence" in `docs/credits/design-and-tests.md` for the exact commit and results.
+- **API code tested:** commit 07d5382, with a full local run:
+  - build, lint and type check;
+  - migrations 0001–0067;
+  - the isolation guard (passed);
+  - **721 of 721 API tests**, including 7 dashboard tests and the 34 partner and payment-recovery tests.
+- **Browser checks on 7a5c440:** the same application code; this commit only corrects one browser check.
+  - **23 of 23 checks passed**, in English and Arabic on desktop, tablet and phone.
+  - Accessibility scans and the content security policy were checked on every page.
+  - The 3D view is drawn with software WebGL, operated by keyboard, and opens the drill-down.
+  - A separate check runs with WebGL turned off: the standard chart is shown, 3D cannot be chosen, Three.js is not
+    loaded, and the drill-down works.
+  - The platform overview opens for a platform owner signed in with an authenticator.
+- **Screenshots:** `docs/reports/evidence/ui/{en,ar}-{desktop,tablet,mobile}-insights.png`,
+  `*-insights-3d.png` and `*-platform.png`.
+- **Clean checkout:** `docs/reports/evidence/clean-checkout-<commit>.txt`.
