@@ -207,9 +207,9 @@ export default function Insights() {
 
           <Card title={d.activityTitle} hint={d.activityHint} className="mt-5">
             <Activity locale={locale} d={d} rows={data.activity} channels={data.channels}
-              onSelect={(country, channel, metric) => setDrill({
-                what: `${f.country(country, d.other)} · ${data.channels.find((c) => c.id === channel)?.label ?? ''}`,
-                query: { ...period, country, channel, ...(metric === 'inbound' ? { direction: 'in' } : metric === 'outbound' ? { direction: 'out' } : metric === 'failed' ? { direction: 'out', status: 'failed' } : {}) },
+              onSelect={(country, channel, metric, kept) => setDrill({
+                what: `${country === 'rest' ? d.other : f.country(country, d.other)} · ${data.channels.find((c) => c.id === channel)?.label ?? ''}`,
+                query: { ...period, country, ...(country === 'rest' && kept.length > 0 ? { exclude: kept.join(',') } : {}), channel, ...(metric === 'inbound' ? { direction: 'in' } : metric === 'outbound' ? { direction: 'out' } : metric === 'failed' ? { direction: 'out', status: 'failed' } : {}) },
               })} />
           </Card>
 

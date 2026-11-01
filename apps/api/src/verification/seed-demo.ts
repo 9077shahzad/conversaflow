@@ -35,12 +35,17 @@ async function main() {
   // The seed backdates rows with row security relaxed and can add a platform owner, so it runs only when asked for
   // explicitly and only against a database on this machine or a .test/.localhost host (review of the dashboards, finding 6).
   if (process.env.ALLOW_DEMO_SEED !== '1') throw new Error('Refusing to seed demo data: set ALLOW_DEMO_SEED=1 to confirm.');
-  for (const url of [process.env.DATABASE_URL, process.env.DATABASE_NOTIFY_URL]) {
-    if (!url) continue;
-    const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
-    if (!['localhost', '127.0.0.1', '::1'].includes(host) && !/\.(localhost|test)$/.test(host)) {
-      throw new Error(`Refusing to seed demo data on database host ${host}: only local or .test hosts are allowed.`);
-    }
+  // Every database connection the seed can use (app, identity, platform, owner, notifier...), and any host given in
+  // the query string, which the driver would use instead (second review, finding 1).
+  const local = (h: string) => ['localhost', '127.0.0.1', '::1'].includes(h) || /\.(localhost|test)$/.test(h);
+  for (const [name, url] of Object.entries(process.env)) {
+    if (!/^DATABASE_[A-Z_]*URL$/.test(name) || !url) continue;
+    let u: URL;
+    try { u = new URL(url); } catch { throw new Error(`Refusing to seed demo data: ${name} is not a valid URL.`); }
+    const hosts = [u.hostname, ...u.searchParams.getAll('host'), ...u.searchParams.getAll('hostaddr')]
+      .flatMap((h) => h.split(',')).map((h) => h.trim().replace(/^\[|\]$/g, ''));
+    const bad = hosts.find((h) => !local(h));
+    if (bad !== undefined) throw new Error(`Refusing to seed demo data on database host "${bad}" (${name}): only local or .test hosts are allowed.`);
   }
   const mailer = new MemoryMailer();
   const deps = buildDeps(config, { mailer });

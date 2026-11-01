@@ -32,9 +32,13 @@ export function Records({ locale, d, drill, onClose }: { locale: Locale; d: Insi
     } catch { setError(true); } finally { setLoading(false); }
   };
   // Where focus was when the list opened (a chart bar or row), so closing it puts focus back there (review, keyboard).
-  const [opener] = useState<HTMLElement | null>(() => (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)));
-  const close = () => { onClose(); if (opener && opener.isConnected) opener.focus(); };
-  useEffect(() => { void load(); heading.current?.focus(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [JSON.stringify(drill.query)]);
+  // Taken again for each new drill-down (before the heading takes focus), so it is always the latest opener.
+  const opener = useRef<HTMLElement | null>(null);
+  const close = () => { onClose(); if (opener.current && opener.current.isConnected) opener.current.focus(); };
+  useEffect(() => {
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active !== heading.current && !active.closest('[aria-labelledby="records-h"]')) opener.current = active;
+    void load(); heading.current?.focus(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [JSON.stringify(drill.query)]);
 
   const time = (iso: string) => new Intl.DateTimeFormat(locale === 'ar' ? 'ar-AE-u-nu-latn-ca-gregory' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
   return (

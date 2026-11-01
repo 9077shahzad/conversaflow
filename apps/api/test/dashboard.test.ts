@@ -137,6 +137,12 @@ describe('company dashboard', () => {
     // Other (ZZ) holds none of the Saudi or Emirati messages.
     const other = (await owner.get(`/v1/reports/dashboard/records?${period}&country=ZZ&limit=100`).expect(200)).body.records as Array<{ country: string }>;
     expect(other.every((x) => x.country === 'ZZ')).toBe(true);
+    // The chart's "Other" group: every number outside the countries it shows (here Saudi Arabia), so the UAE is in it.
+    const rest = (await owner.get(`/v1/reports/dashboard/records?${period}&direction=in&country=rest&exclude=SA&limit=100`).expect(200)).body.records as Array<{ country: string }>;
+    expect(rest.length).toBeGreaterThanOrEqual(4);
+    expect(rest.some((x) => x.country === 'SA')).toBe(false);
+    expect(rest.some((x) => x.country === 'AE')).toBe(true);
+    await owner.get(`/v1/reports/dashboard/records?${period}&country=rest&exclude=sa`).expect(400);
     // The analyst's hidden count for the UAE excludes the Saudi conversation assigned to the agent earlier.
     const an = (await analyst.get(`/v1/reports/dashboard/records?${period}&direction=in&country=AE&limit=100`).expect(200)).body;
     expect(an.hiddenOutsideYourConversations).toBe(0);

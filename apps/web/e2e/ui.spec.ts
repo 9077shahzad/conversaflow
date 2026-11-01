@@ -311,6 +311,29 @@ for (const [locale, view] of [['en', 'desktop'], ['ar', 'mobile']] as const) {
   });
 }
 
+test('without WebGL the activity view is the standard chart: 3D cannot be chosen, Three.js is not loaded, and drill-down works', async () => {
+  // Forces the fallback path (second review): a browser with WebGL turned off, as on a device without it.
+  const exe = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
+  const b = await chromium.launch({ ...(existsSync(exe) ? { executablePath: exe } : {}), args: ['--disable-webgl', '--disable-3d-apis'] });
+  const context = await b.newContext({ viewport: VIEWPORTS.desktop, locale: 'en-GB', baseURL: test.info().project.use.baseURL });
+  const page = await context.newPage();
+  const scripts: string[] = [];
+  page.on('request', (r) => { if (r.resourceType() === 'script') scripts.push(r.url()); });
+  const { ownerEmail, password } = demo();
+  expect((await page.request.post('/v1/auth/login', { headers: { 'X-Requested-With': 'conversaflow' }, data: { email: ownerEmail, password } })).ok()).toBe(true);
+  await page.goto('/en/app/insights');
+  await expect(page.getByRole('button', { name: '3D view' })).toBeDisabled({ timeout: 15_000 });
+  const activity = page.getByRole('region', { name: 'Activity by destination and number' });
+  await expect(activity.getByRole('button', { name: 'Chart', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(await page.locator('canvas').count()).toBe(0);
+  await activity.getByRole('button', { disabled: false }).filter({ hasText: /\d/ }).first().click();
+  await expect(page.getByRole('heading', { level: 2, name: 'Messages behind this figure' })).toBeVisible();
+  // Three.js is a separate chunk loaded only for the 3D view.
+  const sizes = await Promise.all(scripts.map(async (u) => (await page.request.get(u)).text().then((t) => (t.includes('WebGLRenderer') ? u : null))));
+  expect(sizes.filter(Boolean)).toEqual([]);
+  await b.close();
+});
+
 test('the app can be installed: manifest, service worker and offline page are served with a strict policy', async ({ page, request }) => {
   const m = await request.get('/manifest.webmanifest');
   expect(m.status()).toBe(200);

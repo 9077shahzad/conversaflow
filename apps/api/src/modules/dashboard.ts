@@ -27,7 +27,10 @@ const RecordsQuery = z.object({
   direction: z.enum(['in', 'out']).optional(),
   status: z.enum(['delivered', 'read', 'failed', 'sent', 'pending']).optional(),
   agent: z.string().uuid().optional(),
-  country: z.string().regex(/^[A-Z]{2}$|^ZZ$/).optional(),
+  // A country code, ZZ (numbers outside the calling-code list), or rest: every number not in the `exclude` countries
+  // (the chart's "Other" group, which folds the smaller countries together; second review, finding 2).
+  country: z.string().regex(/^[A-Z]{2}$|^rest$/).optional(),
+  exclude: z.string().regex(/^[A-Z]{2}(,[A-Z]{2}){0,49}$/).optional(),
   channel: z.string().uuid().optional(),
   before: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
@@ -42,7 +45,8 @@ const CALLING_CODES: Array<[string, string]> = ([
   ['34', 'ES'], ['31', 'NL'], ['1', 'US'],
 ] as Array<[string, string]>).sort((a, b) => b[0].length - a[0].length);
 /** LIKE patterns for the numbers of one country; for Other (ZZ), the patterns of every listed country (negated). */
-function countryPatterns(country: string): { patterns: string[]; negate: boolean } {
+function countryPatterns(country: string, exclude: string[] = []): { patterns: string[]; negate: boolean } {
+  if (country === 'rest') return { patterns: CALLING_CODES.filter(([, c]) => exclude.includes(c)).map(([p]) => `${p}%`), negate: true };
   if (country === 'ZZ') return { patterns: CALLING_CODES.map(([p]) => `${p}%`), negate: true };
   return { patterns: CALLING_CODES.filter(([, c]) => c === country).map(([p]) => `${p}%`), negate: false };
 }
@@ -72,7 +76,8 @@ async function rangeOf(tx: Tx, tz: string, from?: string, to?: string): Promise<
 
 // Fixed filter text for the records list; every value is a parameter ($1-$8).
 const RECORDS_WHERE = `m.created_at >= $1 AND m.created_at < $2 AND ($3::text IS NULL OR m.direction = $3) AND ($4::text[] IS NULL OR m.status = ANY($4))
-        AND ($5::uuid IS NULL OR m.sent_by_membership_id = $5) AND ($6::uuid IS NULL OR c.connection_id = $6)`;
+        AND ($5::uuid IS NULL OR m.sent_by_membership_id = $5) AND ($6::uuid IS NULL OR c.connection_id = $6)
+        AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.tenant_id = m.tenant_id AND r.retry_of = m.id)`;
 const RECORDS_VISIBLE = `($7::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $8::uuid)`;
 // Country is filtered in the database, before the page limit, from the customer's number ($9 patterns, $10 negate for Other).
 const RECORDS_FROM = `messages m JOIN conversations c ON c.id = m.conversation_id
@@ -140,7 +145,7 @@ export class DashboardService {
         `WITH s AS (
            SELECT m.sent_by_membership_id AS mid, count(*)::int AS replies, count(DISTINCT m.conversation_id)::int AS conversations
            FROM messages m WHERE m.direction = 'out' AND m.sent_by_membership_id IS NOT NULL AND m.campaign_id IS NULL
-             AND m.created_at >= $1 AND m.created_at < $2 GROUP BY 1),
+             AND m.created_at >= $1 AND m.created_at < $2 AND ${NOT_RETRIED} GROUP BY 1),
          f AS (
            SELECT fr.mid, round((percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM fr.at - c.first_inbound_at)) / 60)::numeric, 1)::float AS median
            FROM conversations c LEFT JOIN LATERAL (${FIRST_REPLY}) fr ON true
@@ -189,7 +194,7 @@ export class DashboardService {
          FROM generate_series($1::date, $2::date, interval '1 day') d
          LEFT JOIN (SELECT (m.created_at AT TIME ZONE $5)::date AS day, count(*) FILTER (WHERE m.direction = 'in') AS inbound,
                            count(*) FILTER (WHERE m.direction = 'out') AS outbound
-                    FROM messages m WHERE m.created_at >= $3 AND m.created_at < $4 GROUP BY 1) x ON x.day = d::date
+                    FROM messages m WHERE m.created_at >= $3 AND m.created_at < $4 AND ${NOT_RETRIED} GROUP BY 1) x ON x.day = d::date
          ORDER BY d`, [prev.from, prev.to, prev.start, prev.end, tz])).rows : null;
       return {
         period: { from: range.from, to: range.to, timeZone: tz, days: range.days },
@@ -275,7 +280,7 @@ export class DashboardService {
       const statusSet = q.status === 'pending' ? ['queued', 'submitting', 'uncertain'] : q.status ? [q.status] : null;
       const seeAll = actor.permissions.has('inbox.read_all');
       const showNames = actor.permissions.has('members.read');
-      const cp = q.country ? countryPatterns(q.country) : null;
+      const cp = q.country ? countryPatterns(q.country, q.exclude?.split(',')) : null;
       const params: unknown[] = [range.start, range.end, q.direction ?? null, statusSet, q.agent ?? null, q.channel ?? null, seeAll, actor.membershipId,
         cp?.patterns ?? null, cp?.negate ?? false];
       const limit = q.limit ?? 50;

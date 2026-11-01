@@ -18,7 +18,7 @@ export interface Cell { country: string; channel: string; value: number; failed:
 const MAX_COUNTRIES = 8;
 
 export function Activity({ locale, d, rows, channels, onSelect }: {
-  locale: Locale; d: InsightsText; rows: ActivityRow[]; channels: Channel[]; onSelect: (country: string, channel: string, metric: Metric) => void;
+  locale: Locale; d: InsightsText; rows: ActivityRow[]; channels: Channel[]; onSelect: (country: string, channel: string, metric: Metric, exclude: string[]) => void;
 }) {
   const f = useFormat(locale);
   const [metric, setMetric] = useState<Metric>('all');
@@ -28,28 +28,29 @@ export function Activity({ locale, d, rows, channels, onSelect }: {
   useEffect(() => { if (view === null && capability !== 'unknown') setView(capability === 'ok' ? '3d' : '2d'); }, [capability, view]);
 
   // Top countries by volume; the rest grouped as "Other". Numbers that carried any message, in the company's order.
-  const { countries, chans, cells } = useMemo(() => {
+  const { countries, chans, cells, kept } = useMemo(() => {
     const val = (r: ActivityRow) => (metric === 'all' ? r.inbound + r.outbound : metric === 'failed' ? r.failed : r[metric]);
     const byCountry = new Map<string, number>();
     for (const r of rows) byCountry.set(r.country, (byCountry.get(r.country) ?? 0) + r.inbound + r.outbound);
     const ranked = [...byCountry.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c);
     const keep = new Set(ranked.filter((c) => c !== 'ZZ').slice(0, MAX_COUNTRIES));
-    const countries = [...ranked.filter((c) => keep.has(c)), ...(ranked.some((c) => !keep.has(c)) ? ['ZZ'] : [])];
+    // "Other" is everything outside the kept countries (the drill-down asks for exactly that, not only unknown numbers).
+    const countries = [...ranked.filter((c) => keep.has(c)), ...(ranked.some((c) => !keep.has(c)) ? ['rest'] : [])];
     const used = new Set(rows.map((r) => r.channel));
     const chans = channels.filter((c) => used.has(c.id));
     const m = new Map<string, Cell>();
     for (const r of rows) {
-      const country = keep.has(r.country) ? r.country : 'ZZ';
+      const country = keep.has(r.country) ? r.country : 'rest';
       const k = `${country}|${r.channel}`;
       const cell = m.get(k) ?? { country, channel: r.channel, value: 0, failed: 0, total: 0 };
       cell.value += val(r); cell.failed += r.failed; cell.total += r.inbound + r.outbound;
       m.set(k, cell);
     }
     const cells = countries.flatMap((c) => chans.map((ch) => m.get(`${c}|${ch.id}`) ?? { country: c, channel: ch.id, value: 0, failed: 0, total: 0 }));
-    return { countries, chans, cells };
+    return { countries, chans, cells, kept: [...keep] };
   }, [rows, channels, metric]);
 
-  const countryName = (c: string) => f.country(c, d.other);
+  const countryName = (c: string) => (c === 'rest' ? d.other : f.country(c, d.other));
   const channelName = (id: string) => chans.find((c) => c.id === id)?.label ?? '';
   if (rows.length === 0) return <p className="mt-3 text-sm text-slate-700">{d.noActivity}</p>;
 
@@ -75,9 +76,9 @@ export function Activity({ locale, d, rows, channels, onSelect }: {
       {fallback && <p className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800" role="status">{fallback === 'slow' ? d.fallbackSlow : d.fallbackNoWebgl}</p>}
       {view === '3d' && !fallback ? (
         <Bars3D d={d} cells={cells} countries={countries} chans={chans} countryName={countryName} channelName={channelName} n={f.n}
-          onPick={(c) => onSelect(c.country, c.channel, metric)} onFallback={(why) => { setFallback(why); setView('2d'); }} />
+          onPick={(c) => onSelect(c.country, c.channel, metric, kept)} onFallback={(why) => { setFallback(why); setView('2d'); }} />
       ) : (
-        <Heatmap d={d} cells={cells} countries={countries} chans={chans} countryName={countryName} n={f.n} onPick={(c) => onSelect(c.country, c.channel, metric)} />
+        <Heatmap d={d} cells={cells} countries={countries} chans={chans} countryName={countryName} n={f.n} onPick={(c) => onSelect(c.country, c.channel, metric, kept)} />
       )}
     </div>
   );
