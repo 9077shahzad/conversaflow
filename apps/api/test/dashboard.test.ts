@@ -90,6 +90,8 @@ describe('company dashboard', () => {
     expect(other.activity).toEqual([]);
     await owner.get('/v1/reports/dashboard?from=2020-01-01&to=2026-01-01').expect(400);
     await owner.get('/v1/reports/dashboard?from=bad').expect(400);
+    await owner.get('/v1/reports/dashboard?from=2026-02-30&to=2026-03-02').expect(400);     // not a calendar date: 400, not 500
+    await owner.get('/v1/reports/dashboard/records?day=2026-13-01').expect(400);
   });
 
   it('drill-down lists the messages behind a figure (metadata only), filtered by day, direction, country and number; visibility as in the inbox', async () => {
@@ -117,6 +119,45 @@ describe('company dashboard', () => {
     expect(asOwner.hiddenOutsideYourConversations).toBe(0);
   });
 
+  it('country drill-down pages through every match in the database, and the hidden count respects the country (review finding 3)', async () => {
+    for (let i = 0; i < 3; i++) await say(emirati(), `UAE ${i}`).expect(200);
+    await say(saudi(), 'Saudi in between').expect(200);
+    const all = (await owner.get(`/v1/reports/dashboard/records?${period}&direction=in&country=AE&limit=100`).expect(200)).body.records as Array<{ id: string; country: string }>;
+    expect(all.length).toBeGreaterThanOrEqual(4);
+    expect(all.every((x) => x.country === 'AE')).toBe(true);
+    // One at a time, following "next", reaches exactly the same records in the same order.
+    const walked: string[] = [];
+    let before: string | null = null;
+    do {
+      const pg: { records: Array<{ id: string }>; next: string | null } = (await owner.get(`/v1/reports/dashboard/records?${period}&direction=in&country=AE&limit=1${before ? `&before=${before}` : ''}`).expect(200)).body;
+      walked.push(...pg.records.map((x) => x.id));
+      before = pg.next;
+    } while (before && walked.length < 200);
+    expect(walked).toEqual(all.map((x) => x.id));
+    // Other (ZZ) holds none of the Saudi or Emirati messages.
+    const other = (await owner.get(`/v1/reports/dashboard/records?${period}&country=ZZ&limit=100`).expect(200)).body.records as Array<{ country: string }>;
+    expect(other.every((x) => x.country === 'ZZ')).toBe(true);
+    // The analyst's hidden count for the UAE excludes the Saudi conversation assigned to the agent earlier.
+    const an = (await analyst.get(`/v1/reports/dashboard/records?${period}&direction=in&country=AE&limit=100`).expect(200)).body;
+    expect(an.hiddenOutsideYourConversations).toBe(0);
+  });
+
+  it('first reply counts team members only, as in the Outcomes report (review finding 4)', async () => {
+    const before = await dash();
+    const wa = saudi();
+    await say(wa, 'Anyone there?').expect(200);
+    const c = await conv(wa);
+    // An outgoing message nobody on the team sent (as an automation or away message would be) is not a reply.
+    await app((tx) => tx.query(`INSERT INTO messages (tenant_id, conversation_id, direction, kind, body, client_message_id, status, occurred_at)
+                                VALUES ($1, $2, 'out', 'text', 'Away', gen_random_uuid(), 'delivered', now())`, [tenant, c.id]));
+    const mid = await dash();
+    expect(mid.totals.conversationsStarted - before.totals.conversationsStarted).toBe(1);
+    expect(mid.totals.conversationsReplied - before.totals.conversationsReplied).toBe(0);
+    const c2 = await conv(wa);
+    await owner.post(`/v1/conversations/${c.id}/reply`, { text: 'Yes', seenActivity: Number(c2.activity_seq), clientMessageId: randomUUID() }).expect(201);
+    expect((await dash()).totals.conversationsReplied - before.totals.conversationsReplied).toBe(1);
+  });
+
   it('maps numbers to destination countries by the longest calling code', () => {
     expect(countryOf('966501234567')).toBe('SA');
     expect(countryOf('971501234567')).toBe('AE');
@@ -141,6 +182,8 @@ describe('platform owner dashboard', () => {
     expect(d.partner).toMatchObject({ partner: '360dialog' });
     expect(typeof d.unmatchedPayments).toBe('number');
     await owner.get(`/v1/platform/dashboard?${period}`).expect(403);
-    await staff.get('/v1/platform/dashboard?from=2020-01-01&to=2026-01-01').expect(409);
+    await staff.get('/v1/platform/dashboard?from=2020-01-01&to=2026-01-01').expect(400);
+    await staff.get('/v1/platform/dashboard?from=2026-02-30&to=2026-03-02').expect(400);   // not a calendar date
+    expect((await staff.get('/v1/platform/me').expect(200)).body.paymentsLive).toBe(false);
   });
 });

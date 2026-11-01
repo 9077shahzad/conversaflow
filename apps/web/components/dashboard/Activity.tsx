@@ -309,15 +309,19 @@ function Bars3D({ d, cells, countries, chans, countryName, channelName, n, onPic
       renderer.domElement.addEventListener('pointerdown', onDown);
       renderer.domElement.addEventListener('pointermove', onMove);
       renderer.domElement.addEventListener('pointerup', onUp);
-      renderer.domElement.addEventListener('webglcontextlost', () => onFallback('nowebgl'));
+      // Only a loss of this view's own, current context switches to the standard chart (review finding 5).
+      const onLost = () => { if (!disposed) onFallback('nowebgl'); };
+      renderer.domElement.addEventListener('webglcontextlost', onLost);
       setReady(true);
       cleanup = () => {
         ro.disconnect();
         renderer.domElement.removeEventListener('pointerdown', onDown);
         renderer.domElement.removeEventListener('pointermove', onMove);
         renderer.domElement.removeEventListener('pointerup', onUp);
+        renderer.domElement.removeEventListener('webglcontextlost', onLost);
         disposables.forEach((x) => x.dispose());
         renderer.dispose();
+        renderer.forceContextLoss();   // free the GPU context now, so changing views never piles them up
         renderer.domElement.remove();
         api.current = null;
         void frames;

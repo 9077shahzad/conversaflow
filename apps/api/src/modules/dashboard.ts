@@ -15,7 +15,11 @@ import { companyHours } from './sla';
  * conversations assigned to them or unassigned, and is told how many were left out.
  */
 const MAX_RANGE_DAYS = 366;
-const Day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+/** A real calendar day (2026-02-30 is refused here rather than failing in the database). */
+export const Day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((s) => {
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}, 'Use a real calendar date (YYYY-MM-DD).');
 const Query = z.object({ from: Day.optional(), to: Day.optional(), compare: z.enum(['previous', 'none']).optional() }).strict();
 const RecordsQuery = z.object({
   from: Day.optional(), to: Day.optional(),
@@ -37,6 +41,11 @@ const CALLING_CODES: Array<[string, string]> = ([
   ['63', 'PH'], ['62', 'ID'], ['90', 'TR'], ['98', 'IR'], ['44', 'GB'], ['49', 'DE'], ['33', 'FR'], ['39', 'IT'],
   ['34', 'ES'], ['31', 'NL'], ['1', 'US'],
 ] as Array<[string, string]>).sort((a, b) => b[0].length - a[0].length);
+/** LIKE patterns for the numbers of one country; for Other (ZZ), the patterns of every listed country (negated). */
+function countryPatterns(country: string): { patterns: string[]; negate: boolean } {
+  if (country === 'ZZ') return { patterns: CALLING_CODES.map(([p]) => `${p}%`), negate: true };
+  return { patterns: CALLING_CODES.filter(([, c]) => c === country).map(([p]) => `${p}%`), negate: false };
+}
 export function countryOf(number: string | null | undefined): string {
   if (!number) return 'ZZ';
   for (const [p, c] of CALLING_CODES) if (number.startsWith(p)) return c;
@@ -45,6 +54,9 @@ export function countryOf(number: string | null | undefined): string {
 
 /** Statuses of outgoing messages handed to WhatsApp (the base of the delivery rate). */
 const HANDED = `('sent', 'delivered', 'read', 'failed', 'uncertain')`;
+
+/** A message that was later retried is counted once, through its retry (review, low findings). */
+const NOT_RETRIED = `NOT EXISTS (SELECT 1 FROM messages r WHERE r.tenant_id = m.tenant_id AND r.retry_of = m.id)`;
 
 type Range = { from: string; to: string; start: Date; end: Date; days: number };
 
@@ -62,6 +74,10 @@ async function rangeOf(tx: Tx, tz: string, from?: string, to?: string): Promise<
 const RECORDS_WHERE = `m.created_at >= $1 AND m.created_at < $2 AND ($3::text IS NULL OR m.direction = $3) AND ($4::text[] IS NULL OR m.status = ANY($4))
         AND ($5::uuid IS NULL OR m.sent_by_membership_id = $5) AND ($6::uuid IS NULL OR c.connection_id = $6)`;
 const RECORDS_VISIBLE = `($7::boolean OR c.assigned_membership_id IS NULL OR c.assigned_membership_id = $8::uuid)`;
+// Country is filtered in the database, before the page limit, from the customer's number ($9 patterns, $10 negate for Other).
+const RECORDS_FROM = `messages m JOIN conversations c ON c.id = m.conversation_id
+         LEFT JOIN LATERAL (SELECT value FROM contact_identifiers x WHERE x.tenant_id = c.tenant_id AND x.contact_id = c.contact_id AND x.kind = 'whatsapp' ORDER BY x.created_at LIMIT 1) ci ON true`;
+const RECORDS_COUNTRY = `($9::text[] IS NULL OR CASE WHEN $10::boolean THEN ci.value IS NULL OR NOT (ci.value LIKE ANY($9)) ELSE coalesce(ci.value LIKE ANY($9), false) END)`;
 
 export class DashboardService {
   constructor(private readonly deps: Deps) {}
@@ -87,7 +103,7 @@ export class DashboardService {
                 count(*) FILTER (WHERE m.direction = 'out' AND m.status = 'read')::int AS read,
                 count(*) FILTER (WHERE m.direction = 'out' AND m.status = 'failed')::int AS failed,
                 count(*) FILTER (WHERE m.direction = 'out' AND m.status IN ${HANDED})::int AS handed
-         FROM messages m WHERE m.created_at >= $1 AND m.created_at < $2 GROUP BY 1 ORDER BY 1`,
+         FROM messages m WHERE m.created_at >= $1 AND m.created_at < $2 AND ${NOT_RETRIED} GROUP BY 1 ORDER BY 1`,
         [range.start, range.end, tz])).rows;
       const replyDaily = (await tx.query<{ day: string; median: number | null }>(
         `SELECT to_char((c.first_inbound_at AT TIME ZONE $3)::date, 'YYYY-MM-DD') AS day,
@@ -143,12 +159,16 @@ export class DashboardService {
       const channels = (await tx.query<{ id: string; label: string; provider: string; status: string }>(
         `SELECT id, label, provider, status FROM channel_connections ORDER BY created_at`)).rows;
       const act = (await tx.query<{ prefix: string | null; channel: string; inbound: number; outbound: number; failed: number }>(
-        `SELECT left(ci.value, 3) AS prefix, c.connection_id AS channel,
-                count(*) FILTER (WHERE m.direction = 'in')::int AS inbound, count(*) FILTER (WHERE m.direction = 'out')::int AS outbound,
-                count(*) FILTER (WHERE m.direction = 'out' AND m.status = 'failed')::int AS failed
-         FROM messages m JOIN conversations c ON c.id = m.conversation_id
-         LEFT JOIN LATERAL (SELECT value FROM contact_identifiers x WHERE x.contact_id = c.contact_id AND x.kind = 'whatsapp' ORDER BY x.created_at LIMIT 1) ci ON true
-         WHERE m.created_at >= $1 AND m.created_at < $2 GROUP BY 1, 2`, [range.start, range.end])).rows;
+        // Counted per conversation first, so the customer's number is looked up once per conversation (review finding 1).
+        `WITH per AS (
+           SELECT m.conversation_id, count(*) FILTER (WHERE m.direction = 'in') AS inbound, count(*) FILTER (WHERE m.direction = 'out') AS outbound,
+                  count(*) FILTER (WHERE m.direction = 'out' AND m.status = 'failed') AS failed
+           FROM messages m WHERE m.created_at >= $1 AND m.created_at < $2 AND ${NOT_RETRIED} GROUP BY 1)
+         SELECT left(ci.value, 3) AS prefix, c.connection_id AS channel,
+                sum(per.inbound)::int AS inbound, sum(per.outbound)::int AS outbound, sum(per.failed)::int AS failed
+         FROM per JOIN conversations c ON c.id = per.conversation_id
+         LEFT JOIN LATERAL (SELECT value FROM contact_identifiers x WHERE x.tenant_id = c.tenant_id AND x.contact_id = c.contact_id AND x.kind = 'whatsapp' ORDER BY x.created_at LIMIT 1) ci ON true
+         GROUP BY 1, 2`, [range.start, range.end])).rows;
       const merged = new Map<string, { country: string; channel: string; inbound: number; outbound: number; failed: number }>();
       for (const a of act) {
         const key = `${countryOf(a.prefix)}|${a.channel}`;
@@ -158,18 +178,24 @@ export class DashboardService {
       }
 
       const credits = await this.credits(tx, actor, range, prev, tz);
-      const sandbox = channels.length > 0 && channels.every((c) => c.provider === 'sandbox');
+      // Test or live is judged by the numbers the period's messages went through, not by what is connected today
+      // (sample history stays labelled as sample once a real number is added).
+      const used = new Set([...merged.values()].map((a) => a.channel));
+      const basis = used.size > 0 ? channels.filter((c) => used.has(c.id)) : channels;
+      const sandbox = basis.length > 0 && basis.every((c) => c.provider === 'sandbox');
       // The period before, day by day, for drawing it alongside (day 1 against day 1).
       const previousDaily = prev ? (await tx.query<{ day: string; inbound: number; outbound: number }>(
-        `SELECT to_char(d, 'YYYY-MM-DD') AS day,
-                (SELECT count(*) FROM messages m WHERE m.direction = 'in' AND m.created_at >= d::timestamp AT TIME ZONE $3 AND m.created_at < (d + interval '1 day')::timestamp AT TIME ZONE $3)::int AS inbound,
-                (SELECT count(*) FROM messages m WHERE m.direction = 'out' AND m.created_at >= d::timestamp AT TIME ZONE $3 AND m.created_at < (d + interval '1 day')::timestamp AT TIME ZONE $3)::int AS outbound
-         FROM generate_series($1::date, $2::date, interval '1 day') d ORDER BY d`, [prev.from, prev.to, tz])).rows : null;
+        `SELECT to_char(d, 'YYYY-MM-DD') AS day, coalesce(x.inbound, 0)::int AS inbound, coalesce(x.outbound, 0)::int AS outbound
+         FROM generate_series($1::date, $2::date, interval '1 day') d
+         LEFT JOIN (SELECT (m.created_at AT TIME ZONE $5)::date AS day, count(*) FILTER (WHERE m.direction = 'in') AS inbound,
+                           count(*) FILTER (WHERE m.direction = 'out') AS outbound
+                    FROM messages m WHERE m.created_at >= $3 AND m.created_at < $4 GROUP BY 1) x ON x.day = d::date
+         ORDER BY d`, [prev.from, prev.to, prev.start, prev.end, tz])).rows : null;
       return {
         period: { from: range.from, to: range.to, timeZone: tz, days: range.days },
         previousDaily,
         // Messages through the sandbox are test traffic, not real customers: the page labels them as such.
-        dataSource: channels.length === 0 ? 'none' : sandbox ? 'sandbox' : channels.some((c) => c.provider === 'sandbox') ? 'mixed' : 'live',
+        dataSource: basis.length === 0 ? 'none' : sandbox ? 'sandbox' : basis.some((c) => c.provider === 'sandbox') ? 'mixed' : 'live',
         totals, previous, daily: series, responseBuckets,
         agents: agents.map((a, i) => ({ membershipId: a.membership_id, name: a.name, label: a.name ?? `#${i + 1}`, replies: a.replies,
           conversations: a.conversations, medianFirstReplyMinutes: a.median, resolved: a.resolved })),
@@ -194,7 +220,7 @@ export class DashboardService {
               count(*) FILTER (WHERE direction = 'out' AND status = 'delivered')::int AS delivered,
               count(*) FILTER (WHERE direction = 'out' AND status = 'read')::int AS read,
               count(*) FILTER (WHERE direction = 'out' AND status = 'failed')::int AS failed
-       FROM messages WHERE created_at >= $1 AND created_at < $2`, [start, end])).rows[0]!;
+       FROM messages m WHERE m.created_at >= $1 AND m.created_at < $2 AND ${NOT_RETRIED}`, [start, end])).rows[0]!;
     const c = (await tx.query<{ started: number; replied: number; median: number | null; resolved: number }>(
       `SELECT count(*)::int AS started, count(fr.at)::int AS replied,
               round((percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM fr.at - c.first_inbound_at)) / 60)::numeric, 1)::float AS median,
@@ -249,23 +275,23 @@ export class DashboardService {
       const statusSet = q.status === 'pending' ? ['queued', 'submitting', 'uncertain'] : q.status ? [q.status] : null;
       const seeAll = actor.permissions.has('inbox.read_all');
       const showNames = actor.permissions.has('members.read');
-      const params: unknown[] = [range.start, range.end, q.direction ?? null, statusSet, q.agent ?? null, q.channel ?? null, seeAll, actor.membershipId];
+      const cp = q.country ? countryPatterns(q.country) : null;
+      const params: unknown[] = [range.start, range.end, q.direction ?? null, statusSet, q.agent ?? null, q.channel ?? null, seeAll, actor.membershipId,
+        cp?.patterns ?? null, cp?.negate ?? false];
+      const limit = q.limit ?? 50;
       const rows = (await tx.query<{ id: string; conversation_id: string; created_at: Date; direction: string; status: string; kind: string;
         pricing_category: string | null; failure_kind: string | null; prefix: string | null; channel: string; channel_label: string; sender: string | null; sender_id: string | null }>(
         `SELECT m.id, m.conversation_id, m.created_at, m.direction, m.status, m.kind, m.pricing_category, m.failure_kind,
                 left(ci.value, 3) AS prefix, c.connection_id AS channel, cc.label AS channel_label,
-                CASE WHEN $9 THEN u.full_name END AS sender, m.sent_by_membership_id AS sender_id
-         FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN channel_connections cc ON cc.id = c.connection_id
-         LEFT JOIN LATERAL (SELECT value FROM contact_identifiers x WHERE x.contact_id = c.contact_id AND x.kind = 'whatsapp' ORDER BY x.created_at LIMIT 1) ci ON true
+                CASE WHEN $11 THEN u.full_name END AS sender, m.sent_by_membership_id AS sender_id
+         FROM ${RECORDS_FROM} JOIN channel_connections cc ON cc.id = c.connection_id
          LEFT JOIN memberships ms ON ms.id = m.sent_by_membership_id LEFT JOIN users u ON u.id = ms.user_id
-         WHERE ${RECORDS_WHERE} AND ${RECORDS_VISIBLE} AND ($10::uuid IS NULL OR m.id < $10)
-         ORDER BY m.id DESC LIMIT $11`, [...params, showNames, q.before ?? null, q.country ? 500 : (q.limit ?? 50) + 1])).rows;
-      // Country is derived from the number, so it is filtered here (the number itself never leaves the server).
-      const filtered = q.country ? rows.filter((r) => countryOf(r.prefix) === q.country) : rows;
-      const limit = q.limit ?? 50;
-      const page = filtered.slice(0, limit);
+         WHERE ${RECORDS_WHERE} AND ${RECORDS_VISIBLE} AND ${RECORDS_COUNTRY}
+           AND ($12::uuid IS NULL OR (m.created_at, m.id) < (SELECT b.created_at, b.id FROM messages b WHERE b.id = $12))
+         ORDER BY m.created_at DESC, m.id DESC LIMIT $13`, [...params, showNames, q.before ?? null, limit + 1])).rows;
+      const page = rows.slice(0, limit);
       const hidden = seeAll ? 0 : Number((await tx.query<{ n: string }>(
-        `SELECT count(*) AS n FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE ${RECORDS_WHERE} AND NOT ${RECORDS_VISIBLE}`, params)).rows[0]!.n);
+        `SELECT count(*) AS n FROM ${RECORDS_FROM} WHERE ${RECORDS_WHERE} AND NOT ${RECORDS_VISIBLE} AND ${RECORDS_COUNTRY}`, params)).rows[0]!.n);
       return {
         period: { from: range.from, to: range.to, timeZone: tz },
         records: page.map((r) => ({
@@ -273,7 +299,7 @@ export class DashboardService {
           category: r.pricing_category, failure: r.failure_kind, country: countryOf(r.prefix), channelId: r.channel, channelLabel: r.channel_label,
           sender: r.sender_id ? (r.sender ?? 'member') : null,
         })),
-        next: filtered.length > limit ? page[page.length - 1]!.id : null,
+        next: rows.length > limit ? page[page.length - 1]!.id : null,
         hiddenOutsideYourConversations: hidden,
       };
     });
@@ -281,9 +307,11 @@ export class DashboardService {
 }
 
 /**
- * The first reply to a conversation's first customer message: any outgoing message after it that is not a campaign
- * (a person, an automation, the AI or the public API). `mid` is the person who sent it, if a person did.
+ * The first reply to a conversation's first customer message, with the same rule as the Outcomes report: the first
+ * message a team member sent after it, not a campaign, and not one that failed. Automations, the AI and away messages
+ * do not count (review of the dashboards, finding 4). `mid` is the team member who sent it.
  */
 const FIRST_REPLY = `SELECT m.created_at AS at, m.sent_by_membership_id AS mid FROM messages m
-  WHERE m.conversation_id = c.id AND m.direction = 'out' AND m.campaign_id IS NULL AND m.created_at >= c.first_inbound_at
+  WHERE m.conversation_id = c.id AND m.direction = 'out' AND m.campaign_id IS NULL AND m.sent_by_membership_id IS NOT NULL
+    AND m.status <> 'failed' AND m.created_at >= c.first_inbound_at
   ORDER BY m.created_at LIMIT 1`;

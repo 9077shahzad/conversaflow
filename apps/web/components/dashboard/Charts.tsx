@@ -7,12 +7,17 @@ import type { Locale } from '@/lib/i18n';
  * page's security policy forbids inline styles). Every point and bar can be reached by keyboard and selected, every
  * chart can be shown as a table, and nothing animates. Time runs left to right in both languages.
  */
+/** Decimal places of currencies whose minor unit is not a hundredth. */
+const MINOR_UNITS: Record<string, number> = { KWD: 3, BHD: 3, OMR: 3, JOD: 3, IQD: 3, LYD: 3, TND: 3, JPY: 0, KRW: 0 };
+
 export function useFormat(locale: Locale) {
   const tag = locale === 'ar' ? 'ar-AE-u-nu-latn' : 'en-GB';
   const n = (v: number) => new Intl.NumberFormat(tag).format(v);
   const pct = (v: number | null) => (v === null ? '—' : `${new Intl.NumberFormat(tag, { maximumFractionDigits: 1 }).format(v)}%`);
-  const money = (minor: number, currency: string) =>
-    new Intl.NumberFormat(tag, { style: 'currency', currency, currencyDisplay: 'code', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(minor / 100);
+  const money = (minor: number, currency: string) => {
+    const d = MINOR_UNITS[currency] ?? 2;   // KWD, BHD, OMR and JOD have 3 decimal places (review finding 2)
+    return new Intl.NumberFormat(tag, { style: 'currency', currency, currencyDisplay: 'code', minimumFractionDigits: d, maximumFractionDigits: d }).format(minor / 10 ** d);
+  };
   const day = (iso: string) => new Intl.DateTimeFormat(locale === 'ar' ? 'ar-AE-u-nu-latn-ca-gregory' : 'en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${iso}T00:00:00Z`));
   const minutes = (v: number | null, m: string, h: string) => {
     if (v === null) return '—';
@@ -198,7 +203,17 @@ export function ColumnPairs({ labels, a, b, format, label, tableHeader }: {
   return (
     <figure className="mt-3">
       <div ref={box} className="w-full">
-      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="block max-w-full" role="group" aria-label={label} direction="ltr">
+      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="block max-w-full" role="group" aria-label={label} direction="ltr"
+        onKeyDown={(e) => {
+          // One tab stop for the chart; arrow keys, Home and End move between days (review, keyboard finding).
+          const cur = active ?? 0;
+          const next = e.key === 'ArrowRight' ? Math.min(labels.length - 1, cur + 1) : e.key === 'ArrowLeft' ? Math.max(0, cur - 1)
+            : e.key === 'Home' ? 0 : e.key === 'End' ? labels.length - 1 : null;
+          if (next === null) return;
+          e.preventDefault();
+          setActive(next);
+          (e.currentTarget.querySelector(`[data-col="${next}"]`) as SVGGElement | null)?.focus();
+        }}>
         {[0, 0.5, 1].map((f) => (
           <g key={f}>
             <line x1={L} x2={W - R} y1={y(f * max)} y2={y(f * max)} className="stroke-slate-200" strokeWidth={1} />
@@ -209,7 +224,7 @@ export function ColumnPairs({ labels, a, b, format, label, tableHeader }: {
           const cx = L + slot * i + slot / 2;
           const va = a.values[i] ?? 0, vb = b.values[i] ?? 0;
           return (
-            <g key={l} tabIndex={0} role="img" aria-label={`${l}: ${a.label} ${format(va)}, ${b.label} ${format(vb)}`}
+            <g key={l} data-col={i} tabIndex={i === (active ?? 0) ? 0 : -1} role="img" aria-label={`${l}: ${a.label} ${format(va)}, ${b.label} ${format(vb)}`}
               onFocus={() => setActive(i)} onMouseEnter={() => setActive(i)} className="outline-none focus-visible:[&>rect]:stroke-navy">
               <rect x={cx - bw - 1} y={y(va)} width={bw} height={H - B - y(va)} className={FILL[a.tone]} />
               <rect x={cx + 1} y={y(vb)} width={bw} height={H - B - y(vb)} className={FILL[b.tone]} />

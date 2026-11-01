@@ -6,6 +6,7 @@ import { parse } from '../core/validate';
 import { isUuid } from './members.service';
 import { partnerKeySealer } from './dialog360';
 import { partnerFundingCheck } from './credits';
+import { Day } from './dashboard';
 
 export type StaffRole = 'platform_owner' | 'support_agent';
 export interface StaffActor {
@@ -102,9 +103,11 @@ export class PlatformService {
   }
 
   /** Whether this session is platform staff (for showing the platform pages); no error for everyone else. */
-  async staffRole(session: AuthSession): Promise<{ role: StaffRole | null }> {
+  async staffRole(session: AuthSession): Promise<{ role: StaffRole | null; paymentsLive: boolean }> {
     const row = (await this.db.query<{ role: StaffRole | null }>('SELECT role FROM platform_session_staff($1)', [session.token])).rows[0];
-    return { role: row?.role ?? null };
+    // Payments are never live in this build: the configuration refuses any Stripe key that is not a test key, and
+    // production refuses prepaid messaging until launch approval. The platform page shows its test-mode notice from this.
+    return { role: row?.role ?? null, paymentsLive: false };
   }
 
   private run<T>(staff: StaffActor, fn: Parameters<typeof withContext<T>>[2]) {
@@ -261,10 +264,12 @@ export class PlatformService {
    * margin, customer payments, unspent credit, partner funding and open alerts.
    */
   async dashboard(staff: StaffActor, query: unknown) {
-    const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-    const q = parse(z.object({ from: day.optional(), to: day.optional() }).strict(), query ?? {});
+    const q = parse(z.object({ from: Day.optional(), to: Day.optional() }).strict(), query ?? {});
     const to = q.to ?? new Date().toISOString().slice(0, 10);
     const from = q.from ?? new Date(Date.parse(`${to}T00:00:00Z`) - 29 * 86_400_000).toISOString().slice(0, 10);
+    // The same limit as the company dashboard, checked here so a bad period is a clear 400 (review, low findings).
+    const days = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000 + 1;
+    if (days < 1 || days > 366) throw Errors.badRequest('Choose a period of 1 to 366 days.');
     const figures = await this.run(staff, async (tx) => (await tx.query<{ d: Record<string, unknown> }>('SELECT platform_dashboard($1, $2, $3) AS d',
       [staff.token, from, to])).rows[0]!.d);
     const partner = await this.partnerOverview(staff);

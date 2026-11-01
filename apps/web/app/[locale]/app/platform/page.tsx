@@ -56,7 +56,8 @@ export default function PlatformDashboard() {
       setCurrency((c) => c || x.messaging[0]?.currency || x.messagingByDay[0]?.currency || 'SAR');
     } catch (e) { setError(e instanceof ApiError && (e.status === 400 || e.status === 409) ? d.badPeriod : d.error); }
   }, [d.badPeriod, d.error]);
-  useEffect(() => { api<{ role: string | null }>('/v1/platform/me').then((r) => setRole(r.role)).catch(() => setRole(null)); }, []);
+  const [paymentsLive, setPaymentsLive] = useState(false);
+  useEffect(() => { api<{ role: string | null; paymentsLive?: boolean }>('/v1/platform/me').then((r) => { setRole(r.role); setPaymentsLive(r.paymentsLive === true); }).catch(() => setRole(null)); }, []);
   useEffect(() => { if (role === 'platform_owner') void load({}); }, [role, load]);
   useEffect(() => {
     if (!company) return;
@@ -78,7 +79,7 @@ export default function PlatformDashboard() {
   const byDay = new Map((data?.messagingByDay ?? []).filter((x) => x.currency === currency).map((x) => [x.day, x]));
   return (
     <Shell d={d}>
-      <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-slate-900" role="note">{d.pTestMode}</p>
+      {!paymentsLive && <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-slate-900" role="note">{d.pTestMode}</p>}
       <form className="mt-4 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-3" onSubmit={(e) => { e.preventDefault(); void load({ from, to }); }}>
         <div>
           <label htmlFor="p-from" className="block text-sm font-medium text-slate-900">{d.from}</label>

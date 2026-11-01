@@ -31,6 +31,9 @@ export function Records({ locale, d, drill, onClose }: { locale: Locale; d: Insi
       setRows((r) => (before ? [...r, ...p.records] : p.records)); setNext(p.next); setHidden(p.hiddenOutsideYourConversations);
     } catch { setError(true); } finally { setLoading(false); }
   };
+  // Where focus was when the list opened (a chart bar or row), so closing it puts focus back there (review, keyboard).
+  const [opener] = useState<HTMLElement | null>(() => (typeof document === 'undefined' ? null : (document.activeElement as HTMLElement | null)));
+  const close = () => { onClose(); if (opener && opener.isConnected) opener.focus(); };
   useEffect(() => { void load(); heading.current?.focus(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [JSON.stringify(drill.query)]);
 
   const time = (iso: string) => new Intl.DateTimeFormat(locale === 'ar' ? 'ar-AE-u-nu-latn-ca-gregory' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
@@ -41,7 +44,7 @@ export function Records({ locale, d, drill, onClose }: { locale: Locale; d: Insi
           <h2 id="records-h" ref={heading} tabIndex={-1} className="text-lg font-semibold text-navy outline-none">{d.recordsTitle}</h2>
           <p className="text-sm text-slate-700">{d.recordsFor.replace('{what}', drill.what)}</p>
         </div>
-        <button type="button" className="btn-secondary" onClick={onClose}>{d.close}</button>
+        <button type="button" className="btn-secondary" onClick={close}>{d.close}</button>
       </div>
       {error && <p role="alert" className="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">{d.error}</p>}
       {!error && !loading && rows.length === 0 && <p className="mt-3 text-sm text-slate-700">{d.noRecords}</p>}

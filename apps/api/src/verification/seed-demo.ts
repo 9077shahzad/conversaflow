@@ -32,6 +32,16 @@ async function main() {
   // Demo data is applied as it is recorded, so the seed can build on it straight away (review of AX-3, L5).
   const config = loadConfig({ ...process.env, INBOUND_APPLY: 'request' });
   if (config.NODE_ENV === 'production') throw new Error('Refusing to seed demo data in production.');
+  // The seed backdates rows with row security relaxed and can add a platform owner, so it runs only when asked for
+  // explicitly and only against a database on this machine or a .test/.localhost host (review of the dashboards, finding 6).
+  if (process.env.ALLOW_DEMO_SEED !== '1') throw new Error('Refusing to seed demo data: set ALLOW_DEMO_SEED=1 to confirm.');
+  for (const url of [process.env.DATABASE_URL, process.env.DATABASE_NOTIFY_URL]) {
+    if (!url) continue;
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+    if (!['localhost', '127.0.0.1', '::1'].includes(host) && !/\.(localhost|test)$/.test(host)) {
+      throw new Error(`Refusing to seed demo data on database host ${host}: only local or .test hosts are allowed.`);
+    }
+  }
   const mailer = new MemoryMailer();
   const deps = buildDeps(config, { mailer });
   const notify = createPool(process.env.DATABASE_NOTIFY_URL!, 1);
@@ -286,7 +296,11 @@ async function main() {
       console.error('sample history skipped:', err instanceof Error ? err.message : err);
     } finally { c.release(); await ownerPool.end(); }
 
-    // A platform owner for the platform dashboard (authenticator set up through the real service).
+  }
+
+  // A platform owner for the platform dashboard (authenticator set up through the real service), only when asked for:
+  // it can see every company's figures.
+  if (process.env.DATABASE_URL && sandbox && process.env.DEMO_SEED_PLATFORM_OWNER === '1') {
     const staffEmail = `platform.${suffix}@demo.example`;
     const s = await person(staffEmail, 'Platform Owner (Demo)', 'en');
     const { secret } = await auth.beginTotpSetup(s);
