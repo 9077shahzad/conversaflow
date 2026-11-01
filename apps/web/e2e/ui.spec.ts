@@ -328,9 +328,10 @@ test('without WebGL the activity view is the standard chart: 3D cannot be chosen
   expect(await page.locator('canvas').count()).toBe(0);
   await activity.getByRole('button', { disabled: false }).filter({ hasText: /\d/ }).first().click();
   await expect(page.getByRole('heading', { level: 2, name: 'Messages behind this figure' })).toBeVisible();
-  // Three.js is a separate chunk loaded only for the 3D view.
-  const sizes = await Promise.all(scripts.map(async (u) => (await page.request.get(u)).text().then((t) => (t.includes('WebGLRenderer') ? u : null))));
-  expect(sizes.filter(Boolean)).toEqual([]);
+  // Three.js is a separate chunk loaded only for the 3D view: no script on this page carries its version marker
+  // (the page's own code names the renderer, so the marker is the library's REVISION string, "171").
+  const loaded = await Promise.all(scripts.map(async (u) => ((await (await page.request.get(u)).text()).includes('"171"') ? u : null)));
+  expect(loaded.filter(Boolean)).toEqual([]);
   await b.close();
 });
 
