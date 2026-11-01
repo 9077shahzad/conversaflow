@@ -93,4 +93,5 @@ Two rounds by a separate reviewer who read the code only.
   - The platform overview opens for a platform owner signed in with an authenticator.
 - **Screenshots:** `docs/reports/evidence/ui/{en,ar}-{desktop,tablet,mobile}-insights.png`,
   `*-insights-3d.png` and `*-platform.png`.
-- **Clean checkout:** `docs/reports/evidence/clean-checkout-<commit>.txt`.
+- **Clean checkout of 216fc90:** all checks passed from a fresh copy (721 of 721 API tests, 23 of 23 browser checks);
+  `docs/reports/evidence/clean-checkout-216fc90.txt`.
